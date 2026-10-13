@@ -292,11 +292,15 @@ moa:
   default_preset: gold
   presets:
     gold:
-      provider: zai
-      model: glm-5.3
+      reference_models: [{provider: nous, model: hermes-4}]
+      aggregator:
+        provider: zai
+        model: glm-5.3
     silver:
-      provider: nous
-      model: hermes-4
+      reference_models: [{provider: zai, model: glm-5.3}]
+      aggregator:
+        provider: nous
+        model: hermes-4
 """)
 
     bad = preview_changes(cfg, [RouteEdit("moa.preset.gold", {"provider": "zai", "model": ""})])
@@ -304,9 +308,10 @@ moa:
     assert "cannot remove preset 'gold'" in bad.rejected[0]
     assert bad.changes == ()  # the whole edit set is refused — nothing partial
 
-    # A preset NOT referenced by the default is removable.
+    # Clearing a required aggregator is invalid even in a non-default preset.
     ok = preview_changes(cfg, [RouteEdit("moa.preset.silver", {"provider": "nous", "model": ""})])
-    assert ok.clean
+    assert not ok.clean
+    assert "required aggregator" in ok.rejected[0]
     # And replacing (not removing) the referenced default preset is fine.
     swap = preview_changes(cfg, [RouteEdit("moa.preset.gold", {"provider": "nous", "model": "hermes-4"})])
     assert swap.clean

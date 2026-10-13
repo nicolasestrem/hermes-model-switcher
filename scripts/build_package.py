@@ -38,7 +38,7 @@ NAME = "hermes-model-switcher"
 COPY_FILES = ["plugin.yaml", "__init__.py", "LICENSE", "README.md"]
 PY_MODULES = ["hermes_adapter.py", "route_inventory.py"]
 PY_PACKAGE = "model_switcher"
-DASHBOARD = ["manifest.json", "plugin_api.py"]
+DASHBOARD = ["manifest.json", "plugin_api.py", "model_catalog.py"]
 BUNDLE = "dist/index.js"  # built by `npm run build`
 STYLES = "dist/style.css"
 

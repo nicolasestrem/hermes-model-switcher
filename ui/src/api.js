@@ -39,6 +39,10 @@ async function request(path, opts = {}) {
   try {
     res = await transport()(BASE + path, {
       ...rest,
+      // GETs must never be answered from the browser HTTP cache: a cached
+      // /state or /models would show stale routes after an apply. Standard
+      // RequestInit; the SDK transport passes it through.
+      cache: "no-store",
       headers: { "Content-Type": "application/json", ...(headers || {}) },
     });
   } catch (e) {
@@ -91,11 +95,30 @@ function asPresent(v) {
   return v === undefined || v === null || v === "" ? null : v;
 }
 
+// Provider-aware model catalog query. The endpoint is scoped to a provider (and
+// optionally a profile) so the picker never offers models that cannot be routed
+// there. `refresh` forces a live re-fetch instead of a cached catalog.
+// Exported so the URL contract is unit-testable without a browser.
+export function modelsUrl({ provider, profileId, refresh } = {}) {
+  const qs = new URLSearchParams();
+  if (provider) qs.set("provider", provider);
+  if (profileId) qs.set("profileId", profileId);
+  if (refresh) qs.set("refresh", "1");
+  const s = qs.toString();
+  return "/models" + (s ? "?" + s : "");
+}
+
 export const api = {
   loadState: () => request("/state"),
   preview: (changes) => request("/preview", { method: "POST", body: JSON.stringify({ changes }) }),
   savePreset: (preset) => request("/presets", { method: "POST", body: JSON.stringify(preset) }),
+  // `allowUnknownCost` is the explicit, checked acknowledgement for the current
+  // review; the backend enforces the cost-approval policy, so the UI never
+  // implies an unknown-cost route is free by omitting the field.
   apply: (payload) => request("/operations", { method: "POST", body: JSON.stringify(payload) }),
   getOperation: (id) => request("/operations/" + encodeURIComponent(id)),
   undo: (id) => request("/operations/" + encodeURIComponent(id) + "/undo", { method: "POST" }),
+  // GET /models?provider=&profileId=&refresh=1 →
+  // { ok:true, provider, models:[{id,name}], fetchedAt, source, stale, error }
+  getModels: (opts) => request(modelsUrl(opts)),
 };

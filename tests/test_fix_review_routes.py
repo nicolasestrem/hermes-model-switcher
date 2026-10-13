@@ -134,11 +134,12 @@ def test_specialist_stt_plain_route_previews_clean():
     assert preview.clean, preview.rejected
 
 
-def test_specialist_embedding_plain_route_previews_clean():
+def test_unsupported_specialist_embedding_is_explicitly_read_only():
     cfg = copy.deepcopy(MAINE_CFG)
     preview = ri.preview_changes(cfg, [ri.RouteEdit(
         "specialist.embedding", {"provider": "openai", "model": "text-embedding-3-small"})])
-    assert preview.clean, preview.rejected
+    assert not preview.clean
+    assert any("read-only" in reason for reason in preview.rejected)
 
 
 def test_judge_plain_chat_still_rejected():
