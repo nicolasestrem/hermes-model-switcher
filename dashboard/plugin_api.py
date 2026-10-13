@@ -1252,7 +1252,7 @@ def state():
 
 @router.get("/models")
 def models(response: Response, provider: str = "",
-                 profileId: Optional[str] = None, refresh: bool = False):
+          profileId: Optional[str] = None, refresh: bool = False):
     """Provider-aware model catalog — a thin, truthful passthrough.
 
     Shape: ``{ok, provider, models:[{id,name}], fetchedAt, source, stale,
@@ -1482,6 +1482,7 @@ def _identity_dict(ident) -> Dict[str, Any]:
 
 
 def _evict_previews() -> None:
+    """Callers MUST hold ``_LOCK`` (all current callers do)."""
     if len(_PREVIEW_CACHE) <= _PREVIEW_MAX:
         return
     for k in list(_PREVIEW_CACHE)[:-_PREVIEW_MAX]:
@@ -1489,6 +1490,8 @@ def _evict_previews() -> None:
 
 
 def _get_preview_entry(preview_id: str) -> Dict[str, Any]:
+    """Callers MUST hold ``_LOCK`` (all current callers do); the cache is
+    process-global and handlers now run on FastAPI's threadpool."""
     entry = _PREVIEW_CACHE.get(preview_id)
     if entry is None:
         raise HTTPException(status_code=404, detail={
@@ -1723,7 +1726,8 @@ def _resolve_apply(body: ApplyIn, profiles: Dict[str, Dict[str, Any]]
             raise HTTPException(status_code=409, detail={
                 "ok": False, "blocked": True,
                 "error": "apply blocked: the preview contained blocked changes",
-                "reasons": [str(b.get("reason") or b) for b in entry["blocked"]]})
+                "reasons": [str(b.get("reason") or "blocked change")
+                            for b in entry["blocked"]]})
         prepared = copy.deepcopy(entry["targets"])
     if body.presetId:
         store = _preset_store()
