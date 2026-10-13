@@ -40,6 +40,17 @@ test("a string detail does not throw and falls back to the status", () => {
   expect(errorMessage({ detail: "Not Found", error: "flat error" }, 404)).toBe("flat error");
 });
 
+test("non-scalar error and reasons cannot print [object Object]", () => {
+  // These shapes reached the visible status line as literal "[object Object]"
+  // before: the ternary kept an object and the template string stringified it.
+  expect(errorMessage({ error: { nested: true } }, 500)).toBe("HTTP 500");
+  expect(errorMessage({ error: "boom", reasons: [{ a: 1 }] }, 500)).toBe("boom");
+  expect(errorMessage({ detail: { error: { a: 1 }, reasons: { b: 2 } } }, 409)).toBe("HTTP 409");
+  // scalars still render, including a numeric or boolean reason
+  expect(errorMessage({ error: "boom", reasons: [0, "real reason", null, {}, false] }, 400))
+    .toBe("boom — 0; real reason; false");
+});
+
 test("a null/absent body falls back to the status and never says ok", () => {
   expect(errorMessage(null, 502)).toBe("HTTP 502");
   expect(errorMessage(undefined, 401)).toBe("HTTP 401");

@@ -70,13 +70,25 @@ async function request(path, opts = {}) {
 // actionable sentence and a bare "HTTP 409".
 export function errorMessage(body, status) {
   const detail = body && typeof body.detail === "object" && body.detail !== null ? body.detail : null;
-  const message = (detail && detail.error) || (body && body.error) || null;
+  const message = asText(detail && detail.error) || asText(body && body.error) || null;
   // `reasons` may arrive as a slug list (array) or, unexpectedly, a plain
   // string — `.join` on a string would throw inside the error path itself.
-  const raw = (detail && detail.reasons) || (body && body.reasons);
-  const reasons = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  const raw = asPresent(detail && detail.reasons) || asPresent(body && body.reasons);
+  const reasons = (Array.isArray(raw) ? raw : raw ? [raw] : []).map(asText).filter(Boolean);
   if (!message) return "HTTP " + status;
   return reasons.length ? `${message} — ${reasons.join("; ")}` : message;
+}
+
+// Only scalars are displayable. Ternaries alone are not enough: an object lands
+// in the middle of a template string and the user reads "[object Object]".
+function asText(v) {
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  return null;
+}
+
+function asPresent(v) {
+  return v === undefined || v === null || v === "" ? null : v;
 }
 
 export const api = {
