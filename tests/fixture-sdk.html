@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Model Switcher — Dashboard SDK fixture</title>
+<style>
+  body { background: #16181d; color: #e6e8ee; font-family: system-ui, sans-serif; margin: 0; }
+  button, input, select { font: inherit; color: inherit; }
+  button { background: #23262d; border: 1px solid #2c3038; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  input, select { background: #1b1e24; border: 1px solid #2c3038; border-radius: 4px; padding: 3px 6px; }
+  td, th { padding: 4px; }
+</style>
+<script>window.__mockApi = { failState: false, failReadback: false, failUndo: false, failSavePreset: false, failStateHttp: false };</script>
+<script src="tests/mock-api.js"></script>
+</head>
+<body>
+  <!--
+    Dashboard-contract fixture: same globals the real shell provides
+    (window.__HERMES_PLUGIN_SDK__ + window.__HERMES_PLUGINS__) and NO
+    globalThis.React/ReactDOM. The tab pane is host-owned — there is no
+    data-plugin-root element, because a dashboard plugin must not self-mount.
+  -->
+  <main data-testid="dashboard-main">
+    <div id="tab-pane"></div>
+  </main>
+  <script src="tests/vendor-sdk.js"></script>
+  <script src="dashboard/dist/index.js"></script>
+  <script>
+    window.__hostMounted = false;
+    window.__hostMountError = null;
+    try {
+      window.__mountRegisteredTab("hermes-model-switcher", document.getElementById("tab-pane"));
+      window.__hostMounted = true;
+    } catch (e) {
+      window.__hostMountError = String((e && e.message) || e);
+    }
+  </script>
+</body>
+</html>

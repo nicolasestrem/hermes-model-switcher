@@ -522,11 +522,30 @@ export function mount(el) {
   createRoot(el).render(<App />);
 }
 
-function autoMount() {
-  const el = document.querySelector('[data-plugin-root="hermes-model-switcher"]');
-  if (el) mount(el);
-}
-if (typeof document !== "undefined") {
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", autoMount);
-  else autoMount();
+// --- host wiring: the Dashboard contract first, legacy self-mount second -----
+//
+// Dashboard (docs: extending-the-dashboard, "Load lifecycle"): the host exposes
+// window.__HERMES_PLUGIN_SDK__ / window.__HERMES_PLUGINS__, appends this file with
+// a plain <script>, and expects the IIFE to synchronously register a component —
+// the HOST mounts it inside the tab. A dashboard plugin must never create its own
+// root: there is no ReactDOM on the SDK and no host-provided root element.
+// Registering at module scope is inside the host's 2s registration window.
+//
+// Standalone/legacy host (no registry present — e.g. this repo's Playwright
+// harness, which sets globalThis.React/ReactDOM): self-mount into our own element.
+export const PLUGIN_NAME = "hermes-model-switcher";
+
+const HOST = typeof window !== "undefined" ? window.__HERMES_PLUGINS__ : undefined;
+
+if (HOST && typeof HOST.register === "function") {
+  HOST.register(PLUGIN_NAME, App);
+} else {
+  function autoMount() {
+    const el = document.querySelector('[data-plugin-root="hermes-model-switcher"]');
+    if (el) mount(el);
+  }
+  if (typeof document !== "undefined") {
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", autoMount);
+    else autoMount();
+  }
 }
