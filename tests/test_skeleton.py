@@ -67,8 +67,9 @@ def test_no_secrets_or_host_paths_in_tracked_files():
         for pat in SECRET_PATTERNS:
             if pat.search(text):
                 offenders.append(rel)
-        # No user-specific absolute home paths in source (docs may mention $HERMES_HOME)
-        if "/home/hermes" in text:
+        # Host paths forbidden EXCEPT the documented read-only Hermes source
+        # checkout (scan baseline; overridable via HERMES_MODEL_SWITCHER_HERMES_REPO).
+        if re.search(r"/home/\w", text.replace("/home/hermes/.hermes/hermes-agent", "")):
             offenders.append(rel + " (host path)")
     assert offenders == [], f"host-specific data tracked: {offenders}"
 

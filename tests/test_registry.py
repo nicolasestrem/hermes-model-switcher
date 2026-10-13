@@ -16,7 +16,8 @@ from model_switcher.registry import (
 
 REPO = Path(__file__).resolve().parent.parent
 HERMES_REPO = Path("/home/hermes/.hermes/hermes-agent")
-PLUGINS_DIR = Path("/home/hermes/.hermes/profiles/brian/plugins")
+# Read-only scan fixture; resolved from the environment home, not hardcoded.
+PLUGINS_DIR = Path.home() / ".hermes" / "profiles" / "brian" / "plugins"
 
 
 @pytest.fixture(scope="module")
