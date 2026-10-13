@@ -9,6 +9,7 @@ const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/cs
 createServer(async (req, res) => {
   let p = decodeURIComponent(new URL(req.url, "http://x").pathname);
   if (p === "/" || p === "/fixture.html") p = "/tests/fixture.html";
+  if (p === "/fixture-sdk.html") p = "/tests/fixture-sdk.html";
   const file = normalize(join(ROOT, p));
   if (!file.startsWith(ROOT)) { res.writeHead(403); return res.end(); }
   try {

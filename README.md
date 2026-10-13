@@ -28,6 +28,27 @@ outside the supported in-process Dashboard path.
    npm run build      # produces dashboard/dist/index.js and ui/dist/plugin.js
    ```
 
+3b. Frontend host contract — the Dashboard entry is a plain IIFE that hands a
+   React component to the host registry, exactly as documented in Hermes'
+   *Extending the Dashboard* guide:
+
+   - React comes from `window.__HERMES_PLUGIN_SDK__.React`. React is never
+     bundled, and **the Dashboard does not set `globalThis.React` /
+     `globalThis.ReactDOM`** — a bundle that destructures them dies on load with
+     `Cannot destructure property 'useState' of 'q' as it is undefined`.
+   - The entry registers synchronously and must not mount itself:
+     `window.__HERMES_PLUGINS__.register("hermes-model-switcher", App)`. The
+     registered name must equal `dashboard/manifest.json`'s `name`, and the host
+     renders the component inside the tab. There is no ReactDOM on the SDK and no
+     host-provided root element.
+   - `ui/dist/plugin.js` (the standalone layout) keeps a self-mount fallback for
+     hosts that provide `globalThis.React`/`ReactDOM` instead — that is what the
+     local Playwright fixture uses.
+
+   Both contracts are covered by `npm test`: `tests/fixture-sdk.html` reproduces
+   the real shell (SDK + registry globals, no `globalThis.React`) and loads the
+   shipped `dashboard/dist/index.js`; `tests/fixture.html` covers the legacy path.
+
 4. Enable `hermes-model-switcher` in the Dashboard plugin settings and reload.
    The backend mounts under `/api/plugins/hermes-model-switcher/`.
 4b. Local (never-live) install of the assembled package into a LAB Hermes
