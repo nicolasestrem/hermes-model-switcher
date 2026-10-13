@@ -27,8 +27,10 @@ if [ "$TARGET_HOME" = "$LIVE_HOME" ] && [ "${HERMES_MODEL_SWITCHER_ALLOW_LIVE:-0
 fi
 
 PKG="${2:-$REPO/dist-package/hermes-model-switcher}"
+# ``__init__.py`` is part of the loadable layout, not a nicety: Hermes rejects a
+# plugin.yaml with no __init__.py/desktop/plugin.js/plugin.json beside it.
 if [ ! -f "$PKG/dashboard/manifest.json" ] || [ ! -f "$PKG/dashboard/dist/index.js" ] \
-   || [ ! -f "$PKG/dashboard/plugin_api.py" ]; then
+   || [ ! -f "$PKG/dashboard/plugin_api.py" ] || [ ! -f "$PKG/__init__.py" ]; then
   echo "install-local: $PKG is not an assembled package (run: npm run build && python scripts/build_package.py)" >&2
   exit 1
 fi
