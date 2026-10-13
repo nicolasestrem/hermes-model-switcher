@@ -8,6 +8,11 @@ async function open(page) {
   await expect(page.getByRole("button", { name: /Fast lane/ })).toBeVisible();
 }
 
+// Computed colour of the visible status line — how the specs tell an explicit
+// error kind apart from a neutral announcement.
+const statusColor = (page) =>
+  page.getByTestId("visible-status").evaluate((el) => getComputedStyle(el).color);
+
 test("select → preview → save → apply → readback → undo", async ({ page }) => {
   await open(page);
 
@@ -183,6 +188,11 @@ test("failed read and ok:false are not success", async ({ page }) => {
   await expect(page.getByTestId("result-default")).toContainText("FAILED — readback not verified");
   await expect(page.getByTestId("result-research")).toContainText("FAILED — readback not verified");
   await expect(page.locator("[data-status='applied']")).toHaveCount(0);
+  // Severity is explicit, not substring-matched: this summary legitimately
+  // CONTAINS "failed" (per-profile statuses) but is not an app-level error, so
+  // it must stay neutral instead of being painted red.
+  await expect(page.getByTestId("live-status")).toContainText("finished");
+  expect(await statusColor(page)).toBe("rgb(154, 161, 173)"); // THEME.muted fallback
   // undo remains available for recovery, but guarded
   await expect(page.getByTestId("undo-button")).toBeDisabled();
   await page.getByTestId("undo-guard").check();
@@ -190,6 +200,38 @@ test("failed read and ok:false are not success", async ({ page }) => {
   await page.getByTestId("undo-button").click();
   await expect(page.getByTestId("live-status")).toContainText("Undo failed");
   await expect(page.locator("[data-status='restored']")).toHaveCount(0);
+});
+
+test("a blocked apply reports the engine's reason, not a bare status code", async ({ page }) => {
+  await page.goto(URL);
+  await page.evaluate(() => {
+    sessionStorage.setItem("hms-mock-flags", JSON.stringify({ blockedApply: true }));
+  });
+  await page.reload();
+  try {
+    await expect(page.getByRole("button", { name: /Fast lane/ })).toBeVisible();
+
+    await page.getByRole("button", { name: /Fast lane/ }).click();
+    await expect(page.getByTestId("preview-panel")).toBeVisible();
+    await page.getByTestId("apply-preset").click();
+
+    // FastAPI wraps the engine's refusal under `detail`; that sentence is the
+    // whole point — "HTTP 409" alone tells the user nothing to fix.
+    await expect(page.getByTestId("live-status")).toContainText("the canonical route was rejected");
+    await expect(page.getByTestId("live-status")).toContainText("Nous Portal is not connected");
+    // ...and it is on screen, not only in the screen-reader region: a refused
+    // apply that shows nothing is exactly how "the tab does nothing" happens.
+    await expect(page.getByTestId("visible-status")).toBeVisible();
+    await expect(page.getByTestId("visible-status")).toContainText("the canonical route was rejected");
+    // ...and it carries the explicit error kind (danger colour), not the muted
+    // neutral one — a refusal must not read like a routine announcement.
+    expect(await statusColor(page)).toBe("rgb(229, 83, 75)"); // THEME.danger fallback
+    await expect(page.getByTestId("operation-drawer")).toHaveCount(0);
+  } finally {
+    // Clear in `finally`: a failed assertion above used to leave the flag set
+    // and leak the blocked-apply behaviour into every later test.
+    await page.evaluate(() => sessionStorage.removeItem("hms-mock-flags"));
+  }
 });
 
 test("keyboard navigation and aria-live announcements", async ({ page }) => {
@@ -215,4 +257,101 @@ test("keyboard navigation and aria-live announcements", async ({ page }) => {
   // matrix filters are keyboard-reachable labelled controls
   await page.getByLabel("Filter by family").selectOption("main");
   await expect(page.getByRole("row", { name: /Default/ })).toBeVisible();
+});
+
+test("the table caption stays screen-reader-only without a host CSS class", async ({ page }) => {
+  // The host Dashboard does not define `.visually-hidden` (unlike the earlier
+  // fixtures), so a class-based hide rendered the caption as a stray visible
+  // line above the matrix. The hidden styles are inline now.
+  await open(page);
+  const cap = page.locator('[data-testid="matrix-scroll"] caption');
+  await expect(cap).toHaveCount(1);
+  const r = await cap.evaluate((el) => {
+    const b = el.getBoundingClientRect();
+    return { left: b.left, width: b.width, text: el.textContent.trim() };
+  });
+  expect(r.text).toContain("Model slots per profile");
+  expect(r.left).toBeLessThan(-1000); // off-screen, not a visible line
+  expect(r.width).toBeLessThanOrEqual(1);
+});
+
+// The host token must be in the HTML, not injected by an init script: an init
+// script can run before <html> exists (setProperty then silently does nothing)
+// and the plugin resolves the colour while the entry module loads.
+async function serveWithSurfaceToken(page, token) {
+  await page.route("**/fixture.html", async (route) => {
+    const res = await route.fetch();
+    const html = (await res.text()).replace("</head>", `<style>:root{--surface-color:${token}}</style></head>`);
+    await route.fulfill({ response: res, body: html });
+  });
+}
+
+test("a PARTIALLY transparent surface token is rejected too, not just a fully transparent one", async ({ page }) => {
+  // Codex review: only "transparent"/"rgba(0,0,0,0)" were rejected, so a 50%
+  // token was accepted and rows stayed visible under the sticky header.
+  await serveWithSurfaceToken(page, "rgba(255, 0, 0, 0.5)");
+  await page.goto(URL);
+  await expect(page.getByRole("button", { name: /Fast lane/ })).toBeVisible();
+
+  // confirm the token really reached the page, so the assertion below is not vacuous
+  const resolvedToken = await page.evaluate(() => {
+    const probe = document.createElement("div");
+    probe.style.cssText = "position:absolute;visibility:hidden;background:var(--surface-color, #16181d)";
+    document.body.appendChild(probe);
+    const v = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return v;
+  });
+  expect(resolvedToken).toBe("rgba(255, 0, 0, 0.5)");
+
+  const bg = await page.locator('[data-testid="matrix-scroll"] thead th').first()
+    .evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(bg).toBe("rgb(22, 24, 29)"); // solid fallback, not a 50%-alpha red
+});
+
+test("a fully opaque host surface token is still honoured", async ({ page }) => {
+  await serveWithSurfaceToken(page, "#223040");
+  await page.goto(URL);
+  await expect(page.getByRole("button", { name: /Fast lane/ })).toBeVisible();
+  const bg = await page.locator('[data-testid="matrix-scroll"] thead th').first()
+    .evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(bg).toBe("rgb(34, 48, 64)"); // the host's colour, not our fallback
+});
+
+test("the sticky header follows a host theme change without a reload", async ({ page }) => {
+  // Codex review: the surface colour was a module-scope snapshot, so a live
+  // light/dark switch left the header on the old colour (mismatched contrast).
+  await open(page);
+  const th = page.locator('[data-testid="matrix-scroll"] thead th').first();
+  expect(await th.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe("rgb(22, 24, 29)");
+
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty("--surface-color", "#223040");
+  });
+  await expect.poll(() => th.evaluate((el) => getComputedStyle(el).backgroundColor))
+    .toBe("rgb(34, 48, 64)"); // the new host colour, applied live
+
+  // ...and back to the solid fallback when the host makes it translucent again
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty("--surface-color", "rgba(34, 48, 64, 0.25)");
+  });
+  await expect.poll(() => th.evaluate((el) => getComputedStyle(el).backgroundColor))
+    .toBe("rgb(22, 24, 29)");
+});
+
+test("the sticky matrix header stays opaque when the host surface token is transparent", async ({ page }) => {
+  // `var(--surface-color, fallback)` only falls back when the variable is
+  // UNDEFINED. A host theme defining it as a transparent value would leave the
+  // sticky header see-through, with rows scrolling visibly underneath it.
+  await page.addInitScript(() => {
+    document.documentElement.style.setProperty("--surface-color", "transparent");
+  });
+  await page.goto(URL);
+  await expect(page.getByRole("button", { name: /Fast lane/ })).toBeVisible();
+
+  const th = page.locator('[data-testid="matrix-scroll"] thead th').first();
+  await expect(th).toHaveCSS("position", "sticky");
+  const bg = await th.evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(bg).toBe("rgb(22, 24, 29)"); // solid fallback, never transparent
+  expect(bg).not.toBe("rgba(0, 0, 0, 0)");
 });
