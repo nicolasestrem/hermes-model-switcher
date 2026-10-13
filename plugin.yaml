@@ -1,11 +1,11 @@
+manifest_version: 1
 name: hermes-model-switcher
-display_name: Model Switcher
 version: 0.1.0
-description: Reviewed provider/model preset application across profiles. In-process Dashboard writes only; hosted-isolation mode is read-only.
-# The plugin currently ships no CLI/gateway hooks: its only code surface is
-# the Dashboard extension (dashboard/manifest.json + dist/index.js + the
-# FastAPI backend below, mounted at api_prefix by the Dashboard).
-entrypoint: dashboard/plugin_api.py
-backend: dashboard/plugin_api.py
-api_prefix: /api/plugins/hermes-model-switcher
-permissions: [profiles.read, models.read, models.write, operations.journal]
+description: "Reviewed provider/model preset application across profiles. In-process Dashboard writes only; hosted-isolation mode is read-only."
+kind: standalone
+# No CLI/gateway surface. The only code surface is the Dashboard extension
+# (dashboard/manifest.json + dashboard/dist/index.js + dashboard/plugin_api.py,
+# mounted by the Dashboard at /api/plugins/hermes-model-switcher/) — the
+# backend path is declared by dashboard/manifest.json's "api" field, not here.
+# The root __init__.py is the entry point Hermes requires beside this manifest;
+# there are no tools, hooks or commands to declare.

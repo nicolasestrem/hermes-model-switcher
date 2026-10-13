@@ -6,6 +6,7 @@ layout (website/docs/user-guide/features/extending-the-dashboard.md):
 
     <out>/hermes-model-switcher/
     ├── plugin.yaml              CLI/gateway manifest (informational; no hooks yet)
+    ├── __init__.py              entry point Hermes requires beside plugin.yaml
     ├── LICENSE
     ├── README.md
     ├── python/                  Python modules the backend imports
@@ -30,7 +31,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 NAME = "hermes-model-switcher"
 
-COPY_FILES = ["plugin.yaml", "LICENSE", "README.md"]
+# ``__init__.py`` is not optional: a plugin.yaml with no __init__.py,
+# desktop/plugin.js or plugin.json beside it is rejected by
+# `hermes plugins validate`, and the agent loader records a load failure
+# ("No __init__.py in <dir>") for it at every startup.
+COPY_FILES = ["plugin.yaml", "__init__.py", "LICENSE", "README.md"]
 PY_MODULES = ["hermes_adapter.py", "route_inventory.py"]
 PY_PACKAGE = "model_switcher"
 DASHBOARD = ["manifest.json", "plugin_api.py"]
