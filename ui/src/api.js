@@ -15,10 +15,25 @@ export class ApiError extends Error {
 
 const BASE = "/api/plugins/hermes-model-switcher";
 
+// Transport. The Dashboard SDK's ``authedFetch`` attaches the shell's auth
+// (loopback session-token header, or the gated-mode session cookie) and the
+// shell's base path / profile scope. A bare ``fetch`` carries none of that: in
+// a session-token dashboard (loopback ``hermes dashboard``, the desktop app)
+// every call 401s while the tab itself renders fine — the tab then looks
+// inert. plugins/sdk.d.ts states plugins MUST route through the SDK; the bare
+// fetch stays only as the fixture/standalone fallback.
+function transport() {
+  const sdk = globalThis.__HERMES_PLUGIN_SDK__;
+  if (sdk && typeof sdk.authedFetch === "function") {
+    return (url, init) => sdk.authedFetch(url, init);
+  }
+  return (url, init) => fetch(url, init);
+}
+
 async function request(path, opts = {}) {
   let res;
   try {
-    res = await fetch(BASE + path, {
+    res = await transport()(BASE + path, {
       headers: { "Content-Type": "application/json" },
       ...opts,
     });

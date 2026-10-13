@@ -36,6 +36,13 @@ await esbuild.build({
       import * as React from "react";
       import * as ReactDOMClient from "react-dom/client";
 
+      // Faithful to the host: fetchJSON/authedFetch are the ONLY sanctioned way
+      // for a plugin to reach its own API — they carry the shell's auth (loopback
+      // session-token header / gated cookie) and base path. A plugin that calls
+      // bare fetch() has no auth at all and 401s on a real dashboard, so the
+      // fixture counts SDK-routed calls and fails the suite if the plugin ever
+      // goes around them.
+      window.__sdkFetchCalls = { authedFetch: 0, fetchJSON: 0 };
       window.__HERMES_PLUGIN_SDK__ = {
         sdkVersion: "1.1.0",
         React,
@@ -49,8 +56,19 @@ await esbuild.build({
           createContext: React.createContext,
         },
         api: {},
-        fetchJSON: async () => { throw new Error("fetchJSON is not stubbed in the fixture"); },
-        authedFetch: async () => { throw new Error("authedFetch is not stubbed in the fixture"); },
+        fetchJSON: async (url, init) => {
+          window.__sdkFetchCalls.fetchJSON += 1;
+          const res = await fetch(url, { ...init, credentials: "include" });
+          if (!res.ok) {
+            const text = await res.text().catch(() => res.statusText);
+            throw new Error(res.status + ": " + (text || res.statusText));
+          }
+          return res.json();
+        },
+        authedFetch: async (url, init) => {
+          window.__sdkFetchCalls.authedFetch += 1;
+          return fetch(url, { ...init, credentials: "include" });
+        },
         buildWsUrl: async () => "",
         buildWsAuthParam: async () => ["", ""],
         components: {},
