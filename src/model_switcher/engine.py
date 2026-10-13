@@ -53,6 +53,7 @@ class ApplyBlocked(RuntimeError):
 
 class StepFailure(RuntimeError):
     """A write step failed after it started; triggers compensation."""
+    post_revision: Optional[str] = None  # set when the write already landed
 
 
 def snapshot_adapter(adapter: StoreAdapter) -> Optional[Dict[str, Any]]:
@@ -75,11 +76,17 @@ def plan_operation(journal: OperationJournal,
     or is unreadable.
     """
     prepared: List[Dict[str, Any]] = []
-    adapters: Dict[str, StoreAdapter] = {}
+    group_index: Dict[Any, int] = {}
     for t in targets:
         if "store_kind" not in t or "path" not in t:
             raise ApplyBlocked(f"target missing store binding: {t!r}")
-        key = f'{t["profile"]}:{t["store_kind"]}:{t["path"]}'
+        # Coalesce targets that address the same (profile, store_kind, path):
+        # multi-slot presets against one config store become ONE journalled
+        # step, so a single pre_revision guards every change atomically.
+        key = (t.get("profile"), t["store_kind"], t["path"])
+        if key in group_index:
+            prepared[group_index[key]]["changes"].update(t["changes"])
+            continue
         try:
             adapter = adapter_for(t["store_kind"], t["path"], t.get("profile"))
         except RuntimeError as exc:
@@ -89,12 +96,12 @@ def plan_operation(journal: OperationJournal,
         except StoreUnreadable as exc:
             # an unreadable raw file is a preflight failure, not empty state
             raise ApplyBlocked(str(exc)) from exc
-        adapters[key] = adapter
+        group_index[key] = len(prepared)
         prepared.append({
-            "profile": t["profile"],
+            "profile": t.get("profile"),
             "store_kind": t["store_kind"],
             "path": t["path"],
-            "changes": t["changes"],
+            "changes": dict(t["changes"]),
             "snapshot": snap,
             "pre_revision": adapter.revision(),
         })
@@ -125,7 +132,13 @@ def _apply_step(adapter: StoreAdapter, changes: Dict[str, Any],
         adapter.read()
     outcome = adapter.apply_changes(changes)
     if not adapter.readback(changes):
-        raise StepFailure("readback verification failed after write")
+        # The write already landed on disk but could not be verified.
+        # Carry the post-write revision so the caller records the step as
+        # written-but-failed and compensates it back to the snapshot —
+        # no unverified write may survive.
+        exc = StepFailure("readback verification failed after write")
+        exc.post_revision = outcome.post_revision
+        raise exc
     return outcome.post_revision
 
 
@@ -164,7 +177,11 @@ def apply_operation(journal: OperationJournal, op_id: str,
             post = _apply_step(adapter, step["changes"], step["pre_revision"])
         except (StoreConflict, StoreUnreadable, StepFailure, OSError) as exc:
             failure = exc
-            journal.set_step_state(op_id, step["seq"], STEP_FAILED)
+            # A post-write failure (e.g. readback) means the write DID land:
+            # record the post-write revision so this step participates in
+            # reverse-order compensation below.
+            journal.set_step_state(op_id, step["seq"], STEP_FAILED,
+                                   getattr(exc, "post_revision", None))
             break
         journal.set_step_state(op_id, step["seq"], STEP_APPLIED, post)
         step["post_revision"] = post  # keep in-memory copy consistent
@@ -177,7 +194,9 @@ def apply_operation(journal: OperationJournal, op_id: str,
     # Partial failure: compensate completed writes in reverse order,
     # re-reading the journal so post-write revisions are current.
     fresh = journal.get(op_id)
-    applied_now = [s for s in fresh["steps"] if s["state"] == STEP_APPLIED]
+    applied_now = [s for s in fresh["steps"]
+                   if s["state"] == STEP_APPLIED
+                   or (s["state"] == STEP_FAILED and s.get("post_revision"))]
     final_state = _compensate_applied(journal, op_id, applied_now,
                                       all_failed=(len(applied_now) == 0))
     result = journal.get(op_id)
@@ -193,7 +212,10 @@ def _compensate_applied(journal: OperationJournal, op_id: str,
     Returns the final operation state."""
     conflicts = 0
     for step in reversed(applied_steps):
-        if step["state"] != STEP_APPLIED:
+        # Applied steps and failed-with-post-revision steps (write landed,
+        # verification or a later step then failed) must be compensated.
+        if step["state"] != STEP_APPLIED and \
+                not (step["state"] == STEP_FAILED and step.get("post_revision")):
             continue
         adapter = adapter_for(step["store_kind"], step["path"], step.get("profile"))
         try:

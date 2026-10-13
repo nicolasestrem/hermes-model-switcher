@@ -50,15 +50,39 @@ def is_inside_git_worktree(path: str) -> bool:
 
 class OperationJournal:
     def __init__(self, db_path: str):
-        if os.path.islink(db_path):
+        raw = os.path.abspath(db_path)
+        if os.path.islink(raw):
             raise ValueError(
                 "journal db_path must not be a symlink: %r" % db_path)
-        if is_inside_git_worktree(db_path):
+        # No component of the path (the db itself or ANY ancestor) may be a
+        # symlink: a link such as /outside/link/private/j.db would otherwise
+        # bypass both the direct islink checks and the worktree guard below,
+        # resolving into an unvetted location after makedirs created the
+        # non-existent tail.
+        probe = raw
+        while True:
+            if os.path.islink(probe):
+                raise ValueError(
+                    "journal db path component must not be a symlink: %r"
+                    % probe)
+            parent = os.path.dirname(probe)
+            if parent == probe:
+                break
+            probe = parent
+        if is_inside_git_worktree(raw):
             raise ValueError(
                 "refusing to store operation journal inside a git worktree "
                 "(%r); journal DBs may contain private recovery snapshots "
                 "and must stay in a private directory" % db_path)
-        db_dir = os.path.dirname(db_path) or "."
+        # Re-check containment on the fully resolved path: mounts or link
+        # races aside, realpath can only differ where a symlink smuggled the
+        # location into a git worktree.
+        resolved = os.path.realpath(raw)
+        if is_inside_git_worktree(resolved):
+            raise ValueError(
+                "journal path resolves into a git worktree (%r): refusing "
+                "to store the operation journal there" % db_path)
+        db_dir = os.path.dirname(raw) or "."
         os.makedirs(db_dir, mode=0o700, exist_ok=True)
         # Private DB and parent: group/other get no access. Private
         # recovery snapshots stay local — they are the only source for
@@ -142,9 +166,18 @@ class OperationJournal:
 
     def set_step_state(self, op_id: str, seq: int, state: str,
                        post_revision: Optional[str] = None) -> None:
-        self._conn.execute(
-            "UPDATE steps SET state=?, post_revision=? WHERE op_id=? AND seq=?",
-            (state, post_revision, op_id, seq))
+        # A None post_revision must not clobber a revision recorded earlier
+        # (e.g. a written-but-failed step keeps its post-write revision
+        # through compensation for the recovery trail).
+        if post_revision is None:
+            self._conn.execute(
+                "UPDATE steps SET state=? WHERE op_id=? AND seq=?",
+                (state, op_id, seq))
+        else:
+            self._conn.execute(
+                "UPDATE steps SET state=?, post_revision=?"
+                " WHERE op_id=? AND seq=?",
+                (state, post_revision, op_id, seq))
         self._touch(op_id, OP_APPLYING)
 
     def finish(self, op_id: str, state: str) -> None:
