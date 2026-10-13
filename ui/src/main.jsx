@@ -46,6 +46,11 @@ function PresetsBar({ presets, onReview, busy }) {
   return (
     <section aria-label="Favorite presets" style={{ marginBottom: 12 }}>
       <h3 style={{ margin: "4px 0" }}>Favorite presets</h3>
+      {presets.length === 0 && (
+        <p data-testid="presets-empty" style={{ color: THEME.muted, margin: "4px 0" }}>
+          No presets saved yet — select slots below, preview a change, then save it as a preset.
+        </p>
+      )}
       <div role="list" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
         {presets.map((p) => (
           <button
@@ -103,12 +108,16 @@ function Matrix({ profiles, slots, selection, onToggle, onExpand, expanded, filt
           <option value="unset">Unset / auto</option>
         </select>
       </div>
+      <div data-testid="matrix-scroll" style={{ maxHeight: "55vh", overflow: "auto" }}>
       <table style={{ borderCollapse: "collapse", width: "100%" }}>
         <caption className="visually-hidden">Model slots per profile with configured and last-observed state</caption>
         <thead>
           <tr>
             {["", "Profile", "Slot", "Family", "Configured route", "Last observed"].map((h) => (
-              <th key={h} scope="col" style={{ textAlign: "left", borderBottom: `1px solid ${THEME.border}`, padding: 4 }}>{h}</th>
+              <th key={h} scope="col" style={{
+                textAlign: "left", borderBottom: `1px solid ${THEME.border}`, padding: 4,
+                position: "sticky", top: 0, background: THEME.bg, zIndex: 1,
+              }}>{h}</th>
             ))}
           </tr>
         </thead>
@@ -153,6 +162,7 @@ function Matrix({ profiles, slots, selection, onToggle, onExpand, expanded, filt
           )}
         </tbody>
       </table>
+      </div>
     </section>
   );
 }
@@ -200,7 +210,7 @@ function ChangeEditor({ selection, slots, onPreview, onApply, preview, previewIn
   ];
 
   return (
-    <section aria-label="Custom change editor" style={{ marginTop: 16, borderTop: `1px solid ${THEME.border}`, paddingTop: 8 }}>
+    <section aria-label="Custom change editor" data-testid="change-editor" style={{ marginTop: 16, borderTop: `1px solid ${THEME.border}`, paddingTop: 8 }}>
       <h3 style={{ margin: "4px 0" }}>Custom change / exact-model removal</h3>
       {!hasSelection && <p style={{ color: THEME.muted }}>Select slots in the matrix to build a change.</p>}
       <div style={{ display: "grid", gap: 6, maxWidth: 640 }}>
@@ -485,32 +495,51 @@ function App() {
         </section>
       )}
 
+      {/* Action surface: the only click targets the user needs sit above the
+          fold, BEFORE the (potentially ~130-row) profile matrix, so the table
+          can never push the flow controls off-screen. */}
+      <div data-testid="action-surface">
+        {/* The aria-live region above is screen-reader only. Every action here
+            reports through it — so a refused apply (409 from the canonical
+            seam) or a failed preview used to be silent on screen: the button
+            just did nothing. Mirror the same message visibly, next to the
+            buttons that trigger it. */}
+        {status && (
+          <p data-testid="visible-status"
+            style={{
+              margin: "0 0 8px", fontSize: "0.9em",
+              color: /(failed|Failed)/.test(status) ? THEME.danger : THEME.muted,
+            }}>
+            {status}
+          </p>
+        )}
+        <ChangeEditor
+          selection={selection} slots={slots}
+          onPreview={(changes) => runPreview(changes, "custom:" + selectionKey + ":" + JSON.stringify(changes))}
+          onApply={applyPreview}
+          preview={preview && previewFor.startsWith("custom:") ? preview : null}
+          previewInvalid={false}
+          busy={busy}
+        />
+        <PreviewPanel preview={preview} />
+
+        {previewFor.startsWith("custom:") && preview && (
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+            <input aria-label="Save as preset name" placeholder="Preset name" value={saveName}
+              onChange={(e) => setSaveName(e.target.value)} />
+            <button className="hms-save-preset" data-testid="save-preset"
+              disabled={!saveName.trim() || busy} onClick={saveAsPreset}>Save as preset</button>
+            <button className="hms-apply" data-testid="apply-from-drawer"
+              disabled={busy} onClick={applyPreview}>Apply reviewed changes</button>
+          </div>
+        )}
+      </div>
+
       <Matrix
         profiles={state.profiles} slots={slots} selection={selection} onToggle={toggle}
         expanded={expanded} onExpand={(k) => setExpanded({ ...expanded, [k]: !expanded[k] })}
         filters={filters} setFilters={setFilters}
       />
-
-      <ChangeEditor
-        selection={selection} slots={slots}
-        onPreview={(changes) => runPreview(changes, "custom:" + selectionKey + ":" + JSON.stringify(changes))}
-        onApply={applyPreview}
-        preview={preview && previewFor.startsWith("custom:") ? preview : null}
-        previewInvalid={false}
-        busy={busy}
-      />
-      <PreviewPanel preview={preview} />
-
-      {previewFor.startsWith("custom:") && preview && (
-        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
-          <input aria-label="Save as preset name" placeholder="Preset name" value={saveName}
-            onChange={(e) => setSaveName(e.target.value)} />
-          <button className="hms-save-preset" data-testid="save-preset"
-            disabled={!saveName.trim() || busy} onClick={saveAsPreset}>Save as preset</button>
-          <button className="hms-apply" data-testid="apply-from-drawer"
-            disabled={busy} onClick={applyPreview}>Apply reviewed changes</button>
-        </div>
-      )}
 
       <OperationDrawer operation={operation} onUndo={undo} undoGuarded={undoGuarded}
         setUndoGuarded={setUndoGuarded} busy={busy} />
