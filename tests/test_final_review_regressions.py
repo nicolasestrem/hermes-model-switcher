@@ -159,6 +159,38 @@ def test_scalar_removal_validates_reviewed_from_identity(hermes_home):
     assert (doc.get("delegation") or {}).get("model") is None
 
 
+def test_stale_preset_removal_is_refused_on_apply(hermes_home):
+    """Preset applies re-prepare their reviewed intents against the CURRENT
+    document: a removal whose route drifted since review is refused, never
+    replayed from frozen mutations."""
+    cfg = _profile(hermes_home, "default", config=(
+        ROUTE_CONFIG + "delegation:\n  provider: dele\n  model: del-model\n"))
+    tc = _client()
+    removal = {"profileId": "default", "slotId": "delegation.model",
+               "action": "remove", "from": {"provider": "dele",
+                                            "model": "del-model"}}
+    r = tc.post("/presets", json={"name": "strip deleg", "changes": [removal]})
+    assert r.status_code == 200, r.text
+    pid = r.json()["preset"]["id"]
+
+    # external drift: the route changed after the preset was reviewed
+    cfg.write_text(cfg.read_text().replace("del-model", "new-model"))
+    before = cfg.read_text()
+    r = tc.post("/operations", json={"presetId": pid})
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert "no longer applies cleanly" in detail["error"]
+    assert any("changed since review" in reason for reason in detail["reasons"])
+    assert cfg.read_text() == before, "no deletion may fire on a drifted route"
+
+    # a matching reviewed removal still applies
+    cfg.write_text(before.replace("new-model", "del-model"))
+    r = tc.post("/operations", json={"presetId": pid})
+    assert r.status_code == 200 and r.json()["operation"]["state"] == "committed", r.text
+    doc = yaml.safe_load(cfg.read_text())
+    assert (doc.get("delegation") or {}).get("model") is None
+
+
 def test_speech_observation_uses_selected_runtime_backend():
     cfg = {'stt': {'provider': 'groq', 'groq': {'model': 'whisper-large-v3'}}}
     obs = next(item for item in ri.build_inventory(cfg) if item.descriptor.slot_id == 'specialist.stt')

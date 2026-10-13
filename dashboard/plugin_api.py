@@ -1630,11 +1630,39 @@ def _preset_preflight(preset: ReviewedPreset,
 def _preset_target_dicts(preset: ReviewedPreset,
                          profiles: Dict[str, Dict[str, Any]]
                          ) -> List[Dict[str, Any]]:
-    """The preset's FROZEN reviewed changes, re-bound to each target's
-    currently-discovered profile config path (never a stored path that may
-    have moved)."""
-    out: List[Dict[str, Any]] = []
+    """The preset's reviewed changes re-prepared against the CURRENT documents.
+
+    Derived mutations (canonical main cleanup deletions, exact-removal
+    deletions, no-op drift) are REGENERATED from the reviewed typed intents
+    (``ui_changes``) at apply time — the same code path an interactive
+    preview+apply uses — so a frozen deletion can never fire against a
+    document it was not reviewed against. A preset whose reviewed changes no
+    longer apply cleanly (identity drift, no-op, protected slot) blocks
+    wholesale with the reviewed reasons. Legacy records without reviewed
+    intents fall back to their frozen target changes.
+    """
     known = discover_profiles()
+    ui = getattr(preset, "ui_changes", None)
+    if isinstance(ui, list) and ui:
+        derived, blocked = _changes_to_targets(copy.deepcopy(ui), profiles,
+                                               strict=False)
+        if blocked:
+            raise HTTPException(status_code=409, detail={
+                "ok": False, "blocked": True,
+                "error": "apply blocked: the preset no longer applies cleanly",
+                "reasons": [str(b.get("reason") or "blocked change")
+                            for b in blocked]})
+        out: List[Dict[str, Any]] = []
+        for t in derived:
+            ident = known.get(t.profile)
+            path = _config_path_for(t.profile, ident) if ident is not None else t.path
+            target = {"profile": t.profile, "store_kind": t.store_kind,
+                      "path": str(path), "changes": copy.deepcopy(t.changes)}
+            if ident is not None:
+                target["identity"] = _identity_dict(ident)
+            out.append(target)
+        return out
+    out = []
     for t in preset.targets:
         ident = known.get(t.profile)
         path = _config_path_for(t.profile, ident) if ident is not None else t.path
