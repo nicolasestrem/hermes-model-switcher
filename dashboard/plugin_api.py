@@ -1703,6 +1703,43 @@ def _same_prepared_scope(a: List[Dict[str, Any]],
     return norm(a) == norm(b)
 
 
+def _unchanged_provider_hops(profile: str,
+                             changes: Dict[str, Any]) -> List[str]:
+    """Providers of scalar route assignments whose companion provider field is
+    NOT part of the write map (same-provider model edits).
+
+    A model-only edit omits the unchanged ``X.provider`` companion, so the
+    credential gate would otherwise be skipped. The provider is resolved from
+    the CURRENT document through the slot's OWN descriptor companions — never
+    a generic path guess (``cron.provider`` is the scheduler, not a model
+    provider). Returns [] for deletions/unset/disable (no route is written)
+    and for slots without a provider companion.
+    """
+    if not isinstance(changes, dict) or not changes:
+        return []
+    try:
+        cfg = _ADAPTER.load_raw_config(profile)
+        inventory = build_inventory(cfg)
+    except Exception:
+        return []
+    out: List[str] = []
+    for dotted, value in changes.items():
+        if not isinstance(value, str) or not value.strip():
+            continue  # deletion / unset / disable writes no route
+        for obs in inventory:
+            desc = obs.descriptor
+            if desc.storage_path != dotted:
+                continue
+            for comp in desc.companion_paths:
+                if not comp.endswith((".provider", "_provider")):
+                    continue
+                found = _get_dotted(cfg, comp)
+                if isinstance(found, str) and found.strip() and found not in out:
+                    out.append(found)
+            break
+    return out
+
+
 def _ensure_prepared_credentials(prepared: List[Dict[str, Any]]) -> None:
     """Provider-scoped credential gate for prepared write targets.
 
@@ -1714,10 +1751,14 @@ def _ensure_prepared_credentials(prepared: List[Dict[str, Any]]) -> None:
     known = discover_profiles()
     missing: List[str] = []
     for t in prepared:
-        needed = _referenced_providers(t.get("changes") or {})
+        changes = t.get("changes") or {}
+        needed = _referenced_providers(changes)
+        profile = t.get("profile")
+        if not needed and profile:
+            # Same-provider model edits omit the unchanged provider field.
+            needed = _unchanged_provider_hops(profile, changes)
         if not needed:
             continue
-        profile = t.get("profile")
         ident = known.get(profile)
         if ident is None or not _profile_has_credentials(profile, ident, needed):
             missing.append(str(profile))

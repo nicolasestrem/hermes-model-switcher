@@ -385,6 +385,33 @@ def _judge_payload_is_typed(payload: Dict[str, Any]) -> bool:
     return provider.startswith("typed-decision") or model.startswith("typed-decision/")
 
 
+def _bad_chain_entry(chain: List[Any]) -> Optional[str]:
+    """First invalid chain entry, described for the rejection message.
+
+    A valid entry is a non-empty ``provider/model`` string token or a route
+    object carrying non-empty string ``provider`` and ``model`` — the shapes
+    the runtime chain resolver consumes.
+    """
+    for index, entry in enumerate(chain, 1):
+        if isinstance(entry, dict):
+            provider = entry.get("provider")
+            model = entry.get("model")
+            if (isinstance(provider, str) and provider.strip()
+                    and isinstance(model, str) and model.strip()):
+                continue
+            return (f"chain entry {index} needs non-empty 'provider' and "
+                    f"'model' strings")
+        # The runtime chain normalizer requires complete route objects and
+        # silently DROPS anything else (fallback-providers.md: "Each entry
+        # requires both provider and model. Entries missing either field are
+        # ignored."). Storing a bare provider string or scalar would be a
+        # silently dead chain entry — reject instead.
+        return (f"chain entry {index} must be a route object with 'provider' "
+                f"and 'model' (got {type(entry).__name__}); the runtime "
+                f"ignores other shapes")
+    return None
+
+
 def preview_changes(cfg: Dict[str, Any], edits: List[RouteEdit]) -> ChangePreview:
     """Deterministic before/after preview. Validates first; any rejected edit
     fails the whole preview (invalid preflight performs no writes)."""
@@ -430,6 +457,16 @@ def preview_changes(cfg: Dict[str, Any], edits: List[RouteEdit]) -> ChangePrevie
             if chain is not None and not isinstance(chain, list):
                 rejected.append(f"{edit.slot_id}: 'chain' must be a list or null")
                 continue
+            if isinstance(chain, list):
+                # Every entry must be a shape the runtime chain resolver
+                # accepts: a bare ``provider/model`` token or a COMPLETE route
+                # object. Integers, lists, or dicts missing provider/model
+                # would otherwise persist verbatim and make the chain
+                # silently unusable.
+                bad = _bad_chain_entry(chain)
+                if bad is not None:
+                    rejected.append(f"{edit.slot_id}: {bad}")
+                    continue
         elif not _is_route_payload(edit.value):
             rejected.append(f"{edit.slot_id}: edit value must be a route payload with a 'model'")
             continue

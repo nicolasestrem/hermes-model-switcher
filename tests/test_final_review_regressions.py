@@ -191,6 +191,38 @@ def test_stale_preset_removal_is_refused_on_apply(hermes_home):
     assert (doc.get("delegation") or {}).get("model") is None
 
 
+def test_same_provider_model_edit_is_credential_gated(hermes_home):
+    """A model-only edit omits the unchanged provider field; the gate must
+    still resolve it from the current route — not skip."""
+    _profile(hermes_home, "default", config=(
+        ROUTE_CONFIG + "delegation:\n  provider: somecloud\n  model: m1\n"))
+    tc = _client()
+    change = {"profileId": "default", "slotId": "delegation.model",
+              "action": "set", "to": {"model": "m2"}}
+    r = tc.post("/preview", json={"changes": [change]})
+    assert r.status_code == 200 and not r.json()["preview"]["blocked"], r.text
+    preview_id = r.json()["previewId"]
+    for payload in ({"changes": [change]}, {"previewId": preview_id}):
+        r = tc.post("/operations", json=payload)
+        assert r.status_code == 409, (payload, r.text)
+        assert "missing provider credentials" in r.json()["detail"]["error"]
+
+
+def test_chain_entries_are_shape_validated():
+    """Malformed chain entries (partial objects, scalars, empty ids) are
+    rejected before anything is persisted."""
+    for bad in ([{"provider": "nous"}], [42], ["just-a-word"], ["nous"],
+                [{"provider": "nous", "model": "  "}], [["nested"]]):
+        p = ri.preview_changes({}, [ri.RouteEdit("fallback.main_chain",
+                                                 {"chain": bad})])
+        assert not p.clean, bad
+        assert "chain entry" in p.rejected[0], p.rejected
+    ok = ri.preview_changes({}, [ri.RouteEdit("fallback.main_chain", {
+        "chain": [{"provider": "nous", "model": "hermes-4"},
+                  {"provider": "opencode-go", "model": "glm-5.3-flash"}]})])
+    assert ok.clean, ok.rejected
+
+
 def test_speech_observation_uses_selected_runtime_backend():
     cfg = {'stt': {'provider': 'groq', 'groq': {'model': 'whisper-large-v3'}}}
     obs = next(item for item in ri.build_inventory(cfg) if item.descriptor.slot_id == 'specialist.stt')

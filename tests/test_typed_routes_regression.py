@@ -112,13 +112,19 @@ def test_chain_non_list_rejected():
     assert any("chain" in r for r in prev.rejected)
 
 
-def test_chain_native_entry_shapes_preserved_verbatim():
-    """Order and entry shapes round-trip exactly: dict routes and bare provider
-    strings both survive, no forced rewrite."""
+def test_chain_entries_must_be_complete_route_objects():
+    """The runtime chain normalizer requires ``provider`` + ``model`` and
+    silently drops other shapes (fallback-providers.md), so a bare provider
+    string or scalar is REJECTED — never persisted as a dead entry."""
     cfg = _cfg(delegation={"fallback_providers": ["zai"]})
+    dead = ri.preview_changes(cfg, [ri.RouteEdit(
+        "delegation.fallback_chain", {"chain": ["nous"]})])
+    assert not dead.clean
+    assert "route object" in dead.rejected[0]
+
     chain = [
         {"provider": "zai", "model": "glm-5.3"},
-        "nous",
+        {"provider": "nous", "model": "hermes-4"},
         {"provider": "local", "model": "lab-7b", "base_url": "http://x/v1"},
     ]
     prev = ri.preview_changes(cfg, [ri.RouteEdit(
@@ -126,8 +132,6 @@ def test_chain_native_entry_shapes_preserved_verbatim():
     assert prev.clean, prev.rejected
     after = _change(prev, "delegation.fallback_providers").after
     assert after == chain
-    # exact identity of entry shapes
-    assert [type(e) for e in after] == [dict, str, dict]
 
 
 def test_full_typed_payload_reaches_stored_value_for():
