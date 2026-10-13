@@ -171,9 +171,10 @@ def test_judge_protocol_compatibility():
     assert good.clean
     assert [(c.slot_id, c.after["model"]) for c in good.changes] == [
         ("judge.goal_judge.route", "verdict-v3")]
-    # Threshold/enforcement are untouched even though they share the slot dict.
-    assert all("threshold" not in c.after and "enforcement" not in c.after
-               for c in good.changes)
+    # Threshold/enforcement protected neighbors survive the route swap
+    # (route-dict edits merge, F2 fix — they are preserved, never wiped).
+    assert all(c.after.get("threshold") == 0.8 and c.after.get("enforcement") == "hard_block"
+               for c in good.changes if c.storage_path == "auxiliary.goal_judge")
 
     # And the typed payload carrying a protected field is still refused.
     smuggled = dict(TYPED_EDIT, threshold=0.1)
