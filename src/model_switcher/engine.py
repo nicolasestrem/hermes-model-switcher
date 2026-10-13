@@ -65,6 +65,17 @@ def snapshot_adapter(adapter: StoreAdapter) -> Optional[Dict[str, Any]]:
     return data
 
 
+def _adapter_for_step(step: Dict[str, Any]) -> StoreAdapter:
+    identity = step.get("identity")
+    if identity is None:
+        return adapter_for(step["store_kind"], step["path"], step.get("profile"))
+    if isinstance(identity, dict):
+        from hermes_adapter import ProfileIdentity
+        identity = ProfileIdentity(**identity)
+    return adapter_for(step["store_kind"], step["path"], step.get("profile"),
+                       identity=identity)
+
+
 def plan_operation(journal: OperationJournal,
                    targets: List[Dict[str, Any]],
                    payload: Optional[Dict[str, Any]] = None,
@@ -78,6 +89,14 @@ def plan_operation(journal: OperationJournal,
     prepared: List[Dict[str, Any]] = []
     group_index: Dict[Any, int] = {}
     for t in targets:
+        t = dict(t)
+        if t.get("store_kind") == "canonical_config" and not t.get("identity"):
+            from dataclasses import asdict
+            from hermes_adapter import discover_profiles
+            identity = discover_profiles().get(t.get("profile") or "")
+            if identity is None:
+                raise ApplyBlocked("target profile vanished before planning")
+            t["identity"] = asdict(identity)
         if "store_kind" not in t or "path" not in t:
             raise ApplyBlocked(f"target missing store binding: {t!r}")
         # Coalesce targets that address the same (profile, store_kind, path):
@@ -88,22 +107,29 @@ def plan_operation(journal: OperationJournal,
             prepared[group_index[key]]["changes"].update(t["changes"])
             continue
         try:
-            adapter = adapter_for(t["store_kind"], t["path"], t.get("profile"))
+            adapter = _adapter_for_step(t)
         except RuntimeError as exc:
             raise ApplyBlocked(str(exc)) from exc
         try:
+            snapshot_revision = adapter.revision()
             snap = snapshot_adapter(adapter)
         except StoreUnreadable as exc:
             # an unreadable raw file is a preflight failure, not empty state
             raise ApplyBlocked(str(exc)) from exc
         group_index[key] = len(prepared)
+        revision = adapter.revision()
+        if revision != snapshot_revision:
+            raise ApplyBlocked("store revision changed while capturing recovery snapshot")
+        if t.get("expected_revision") is not None and t["expected_revision"] != revision:
+            raise ApplyBlocked("reviewed revision changed before planning")
         prepared.append({
             "profile": t.get("profile"),
             "store_kind": t["store_kind"],
             "path": t["path"],
             "changes": dict(t["changes"]),
             "snapshot": snap,
-            "pre_revision": adapter.revision(),
+            "pre_revision": revision,
+            "identity": t.get("identity"),
         })
 
     op_id_local = op_id
@@ -116,7 +142,7 @@ def plan_operation(journal: OperationJournal,
     for seq, p in enumerate(prepared):
         journal.add_step(op["op_id"], seq, p["profile"], p["store_kind"],
                          p["path"], p["changes"], p["snapshot"],
-                         p["pre_revision"])
+                         p["pre_revision"], identity=p.get("identity"))
     return journal.get(op["op_id"])  # type: ignore[return-value]
 
 
@@ -130,7 +156,8 @@ def _apply_step(adapter: StoreAdapter, changes: Dict[str, Any],
     # fresh read is part of the recheck (also surfaces unreadable files)
     if adapter.exists():
         adapter.read()
-    outcome = adapter.apply_changes(changes)
+    outcome = adapter.apply_changes_guarded(
+        changes, expected_revision=pre_revision)
     if not adapter.readback(changes):
         # The write already landed on disk but could not be verified.
         # Carry the post-write revision so the caller records the step as
@@ -172,7 +199,7 @@ def apply_operation(journal: OperationJournal, op_id: str,
             failure = StepFailure("injected failure before step "
                                   f'{step["seq"]}')
             break
-        adapter = adapter_for(step["store_kind"], step["path"], step.get("profile"))
+        adapter = _adapter_for_step(step)
         try:
             post = _apply_step(adapter, step["changes"], step["pre_revision"])
         except (StoreConflict, StoreUnreadable, StepFailure, OSError) as exc:
@@ -217,7 +244,7 @@ def _compensate_applied(journal: OperationJournal, op_id: str,
         if step["state"] != STEP_APPLIED and \
                 not (step["state"] == STEP_FAILED and step.get("post_revision")):
             continue
-        adapter = adapter_for(step["store_kind"], step["path"], step.get("profile"))
+        adapter = _adapter_for_step(step)
         try:
             adapter.compensate(step["snapshot"], step["post_revision"])
         except StoreConflict:
@@ -257,11 +284,21 @@ def reconcile(journal: OperationJournal, op_id: str) -> Dict[str, Any]:
 
     ambiguous = False
     for step in op["steps"]:
-        adapter = adapter_for(step["store_kind"], step["path"], step.get("profile"))
+        adapter = _adapter_for_step(step)
         current = adapter.revision()
         if step["state"] == STEP_APPLIED:
             if current != step["post_revision"] or \
                     not adapter.readback(step["changes"]):
+                ambiguous = True
+                journal.set_step_state(op_id, step["seq"], STEP_CONFLICT)
+        elif step["state"] == STEP_FAILED:
+            # A failed step whose write may have landed ambiguously (a
+            # concurrent write detected after our save, or an exception after
+            # disk replacement) recorded NO post revision, so it is skipped by
+            # ordinary compensation. If the store no longer matches the
+            # pre-write revision we cannot tell our write from an interloper's
+            # -> fail closed to recovery_required, never a false success.
+            if current != step["pre_revision"]:
                 ambiguous = True
                 journal.set_step_state(op_id, step["seq"], STEP_CONFLICT)
         elif step["state"] == "pending":
@@ -320,7 +357,7 @@ def undo_operation(journal: OperationJournal, op_id: str) -> Dict[str, Any]:
         raise ApplyBlocked("operation has no applied steps to undo")
     conflicts = 0
     for step in reversed(applied):
-        adapter = adapter_for(step["store_kind"], step["path"], step.get("profile"))
+        adapter = _adapter_for_step(step)
         try:
             adapter.compensate(step["snapshot"], step["post_revision"])
         except StoreConflict:
@@ -333,3 +370,25 @@ def undo_operation(journal: OperationJournal, op_id: str) -> Dict[str, Any]:
     else:
         journal.finish(op_id, OP_UNDONE)
     return journal.get(op_id)  # type: ignore[return-value]
+
+
+# -- safe public revision interface ----------------------------------
+
+def revision_summary(op: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Safe per-step before/after revision view for public operation results.
+
+    Allowlist only — profile, store kind and the recorded pre/post revisions.
+    NEVER snapshots, storage paths, changed values, or raw config contents, so
+    an API layer can expose write provenance without leaking private state.
+    """
+    if not op:
+        return []
+    return [
+        {
+            "profile": s.get("profile"),
+            "store": s.get("store_kind"),
+            "revision_before": s.get("pre_revision"),
+            "revision_after": s.get("post_revision"),
+        }
+        for s in op.get("steps", [])
+    ]

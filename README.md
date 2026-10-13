@@ -86,17 +86,45 @@ to the running user's home — never a baked-in path).
 
 ## Using the tab
 
-1. Select the profile/slot checkboxes in the matrix, then enter the new provider
+1. Narrow the matrix to one or several searchable profiles, then choose a family,
+   exact subfamily/slot and state. **All profiles** resets the profile scope.
+   Select the slot checkboxes in the matrix, then enter the new provider
    and model in the change editor above it. The matrix scrolls internally with
    sticky headers; it does not push the editor below every row.
 2. Click **Preview changes** and review the affected routes and side effects.
    Acknowledge unknown-cost routes when required before applying a custom change.
+   Editing the route, selection or filters invalidates the review; a late preview
+   response cannot revive it. The server also binds reviews to profile identities
+   and store revisions, with explicit expiration/stale errors.
+   A preview that contained blocked changes is **all-or-nothing**: it cannot be
+   applied partially — fix the blocked entries and re-preview. Apply (direct or
+   from a cached preview) re-checks every referenced provider's credentials for
+   the target profile before any write.
 3. Click **Apply** to apply the reviewed change, or enter a preset name and click
    **Save as preset** for reuse. Favorite presets appear above the editor; an empty
    list shows guidance rather than an unexplained blank section.
 4. Clicking a favorite preset reviews/previews it; **Apply preset** performs the
    reviewed application. Check the operation drawer's per-profile readback result.
    Undo remains an explicit, guarded recovery action.
+
+Use **Model picker** to search Hermes' provider-scoped catalog, keeping the exact
+model ID alongside its provider. IDs are not portable across providers: Nous may
+use `deepseek/deepseek-v4.1-flash` while OpenCode Go uses `deepseek-v4.1-flash`.
+Refresh requests live discovery, but failed probes and curated/cache fallbacks
+remain visibly unproven-fresh. Manual entry stays available for custom routes.
+
+Setting a route on a fallback slot produces an explicit ordered one-entry chain;
+the chain editor supports several `provider/model` lines. **Unset** restores
+inheritance and **Disable** writes an explicit empty chain. These actions are
+distinct, and a malformed/missing chain is rejected instead of silently cleared.
+Speech routes bind the selected backend and its native model field together;
+MoA preset rows address their aggregator, preserving reference models and policy.
+
+Apply and Undo refresh configured state automatically; **Refresh state** reloads
+external edits. **Last observed** stays **unobserved** until actual runtime usage
+evidence is available—it is never fabricated from configuration. Saved presets
+retain their exact reviewed slots, profiles and billing approval; an apply request
+cannot silently broaden that saved policy.
 
 Status and failures are shown beside the action controls as well as announced
 through the screen-reader status region. A refused apply preserves the server's
@@ -117,6 +145,11 @@ problem: the tab must use the host SDK transport even if the bundle renders.
 - **Configured ≠ observed.** The plugin reports what was persisted and read
   back. Existing chat sessions keep their old route until they start anew;
   live switching of in-flight sessions is out of scope.
+- **Identity-guarded writes.** Apply and Undo refuse when a target profile
+  directory was recreated, moved, or restored from a backup after the review:
+  its directory identity changed, so the reviewed write is no longer provably
+  the same target. The refusal names the profile; re-review the change. This is
+  deliberate fail-closed behaviour, not a cached-state error.
 - **Unknown slots block completeness.** Selectors not in the versioned
   registry appear as visible coverage gaps and never gain write access
   automatically. Plugin authors may register typed descriptors.

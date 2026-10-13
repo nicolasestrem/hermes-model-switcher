@@ -47,19 +47,22 @@ for _p in (_PKG_ROOT / "python", _PKG_ROOT / "src", _PKG_ROOT):
 import copy
 import json
 import os
-import tempfile
+
 import threading
+import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
 from hermes_adapter import HermesAdapter
 from hermes_adapter import discover_profiles
-from route_inventory import RouteEdit, SlotFamily, build_inventory, preview_changes
+from route_inventory import (RouteEdit, SlotFamily, build_inventory,
+                             preview_changes, _JUDGE_TYPED_KEYS)
 
+from model_switcher.adapters import adapter_for
 from model_switcher.adapters import _get_dotted
 from model_switcher.adapters import _MISSING as _STORE_MISSING
 from model_switcher.engine import (
@@ -87,6 +90,47 @@ from model_switcher.presets import (
 )
 
 _ROUTE_FILTER_KEYS = ("provider", "model", "base_url", "api_mode")
+
+# Typed route payload the UI may carry for ONE slot. ``chain`` is the ordered
+# fallback chain (list of {provider, model}); ``null`` means inherit/unset,
+# ``[]`` means explicitly disabled. Preview and apply MUST forward the same
+# typed payload, so a chain edit is never silently narrowed to a bare
+# provider/model pair (which would otherwise write an empty chain).
+_TYPED_PAYLOAD_KEYS = ("provider", "model", "base_url", "api_mode", "chain")
+
+# Fields a PUBLIC preview diff may expose out of a stored route value. A route
+# dict can share its object with protected neighbours (threshold, enforcement)
+# or secret-adjacent material (api_key, headers); only the route fields that
+# this feature owns ever leave the backend.
+_PUBLIC_ROUTE_KEYS = ("provider", "model", "base_url", "api_mode", "chain")
+
+# route_inventory observation source -> the UI's state vocabulary
+# ("configured" | "inherit" | "unset").
+_UI_STATE_NAMES = {
+    "configured": "configured",
+    "inherited": "inherit",
+    "default": "unset",
+}
+
+# Ordered-chain storage paths: their value is a list (configured), [] (explicitly
+# disabled) or null (inherit-unset). They need three-state reporting — the flat
+# configured|inherit|unset vocabulary would render [] as "configured".
+_CHAIN_STORAGE_PATHS = {"fallback_providers", "delegation.fallback_providers"}
+
+# UI family ids as the front-end's FAMILIES table spells them. The inventory's
+# SlotFamily values differ for judge/cron/moa (hidden family); map them so a
+# preset's scope summary never labels a non-main family as "Main".
+_INVENTORY_FAMILY_TO_UI = {
+    "main": "main", "delegation": "delegation", "auxiliary": "auxiliary",
+    "judge": "judges", "fallback": "fallback", "moa": "fallback",
+    "cron": "automation", "plugin": "plugin", "specialist": "specialist",
+}
+
+# A preview binds an apply to an EXACT prepared mutation. It is bound to the
+# store revision + profile identity it was prepared from and expires, so a
+# stale review can never be replayed onto a config that moved on.
+_PREVIEW_TTL_SECONDS = 900
+_PREVIEW_MAX = 32
 
 router = APIRouter()
 
@@ -149,7 +193,11 @@ def _state_dir() -> Path:
 
 def _journal() -> OperationJournal:
     journal = OperationJournal(str(_state_dir() / "operations.db"))
-    _reconcile_unfinished_on_restart(journal)
+    try:
+        _reconcile_unfinished_on_restart(journal)
+    except Exception:
+        journal.close()
+        raise
     return journal
 
 
@@ -158,7 +206,7 @@ def _journal() -> OperationJournal:
 # journal use after a (re)start reconciles every unfinished operation against
 # the actual files, so the documented crash-recovery contract holds even when
 # no one ever clicks a specific operation again.
-_STARTUP_RECONCILED = False
+_STARTUP_RECONCILED: Optional[str] = None
 
 
 def _reconcile_unfinished(journal: OperationJournal) -> List[Dict[str, Any]]:
@@ -172,26 +220,45 @@ def _reconcile_unfinished(journal: OperationJournal) -> List[Dict[str, Any]]:
 
 def _reconcile_unfinished_on_restart(journal: OperationJournal) -> None:
     global _STARTUP_RECONCILED
-    if _STARTUP_RECONCILED:
+    if _STARTUP_RECONCILED == journal.db_path:
         return
-    _STARTUP_RECONCILED = True
     if journal.unfinished_operations():
         _reconcile_unfinished(journal)
+    _STARTUP_RECONCILED = journal.db_path
+
+
+_PRESET_CORRUPT: Optional[bool] = None
+
+
+def _quarantine_presets(path: Path) -> None:
+    """A corrupt preset store is never silently dropped: move it aside so an
+    operator can recover it, and surface the condition via /state."""
+    global _PRESET_CORRUPT
+    _PRESET_CORRUPT = True
+    dest = path.with_name(f"{path.name}.corrupt-{uuid.uuid4().hex}")
+    # Failure blocks saving rather than authorizing loss of recovery data.
+    os.replace(path, dest)
 
 
 def _preset_store() -> PresetStore:
+    global _PRESET_CORRUPT
     store = PresetStore()
     path = _state_dir() / "presets.json"
+    _PRESET_CORRUPT = bool(next(path.parent.glob("presets.json.corrupt-*"), None))
     if path.exists():
         try:
             records = json.loads(path.read_text())
+            if not isinstance(records, list):
+                raise ValueError("preset store is not a list")
         except Exception:
+            _quarantine_presets(path)
             records = []
         for rec in records:
             try:
                 preset = _preset_from_record(rec)
             except Exception:
-                continue
+                _quarantine_presets(path)
+                return PresetStore()
             # ui_changes (the reviewed change intent incl. its slot identity)
             # is attached, not baked into the frozen RouteTarget list.
             ui = rec.get("ui_changes")
@@ -289,13 +356,13 @@ def _infer_slot_id(changes: Dict[str, Any]) -> str:
         return "cron.model"
     if "delegation.fallback_providers" in keys:
         return "delegation.fallback_chain"
-    if "fallback.providers" in keys:
+    if "fallback_providers" in keys:
         return "fallback.main_chain"
     if "moa.default_preset" in keys:
         return "moa.default_preset"
     for key in sorted(keys):
         if key.startswith("moa.presets."):
-            return f"moa.preset.{key.rsplit('.', 1)[-1]}"
+            return f"moa.preset.{key.split('.')[2]}"
     if any(k.startswith("auxiliary.goal_judge") for k in keys):
         return "judge.goal_judge.route"
     aux = {k for k in keys if k.startswith("auxiliary.")}
@@ -304,9 +371,13 @@ def _infer_slot_id(changes: Dict[str, Any]) -> str:
         return f"auxiliary.{slot}"
     if any(k.startswith("delegation.") for k in keys):
         return "delegation.model"
-    if "speech.model_id" in keys:
+    # Specialist routes live at the backend-specific runtime paths
+    # (stt.<provider>.model / tts.<provider>.model); the legacy speech.* keys
+    # are still recognised so records reviewed before the inventory rename
+    # restore without a silent roundtrip.
+    if any(key.startswith("stt.") and key.endswith((".model", ".model_id")) for key in keys) or "speech.model_id" in keys:
         return "specialist.stt"
-    if "speech.streaming_model" in keys:
+    if any(key.startswith("tts.") and key.endswith((".model", ".model_id")) for key in keys) or "speech.streaming_model" in keys:
         return "specialist.tts"
     if "embedding.model" in keys:
         return "specialist.embedding"
@@ -351,13 +422,29 @@ def _typed_to_from_changes(slot_raw: str,
         return {"chain": changes.get({"delegation.fallback_chain":
                                       "delegation.fallback_providers",
                                       "fallback.main_chain":
-                                      "fallback.providers"}[slot_raw])}
+                                      "fallback_providers"}[slot_raw])}
     if slot_raw == "moa.default_preset":
         return {"provider": "", "model": changes.get("moa.default_preset")}
     if slot_raw.startswith("moa.preset."):
-        return {"provider": path("provider"), "model": path("model")}
+        name = slot_raw[len("moa.preset."):]
+        route = changes.get(f"moa.presets.{name}.aggregator", {})
+        if isinstance(route, dict):
+            return {"provider": route.get("provider"), "model": route.get("model")}
+        return {"provider": None, "model": None}
     if slot_raw.startswith("auxiliary.") or slot_raw.startswith("judge."):
         return {"provider": path("provider"), "model": path("model")}
+    # Specialist scalar routes: the typed intent lands on the backend-specific
+    # runtime path, not the slot id. Restore the backend/provider pair;
+    # ElevenLabs uses model_id, other supported backends use model.
+    if slot_raw in ("specialist.stt", "specialist.tts"):
+        section = slot_raw.rsplit(".", 1)[-1]
+        for key, value in changes.items():
+            if key.startswith(section + ".") and key.endswith((".model", ".model_id")):
+                return {"provider": changes.get(section + ".provider") or key.split(".")[1], "model": value}
+        legacy = "speech.model_id" if section == "stt" else "speech.streaming_model"
+        return {"provider": "", "model": changes.get(legacy)}
+    if slot_raw == "specialist.embedding":
+        return {"provider": "", "model": changes.get("embedding.model")}
     return {"provider": "", "model": changes.get(slot_raw)}
 
 
@@ -366,12 +453,16 @@ class PresetIn(BaseModel):
     name: str
     changes: List[Dict[str, Any]]
     billingPolicy: str = "reviewed"
+    allowUnknownCost: bool = False
 
 
 class ApplyIn(BaseModel):
     presetId: Optional[str] = None
     previewId: Optional[str] = None
     changes: Optional[List[Dict[str, Any]]] = None
+    # Explicit acknowledgement that unknown-cost routes are never treated as
+    # free; without it an unknown-cost route blocks the one-click apply.
+    allowUnknownCost: bool = False
 
 
 class ProbeIn(BaseModel):
@@ -399,9 +490,131 @@ def _runtime_writable() -> bool:
     return bool(_ADAPTER.runtime.supported) and not _ADAPTER.runtime.read_only
 
 
+_MODEL_CATALOG_MODULE: Optional[Any] = None
+
+
+def _model_catalog_module() -> Any:
+    """Load dashboard/model_catalog.py by FILE PATH.
+
+    The Dashboard loads plugin_api by module spec (a unique module name, not a
+    package), so ``from dashboard.model_catalog import ...`` is not reliable.
+    Loading by path works in both the installed and the checkout layout. The
+    module is cached for the process."""
+    global _MODEL_CATALOG_MODULE
+    if _MODEL_CATALOG_MODULE is not None:
+        return _MODEL_CATALOG_MODULE
+    import importlib.util
+    path = Path(__file__).resolve().parent / "model_catalog.py"
+    spec = importlib.util.spec_from_file_location(
+        "hermes_model_switcher_model_catalog", str(path))
+    if spec is None or spec.loader is None:
+        raise ImportError("model_catalog module not found")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _MODEL_CATALOG_MODULE = module
+    return module
+
+
 def _config_path_for(profile: str, ident) -> Path:
     """A profile's config.yaml, bound to the DISCOVERED profile directory."""
     return Path(ident.path) / "config.yaml"
+
+
+def _slot_configured_view(obs, cfg: Dict[str, Any],
+                          d) -> Tuple[str, str]:
+    """The value LITERALLY stored for the slot — explicit CONFIGURED only, no
+    inheritance applied.
+
+    Scalar slots (main.default, delegation.model, cron.model, specialist model
+    ids …) carry a bare model string; their provider comes from the paired
+    companion path (model.provider / delegation.provider / cron.model_provider)
+    when one exists. Route-dict slots read provider and model out of the stored
+    dict. Nothing is inferred: an absent provider reports as "" — never a guess
+    and never an inherited value (the resolved route lives in effectiveRoute).
+    """
+    stored = obs.configured
+    if stored is _STORE_MISSING:
+        stored = None
+    provider: Any = None
+    model: Any = None
+    if isinstance(stored, dict):
+        provider = stored.get("provider")
+        model = stored.get("model")
+    elif isinstance(stored, str):
+        model = stored
+    if provider is None:
+        for comp in d.companion_paths:
+            # Only PROVIDER companions qualify: a route dict's neighbours can
+            # include model.base_url/api_mode, and reporting the endpoint URL
+            # as the provider would corrupt /state identities (and leak an
+            # unsanitized URL into the inventory).
+            if not comp.endswith((".provider", "_provider")):
+                continue
+            cv = _get_dotted(cfg, comp)
+            if isinstance(cv, str) and cv.strip():
+                provider = cv
+                break
+    return (provider if provider is not None else "",
+            model if model is not None else "")
+
+
+def _slot_effective_view(obs, configured_provider: Any = "") -> Dict[str, Any]:
+    """The RESOLVED route (inheritance applied) the slot would actually use,
+    safe to render: ``{provider, model}`` plus ``chain`` for chain slots.
+
+    Provider precedence: the explicit inheritance resolver
+    (``obs.effective_provider``) first, then a route dict's own provider, then
+    the configured companion (main's ``model.provider`` involves no
+    inheritance). Chain entries are allowlisted + URL-sanitized before leaving
+    the backend.
+    """
+    eff = obs.effective
+    provider = obs.effective_provider
+    model: Any = None
+    chain: Any = None
+    if isinstance(eff, dict):
+        model = eff.get("model")
+        if provider is None:
+            provider = eff.get("provider")
+    elif isinstance(eff, list):
+        chain = _public_diff_value(eff, "")
+    elif isinstance(eff, str):
+        model = eff
+    if provider is None:
+        provider = configured_provider
+    out: Dict[str, Any] = {"provider": provider if provider is not None else "",
+                           "model": model if model is not None else ""}
+    if chain is not None:
+        out["chain"] = chain
+    return out
+
+
+def _chain_slot_state(obs) -> Tuple[str, Any]:
+    """Truthful three-state view of an ordered-chain slot.
+
+    * a null chain INHERITS when a parent chain supplies the value, otherwise it
+      is genuinely UNSET at the top level — never "disabled" or "removed";
+    * ``[]`` is explicitly DISABLED (distinct from inherit);
+    * any list is configured.
+    The effective chain is returned alongside so the row can show it verbatim.
+    """
+    if obs.source == "inherited":
+        return "inherit", obs.effective
+    if not obs.configured_present or obs.configured is None:
+        return "unset", obs.effective
+    if obs.configured == []:
+        return "disabled", []
+    return "configured", obs.effective
+
+
+def _ui_family_for_slot(slot_raw: Any) -> str:
+    """UI family id for a raw slot id (main.default -> main, judge.* -> judges,
+    cron.model -> automation …). Used to summarise a preset's real scope."""
+    slot = "main.default" if slot_raw in (None, "", "main") else str(slot_raw)
+    if slot in ("main.default",):
+        return "main"
+    prefix = slot.split(".", 1)[0]
+    return _INVENTORY_FAMILY_TO_UI.get(prefix, prefix)
 
 
 def _profile_inventory() -> Dict[str, Dict[str, Any]]:
@@ -418,27 +631,44 @@ def _profile_inventory() -> Dict[str, Dict[str, Any]]:
         slots = []
         for obs in build_inventory(cfg):
             d = obs.descriptor
-            effective = obs.effective
-            eff = effective if isinstance(effective, dict) else {}
             # UI contract: the main route presents as slotId "main"; the raw
             # inventory slot is "main.default" (model) with provider as a
             # companion write (model.provider).
             slot_id = "main" if d.slot_id == "main.default" else d.slot_id
-            provider = eff.get("provider") if eff else (
-                _get_dotted(cfg, "model.provider")
-                if d.slot_id == "main.default" else None)
-            model = eff.get("model") if eff else (
-                obs.effective if d.slot_id == "main.default" else None)
-            slots.append({
+            provider, model = _slot_configured_view(obs, cfg, d)
+            entry = {
                 "profileId": name, "slotId": slot_id,
                 "family": getattr(d.family, "value", str(d.family)),
+                # CONFIGURED (explicit stored) route — never an inherited value.
                 "provider": provider, "model": model,
-                "state": obs.source,
+                # The RESOLVED route (inheritance applied): what the slot would
+                # actually use. The UI renders this separately in the expanded
+                # row, so configured and effective can never be conflated.
+                "effectiveRoute": _slot_effective_view(obs, provider),
+                # UI vocabulary is configured | inherit | unset; map the
+                # inventory's source names onto it exactly.
+                "state": _UI_STATE_NAMES.get(obs.source, obs.source),
                 "writable": _runtime_writable() and d.writable and not d.protected,
                 "storagePath": d.storage_path,
-                "lastObserved": {"provider": provider, "model": model},
+                # No runtime usage evidence here: last-observed is genuinely
+                # UNOBSERVED (never a copy of the configured value).
+                "lastObserved": None,
                 "protocol": d.protocol,
-            })
+            }
+            if d.storage_path in _CHAIN_STORAGE_PATHS:
+                # Chains carry three states, not one: a stored null INHERITS
+                # (or is unset at top level), [] is explicitly DISABLED, and a
+                # list is configured. Reporting [] as "configured" and a null
+                # as a bare empty route would make a disabled chain look
+                # removed and an inherited chain look configured.
+                state, chain = _chain_slot_state(obs)
+                entry["state"] = state
+                # A stored chain can carry route METADATA beside provider/model
+                # (base_url with userinfo, api_key, headers). The public state
+                # DTO is allowlisted + URL-sanitized exactly like the preview
+                # diff and the effective route — never the raw document value.
+                entry["chain"] = _public_diff_value(chain, "")
+            slots.append(entry)
         profiles[name] = {"id": name, "name": name,
                           "writable": _runtime_writable(), "slots": slots}
     return profiles
@@ -452,9 +682,9 @@ def _canonical_main_changes(cfg: Dict[str, Any], to: Dict[str, Any]) -> Dict[str
     Returns the typed ``model.*`` storage changes to apply. Raises on an
     invalid route: callers must block, never silently substitute.
 
-    Note: the seam's stale-credential cleanup is expressed as key REMOVALS,
-    which the engine's readback-checked canonical adapter cannot verify
-    (None = "absent"); only value-carrying side effects are bounded here.
+    Canonical stale-key cleanup is represented by the engine's verified
+    deletion contract. Never retain stale settings because a scratch probe
+    failed; deletion correctness is tested alongside the shipped adapter.
     """
     provider = str(to.get("provider") or "").strip()
     model = str(to.get("model") or "").strip()
@@ -472,7 +702,9 @@ def _canonical_main_changes(cfg: Dict[str, Any], to: Dict[str, Any]) -> Dict[str
     for key in sorted(set(old_block) | set(new_block)):
         new_val = new_block.get(key)
         if key not in new_block or new_val is None:
-            continue  # removal-shaped side effects are not representable here
+            if key in old_block:
+                changes[f"model.{key}"] = None  # stale-key cleanup
+            continue
         if old_block.get(key) != new_val:
             changes[f"model.{key}"] = new_val
     if not changes:
@@ -480,12 +712,34 @@ def _canonical_main_changes(cfg: Dict[str, Any], to: Dict[str, Any]) -> Dict[str
     return changes
 
 
-def _removal_changes_for(desc, cfg: Dict[str, Any]) -> Dict[str, Any]:
+def _assert_removal_identity(desc, observed: Dict[str, Any],
+                             from_payload: Optional[Any]) -> None:
+    """Exact-removal identity: the reviewed route the user saw must still be
+    the server's current route. The server snapshot is authoritative — a
+    mismatch blocks (never inferred, never auto-repaired)."""
+    if not isinstance(from_payload, dict):
+        return
+    for key in ("provider", "model"):
+        want = from_payload.get(key)
+        if want in (None, ""):
+            continue
+        if observed.get(key) != want:
+            raise ValueError(
+                f"slot {desc.slot_id!r} changed since review: expected "
+                f"{key}={want!r}, found {observed.get(key)!r} — re-preview "
+                "before removing")
+
+
+def _removal_changes_for(desc, cfg: Dict[str, Any],
+                         from_payload: Optional[Any] = None) -> Dict[str, Any]:
     """P1 #3: an exact-removal edit binds as an UNSET of this slot's own
     keys — per slot semantics, never a null/"None" route assignment:
-      - route-dict slots (judge/aux/specialist households): only the route
+      - route-dict slots (judge/aux/specialist households): ONLY the route
         fields (provider/model/base_url/api_mode) inside that dict are
-        unset — protected neighbours beside them survive verbatim;
+        unset — protected neighbours beside them (threshold, enforcement)
+        SURVIVE verbatim and the whole object is never dropped; the removal
+        is also checked against the reviewed ``from`` (the server snapshot)
+        before it binds;
       - scalar slots (main, cron, ...): the slot key plus its companions —
         the paired inference provider is unset with the pair even when it is
         currently absent (cron.model_provider), while opportunistic
@@ -501,33 +755,70 @@ def _removal_changes_for(desc, cfg: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("slot is protected/read-only")
     if (desc.family is SlotFamily.MOA
             and desc.storage_path.startswith("moa.presets.")):
-        name = desc.storage_path.rsplit(".", 1)[-1]
-        default_preset = (cfg.get("moa") or {}).get("default_preset")
-        if default_preset == name:
-            raise ValueError(
-                f"cannot remove preset {name!r} while moa.default_preset "
-                "still references it (invalid MoA removal rejected)")
+        raise ValueError("cannot remove a required aggregator route; remove the preset through Hermes")
     changes: Dict[str, Any] = {}
     current = _get_dotted(cfg, desc.storage_path)
-    is_dict = isinstance(current, dict)
-    if is_dict:
+    if isinstance(current, dict):
+        # Route-dict slot: remove ONLY the route fields this slot owns.
+        observed = {k: current[k] for k in _ROUTE_FILTER_KEYS if k in current}
+        _assert_removal_identity(desc, observed, from_payload)
         for key in _ROUTE_FILTER_KEYS:
             if key in current:
                 changes[f"{desc.storage_path}.{key}"] = None
-    if not is_dict or not changes:
-        changes[desc.storage_path] = None
-        for comp in desc.companion_paths:
-            if desc.family is SlotFamily.CRON and comp.endswith("model_provider"):
-                # cron.model always pairs with cron.model_provider (inference
-                # provider, mirroring route_inventory's preview companion
-                # rule); the absent pair member is unset too. cron.provider
-                # (scheduler) is not a companion and is never touched.
-                changes[comp] = None
-            elif _get_dotted(cfg, comp) is not _STORE_MISSING:
-                changes[comp] = None
+        if not changes:
+            raise ValueError("change is a no-op for this slot")
+        return changes
+    # Scalar / chain slots: unset the slot key plus its companions.
+    # The reviewed ``from`` identity is validated against the CURRENT stored
+    # route FIRST: when the route changed after review, the removal blocks
+    # instead of deleting a route the user never selected. (Route-dict slots
+    # run the same check above; scalar slots previously skipped it.)
+    if isinstance(current, str):
+        observed = {
+            "provider": _provider_from_changes(
+                {c: _get_dotted(cfg, c) for c in desc.companion_paths
+                 if _get_dotted(cfg, c) is not _STORE_MISSING}),
+            "model": current,
+        }
+        _assert_removal_identity(desc, observed, from_payload)
+    changes[desc.storage_path] = None
+    for comp in desc.companion_paths:
+        if desc.family is SlotFamily.CRON and comp.endswith("model_provider"):
+            # cron.model always pairs with cron.model_provider (inference
+            # provider, mirroring route_inventory's preview companion rule);
+            # the absent pair member is unset too. cron.provider (scheduler)
+            # is not a companion and is never touched.
+            changes[comp] = None
+        elif _get_dotted(cfg, comp) is not _STORE_MISSING:
+            changes[comp] = None
     if not changes:
         raise ValueError("change is a no-op for this slot")
     return changes
+
+
+def _duplicate_slot_changes(changes: List[Dict[str, Any]]
+                            ) -> List[Dict[str, Any]]:
+    """Changes that repeat a (profile, slot) pair.
+
+    Two intents for one slot (e.g. a set AND an exact-removal from the same
+    editor session) would be coalesced by the engine's same-store grouping
+    (later ``changes.update()`` wins), silently applying only one of them.
+    Every entry path rejects them instead: browser, direct API, and preset.
+    """
+    seen = set()
+    blocked: List[Dict[str, Any]] = []
+    for c in changes:
+        key = (c.get("profileId"), _slot_alias(c.get("slotId")))
+        if key in seen:
+            blocked.append({
+                "profileId": c.get("profileId"),
+                "slotId": c.get("slotId"),
+                "reason": ("duplicate change for the same slot; combine the "
+                           "set and removal into one intent"),
+            })
+        else:
+            seen.add(key)
+    return blocked
 
 
 def _changes_to_targets(changes: List[Dict[str, Any]],
@@ -538,6 +829,15 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
     profile, or a slot not present in that profile's inventory, is blocked —
     never silently substituted."""
     targets, blocked = [], []
+    duplicates = _duplicate_slot_changes(changes)
+    if duplicates:
+        # Two intents for one slot would be coalesced (later wins) and only
+        # ONE of them applied — reject the whole request instead.
+        if strict:
+            raise HTTPException(status_code=422, detail={
+                "ok": False, "error": "preview blocked for some profiles",
+                "blocked": duplicates})
+        return [], duplicates
     for c in changes:
         pid = c.get("profileId")
         prof = profiles.get(pid)
@@ -580,17 +880,15 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
         if removal:
             # P1 #3: to:null is a REMOVAL intent, not a route assignment.
             try:
-                stored = _removal_changes_for(desc, cfg)
+                stored = _removal_changes_for(desc, cfg, c.get("from"))
             except ValueError as exc:
                 blocked.append({"profileId": pid, "slotId": c.get("slotId"),
                                 "reason": str(exc)})
                 continue
-            cost_provider = _provider_from_changes(stored)
             targets.append(RouteTarget(
                 profile=str(pid), store_kind="canonical_config", path=str(cfg_path),
                 changes=stored,
-                cost_class="subscription_included"
-                if cost_provider == "anthropic" else "metered"))
+                cost_class=_route_cost_class(str(pid), stored, ident)))
             continue
         if desc.slot_id == "main.default":
             # P1 #4: canonical preparation instead of a blind
@@ -612,7 +910,7 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
                 continue
         else:
             try:
-                cp = preview_changes(cfg, [RouteEdit(slot_raw, to or {})])
+                cp = preview_changes(cfg, [RouteEdit(slot_raw, _typed_payload(to or {}))])
             except HTTPException as exc:
                 blocked.append({"profileId": pid, "slotId": c.get("slotId"),
                                 "reason": _clean_detail(exc)})
@@ -638,13 +936,10 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
                 blocked.append({"profileId": pid, "slotId": c.get("slotId"),
                                 "reason": "change is a no-op for this slot"})
                 continue
-        _provider_note = stored.get("model.provider") or (
-            to.get("provider") if to else None)
         targets.append(RouteTarget(
             profile=str(pid), store_kind="canonical_config", path=str(cfg_path),
             changes=stored,
-            cost_class="metered" if _provider_note != "anthropic"
-            else "subscription_included"))
+            cost_class=_route_cost_class(str(pid), stored, ident)))
     if strict and blocked:
         raise HTTPException(status_code=422, detail={
             "ok": False, "error": "preview blocked for some profiles",
@@ -654,9 +949,184 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
 
 def _provider_from_changes(stored: Dict[str, Any]) -> str:
     for dotted, value in stored.items():
-        if dotted.endswith(".provider") and isinstance(value, str):
+        if (dotted.endswith(".provider") or dotted.endswith("_provider")) \
+                and isinstance(value, str):
             return value
     return ""
+
+
+def _referenced_providers(stored: Dict[str, Any]) -> List[str]:
+    """Every distinct provider a prepared target routes through, in order.
+
+    Route/route-dict slots contribute their paired provider value
+    (``model.provider`` / ``cron.model_provider`` / ``auxiliary.<x>.provider``);
+    a route-dict VALUE carries its provider INSIDE the slot object
+    (``{"auxiliary.compression": {"provider": "somecloud", "model": "x"}}``), so
+    it is inspected too — otherwise such routes would vacuously pass
+    credential checks and classify as metered;
+    chain slots contribute EVERY entry's provider (a dict route's ``provider``
+    or a bare ``provider/model`` string). A chain is never collapsed onto one
+    provider — each hop is checked on its own.
+    """
+    out: List[str] = []
+    seen = set()
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+
+    for dotted, value in stored.items():
+        if dotted.endswith(".provider") or dotted.endswith("_provider"):
+            if isinstance(value, str):
+                add(value)
+        elif isinstance(value, dict) and isinstance(value.get("provider"), str):
+            add(value.get("provider"))
+        elif dotted in _CHAIN_STORAGE_PATHS or dotted.endswith(".chain"):
+            if isinstance(value, list):
+                for entry in value:
+                    if isinstance(entry, dict):
+                        add(entry.get("provider"))
+                    elif isinstance(entry, str):
+                        add(entry.split("/", 1)[0])
+    return out
+
+
+def _provider_is_custom_endpoint(cfg: Dict[str, Any], provider: str) -> bool:
+    """True when ``provider`` is a user-declared endpoint — a ``providers:`` row
+    carrying a ``base_url``. An explicitly configured custom endpoint needs no
+    hosted credential (this is the "local/custom endpoint has no auth
+    requirement" rule, derived from the config itself, not from a slug)."""
+    table = cfg.get("providers")
+    if not isinstance(table, dict):
+        table = {}
+    key = str(provider or "").strip()
+    prov = table.get(key) or table.get(key.lower())
+    return isinstance(prov, dict) and bool(str(prov.get("base_url") or "").strip())
+
+
+def _profile_env_entries(profile: str, ident) -> Dict[str, str]:
+    """Non-empty, non-comment KEY=VALUE entries from the profile's .env.
+
+    Read only to decide credential PRESENCE; values are never returned to a
+    client. Fail-soft on unreadable state (an empty mapping)."""
+    env_file = Path(ident.path) / ".env"
+    try:
+        if not env_file.is_file():
+            return {}
+        text = env_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    out: Dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        for sep in ("=", ":"):
+            if sep in stripped:
+                key, _, value = stripped.partition(sep)
+                key = key.strip()
+                if key and value.strip():
+                    out[key] = value.strip()
+                break
+    return out
+
+
+def _runtime_provider_authenticated(profile: str, provider: str) -> Optional[bool]:
+    """Provider-scoped runtime authentication via the installed picker catalog.
+
+    Returns True when the picker reports the provider row authenticated, False
+    when it explicitly reports it unauthenticated, and None when the provider is
+    unknown to the catalog or the seam is unavailable. None is never treated as
+    authenticated — the caller decides the unknown case explicitly.
+    """
+    provider = str(provider or "").strip().lower()
+    if not provider:
+        return None
+    try:
+        module = _model_catalog_module()
+        with _ADAPTER.scoped(profile):
+            payload = module._load_picker_payload(False)
+    except Exception:
+        return None
+    rows = payload.get("providers") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return None
+    # Scan ALL matching rows before concluding: the picker payload can carry
+    # duplicate rows for one slug (aliases/canonical entries), and returning
+    # the FIRST match's flag would let an unauthenticated duplicate shadow a
+    # genuinely authenticated row — refusing a valid connection.
+    explicit_false = False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        ids = {str(row.get("slug") or "").strip().lower(),
+               str(row.get("provider_id") or "").strip().lower()}
+        if provider not in ids:
+            continue
+        value = row.get("authenticated")
+        if value is True:
+            return True
+        if value is False:
+            explicit_false = True
+    return False if explicit_false else None
+
+
+def _provider_credentials_satisfied(profile: str, ident, cfg: Dict[str, Any],
+                                    provider: str) -> bool:
+    """Whether ``profile`` can authenticate routing to ``provider``.
+
+    A user-declared custom endpoint needs no hosted credential. Otherwise the
+    provider-scoped runtime authentication seam decides; when it cannot classify
+    the provider, absence of scoped evidence blocks it. An unrelated env entry
+    is never credential evidence for a different provider."""
+    if not str(provider or "").strip():
+        return True
+    row = (cfg.get("providers") or {}).get(provider, {})
+    if isinstance(row, dict):
+        key_env = row.get("key_env") or row.get("api_key_env")
+        if key_env:
+            from agent.secret_scope import get_secret
+            with _ADAPTER.scoped(profile):
+                return bool(get_secret(str(key_env)))
+        if row.get("api_key"):
+            return True
+    if _provider_is_custom_endpoint(cfg, provider):
+        return True
+    authed = _runtime_provider_authenticated(profile, provider)
+    if authed is True:
+        return True
+    if authed is False:
+        return False
+    return False  # unrelated env entries cannot authenticate an unknown provider
+
+
+def _route_cost_class(profile: str, stored: Dict[str, Any],
+                      ident=None) -> str:
+    """Live cost class for a prepared route, classified PER provider.
+
+    Never infers a free/subscription tier from a provider slug. A custom
+    endpoint is metered; a credentialed hosted provider is metered; a provider
+    that cannot be classified at all (no custom endpoint, no runtime auth, no
+    credential evidence) is "unknown" — unknown cost is never treated as free.
+    """
+    if ident is None:
+        ident = discover_profiles().get(profile)
+    providers = _referenced_providers(stored)
+    if not providers:
+        return "metered"  # no hosted provider to classify (e.g. scalar edits)
+    try:
+        cfg = _ADAPTER.load_raw_config(profile)
+    except Exception:
+        return "unknown"
+    for provider in providers:
+        try:
+            if not _provider_credentials_satisfied(profile, ident, cfg, provider):
+                return "unknown"
+        except Exception:
+            return "unknown"
+    return "metered"
 
 
 def _clean_detail(exc: HTTPException) -> str:
@@ -668,6 +1138,86 @@ def _clean_detail(exc: HTTPException) -> str:
 def _observed_value(cfg: Dict[str, Any], dotted: str) -> Any:
     value = _get_dotted(cfg, dotted)
     return None if value is _STORE_MISSING else value
+
+
+def _typed_payload(to: Dict[str, Any]) -> Dict[str, Any]:
+    """Project a UI ``to`` onto the typed route fields this feature owns —
+    including ``chain`` — so the exact reviewed intent (a chain edit, base_url,
+    api_mode) reaches route_inventory verbatim and is never narrowed to a bare
+    provider/model pair. Unknown/foreign keys never reach the prepared
+    mutation.
+
+    Typed-decision VALIDATION markers (``verdict``/``labels``/``schema``/
+    ``typed``/``structured_output``) ride along so route_inventory's protocol
+    check can see them — they are never STORED: the stored shape is built from
+    ``_route_payload_fields`` (provider/model/base_url/api_mode) only.
+    """
+    if not isinstance(to, dict):
+        return {}
+    out = {k: to[k] for k in _TYPED_PAYLOAD_KEYS if k in to}
+    for key in _JUDGE_TYPED_KEYS:
+        if key in to:
+            out[key] = to[key]
+    return out
+
+
+def _sanitize_public_url(value: Any) -> Any:
+    """Strip userinfo (credentials) and query/fragment from a URL before it
+    leaves the backend. A ``base_url`` can embed credentials or a query token;
+    the public diff only ever needs ``scheme://host[:port]/path``."""
+    if not isinstance(value, str) or not value:
+        return value
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+        parts = urlsplit(value)
+    except Exception:
+        return value
+    if not parts.scheme and not parts.netloc:
+        return value  # not a URL — leave scalars untouched
+    host = parts.hostname or ""
+    netloc = f"{host}:{parts.port}" if parts.port else host
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+def _public_route_field(key: str, value: Any) -> Any:
+    return _sanitize_public_url(value) if key == "base_url" else value
+
+
+def _sanitize_change(change: Dict[str, Any]) -> Dict[str, Any]:
+    """A change echoed to the client with its route payloads allowlisted and
+    URL-sanitized — a ``to``/``from`` ``base_url`` never carries credentials or
+    a query token out of the backend."""
+    out = dict(change)
+    for key in ("to", "from"):
+        val = out.get(key)
+        if isinstance(val, (dict, list)):
+            out[key] = _public_diff_value(val, "")
+    return out
+
+
+def _public_diff_value(value: Any, dotted: str) -> Any:
+    """Allowlist a stored route value for a PUBLIC diff. A route dict can
+    share its object with protected neighbours (threshold/enforcement) or
+    secret-adjacent material (api_key, headers); only the route fields this
+    feature owns are ever projected, and any ``base_url`` is URL-sanitized
+    (userinfo/query removed). Scalars pass through unchanged."""
+    if isinstance(value, dict):
+        return {k: _public_route_field(k, v)
+                for k, v in value.items() if k in _PUBLIC_ROUTE_KEYS}
+    if isinstance(value, list):
+        # Ordered chains: project/sanitize each entry; bare provider strings
+        # pass through.
+        out: List[Any] = []
+        for entry in value:
+            if isinstance(entry, dict):
+                out.append({k: _public_route_field(k, v)
+                            for k, v in entry.items() if k in _PUBLIC_ROUTE_KEYS})
+            else:
+                out.append(entry)
+        return out
+    if str(dotted).endswith("base_url"):
+        return _sanitize_public_url(value)
+    return value
 
 
 def _op_dto(op: Dict[str, Any]) -> Dict[str, Any]:
@@ -683,39 +1233,78 @@ def _op_dto(op: Dict[str, Any]) -> Dict[str, Any]:
         "results": [{
             "profileId": s.get("profile"), "status": s.get("state"),
             "store": s.get("store_kind"),
+            # The revision the review was bound to and the revision the write
+            # left behind, straight from the journal step (engine.revision_summary
+            # carries the same pair). The UI renders rev before → after per
+            # result, so a no-change write is visibly a no-op.
+            "revisionBefore": _step_revision(s, "revision_before", "pre_revision"),
+            "revisionAfter": _step_revision(s, "revision_after", "post_revision"),
         } for s in steps],
         "undoable": undoable,
     }
 
 
+def _step_revision(step: Dict[str, Any], *keys: str) -> Optional[str]:
+    """The pre/post revision of a journal step, tolerant of both the public
+    view's step shape and engine.revision_summary's key spelling."""
+    for key in keys:
+        val = step.get(key)
+        if val is not None:
+            return val
+    return None
+
+
 # -- endpoints --------------------------------------------------------------
+# Route handlers are deliberately PLAIN DEFS, not ``async def``: every handler
+# here performs blocking work (strict config reads, canonical saves inside
+# Hermes' lock, and — on refresh — live provider probes). A sync handler runs
+# in FastAPI's threadpool, so a slow provider or lock never blocks the
+# dashboard's event loop for every other request.
 @router.get("/state")
-async def state():
+def state():
     try:
         with _LOCK:
             profiles = _profile_inventory()
             store = _preset_store()
             presets = []
             for pid, p in getattr(store, "_presets", {}).items():
-                first = p.targets[0] if p.targets else None
+                # Exact reviewed slot-scope intents: the UI previews a preset
+                # from ``preset.changes`` (the typed change list) when present,
+                # so the DTO must carry the REAL nested intents
+                # ({profileId, slotId, action, to}) — never just a main route.
+                changes = _ui_changes_for_preset(p)
+                families: List[str] = []
+                for c in changes:
+                    fam = _ui_family_for_slot(c.get("slotId"))
+                    if fam and fam not in families:
+                        families.append(fam)
+                if not families:
+                    families = sorted({_ui_family_for_slot(
+                        _slot_id_for_target(p, t)) for t in p.targets})
+                # Legacy family-scoped fallback: only a genuine MAIN target may
+                # contribute a main assignment; a non-main preset must not
+                # masquerade as one.
                 assignment = {}
-                if first is not None:
-                    # UI contract: per-family assignment map (main → route).
-                    assignment = {"main": {
-                        "provider": first.changes.get("model.provider"),
-                        "model": first.changes.get("model.default"),
-                    }}
+                for t in p.targets:
+                    if _slot_id_for_target(p, t) in ("main", "main.default"):
+                        assignment = {"main": {
+                            "provider": t.changes.get("model.provider"),
+                            "model": t.changes.get("model.default"),
+                        }}
+                        break
                 presets.append({
                     "id": pid,
                     "name": p.name,
                     "profileIds": sorted({t.profile for t in p.targets}),
-                    "families": ["main"],
+                    "families": families,
+                    "changes": [_sanitize_change(c) for c in changes],
                     "assignments": assignment,
                     "billingPolicy": "reviewed",
                 })
         return {"ok": True, "profiles": list(profiles.values()),
                 "slots": [s for p in profiles.values() for s in p["slots"]],
                 "presets": presets,
+                "presetsCorrupt": bool(_PRESET_CORRUPT),
                 "runtime": {"writable": _runtime_writable(),
                             "version": _ADAPTER.runtime.version_label,
                             "reasons": list(_ADAPTER.runtime.reasons)}}
@@ -724,73 +1313,166 @@ async def state():
             "ok": False, "error": f"state unavailable: {type(exc).__name__}"}) from None
 
 
+@router.get("/models")
+def models(response: Response, provider: str = "",
+          profileId: Optional[str] = None, refresh: bool = False):
+    """Provider-aware model catalog — a thin, truthful passthrough.
+
+    Shape: ``{ok, provider, models:[{id,name}], fetchedAt, source, stale,
+    error}``. The result is the catalog module's own dict, returned verbatim;
+    ``ok=False`` (with an explanatory ``error``) is a visible failure, never a
+    silently empty success. The response is never cached.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    provider = str(provider or "")
+    try:
+        catalog = _model_catalog_module()
+    except Exception:
+        return {"ok": False, "provider": provider, "models": [],
+                "fetchedAt": None, "source": "unavailable", "stale": True,
+                "error": "model catalog module unavailable"}
+    # Explicit profile-discovery validation: an unknown profile is a truthful
+    # visible error, never a silent empty success.
+    if profileId and profileId not in discover_profiles():
+        return {"ok": False, "provider": provider, "models": [],
+                "fetchedAt": None, "source": "unknown", "stale": True,
+                "error": f"unknown profile {profileId!r}"}
+    try:
+        result = catalog.get_model_catalog(
+            _ADAPTER, profileId, provider, refresh=bool(refresh))
+    except Exception as exc:
+        return {"ok": False, "provider": provider, "models": [],
+                "fetchedAt": None, "source": "unknown", "stale": True,
+                "error": f"catalog lookup failed: {type(exc).__name__}"}
+    if not isinstance(result, dict):
+        result = {"ok": False, "provider": provider, "models": [],
+                  "fetchedAt": None, "source": "unknown", "stale": True,
+                  "error": "catalog returned an unexpected payload"}
+    return result
+
+
+def _watched_store(change: Dict[str, Any], known) -> Optional[Tuple[str, str, str]]:
+    """The canonical store a change is prepared from (profile, kind, path)."""
+    pid = change.get("profileId")
+    if not isinstance(pid, str):
+        return None
+    ident = known.get(pid)
+    if ident is None:
+        return None
+    return (pid, "canonical_config", str(_config_path_for(pid, ident)))
+
+
+def _store_revision(watched: Optional[Tuple[str, str, str]]) -> Optional[str]:
+    if watched is None:
+        return None
+    profile, kind, path = watched
+    try:
+        return adapter_for(kind, path, profile).revision()
+    except Exception:
+        return None
+
+
+def _watch_stores(changes: List[Dict[str, Any]], known
+                  ) -> Dict[Tuple[str, str, str], Optional[str]]:
+    """Revision snapshot of every canonical store the changes touch, taken
+    BEFORE preparation, so the caller can pin and verify it afterwards."""
+    watched: Dict[Tuple[str, str, str], Optional[str]] = {}
+    for c in changes:
+        store = _watched_store(c, known)
+        if store is not None:
+            watched[store] = _store_revision(store)
+    return watched
+
+
+def _revision_drift(watched: Dict[Tuple[str, str, str], Optional[str]]
+                    ) -> Optional[str]:
+    """Profile whose watched store no longer matches its pre-preparation
+    revision, or None when every store still matches.
+
+    FAILS CLOSED: an unreadable/absent revision is treated as drift — an
+    unverifiable guard must not silently disable the race check.
+    """
+    for (profile, kind, path), before in watched.items():
+        now = _store_revision((profile, kind, path))
+        if before is None or now != before:
+            return profile
+    return None
+
+
 @router.post("/preview")
-async def preview(body: Dict[str, Any]):
+def preview(body: Dict[str, Any]):
     try:
         profiles = _profile_inventory()
         changes = body.get("changes") or []
-        # Pure preview over the raw configs; no writes anywhere. The response
-        # echoes the REVIEWED change-set in the UI's shape (plus side effects
-        # and blocks derived from the typed route diff) — never the internal
-        # storage-path diff or raw config fragments.
-        out_changes, blocked = [], []
+        duplicates = _duplicate_slot_changes(changes)
+        if duplicates:
+            # A request repeating one slot is refused as a whole: applying the
+            # coalesced subset would silently drop the other intent.
+            preview_id = "pv-" + uuid.uuid4().hex[:12]
+            with _LOCK:
+                _PREVIEW_CACHE[preview_id] = _bind_preview([], profiles,
+                                                           duplicates)
+                _evict_previews()
+            return {"ok": True, "previewId": preview_id,
+                    "preview": {"id": preview_id, "changes": [],
+                                "blocked": duplicates}}
+        # A preview is the SAME prepared mutation an apply would run (one code
+        # path: _changes_to_targets) — so the diff shown is exactly what Apply
+        # writes, chain edits, base_url/api_mode side effects and canonical
+        # main preparation included. No writes happen here.
+        out_changes, blocked, prepared = [], [], []
+        known = discover_profiles()
         with _LOCK:
             for c in changes:
-                pid = c.get("profileId")
-                ident = discover_profiles().get(pid)
-                if ident is None:
-                    blocked.append({"profileId": pid, "reason": "unknown profile"})
+                # Watch the target's canonical store ACROSS preparation: the
+                # prepared mutation (canonical cleanup deletions included) is
+                # derived from that document, so a write landing between the
+                # read and the bind must abort the preview — never be adopted
+                # as the mutation's expected revision.
+                watched = _watch_stores([c], known)
+                targets, blk = _changes_to_targets([c], profiles, strict=False)
+                if blk:
+                    blocked.extend(blk)
                     continue
-                cfg = _ADAPTER.load_raw_config(pid)
-                slot_id = _slot_alias(c.get("slotId"))
-                if str(c.get("action") or "").lower() == "remove":
-                    # P1 #3: the exact-removal UI sends to:null — preview it as
-                    # the slot-aware UNSET it is (not a null-route assignment).
-                    desc = next((o.descriptor for o in build_inventory(cfg)
-                                 if o.descriptor.slot_id == slot_id), None)
-                    if desc is None:
-                        blocked.append({"profileId": pid, "slotId": c.get("slotId"),
-                                        "reason": f"unknown slot {c.get('slotId')!r}"})
-                        continue
-                    try:
-                        removal = _removal_changes_for(desc, cfg)
-                    except ValueError as exc:
-                        blocked.append({"profileId": pid, "slotId": c.get("slotId"),
-                                        "reason": str(exc)})
-                        continue
-                    out_changes.append({
-                        **c, "sideEffects": [],
-                        "diff": [{"path": dotted, "from": _observed_value(cfg, dotted),
-                                  "to": None}
-                                 for dotted in sorted(removal)]})
+                if not targets:
+                    blocked.append({"profileId": c.get("profileId"),
+                                    "slotId": c.get("slotId"),
+                                    "reason": "change is a no-op for this slot"})
                     continue
-                to = c.get("to") or {}
-                edit = RouteEdit(slot_id=slot_id,
-                                 value={"provider": to.get("provider"),
-                                        "model": to.get("model")})
-                cp = preview_changes(cfg, [edit])
-                if cp.rejected:
-                    blocked.append({"profileId": pid, "slotId": c.get("slotId"),
-                                    "reason": "; ".join(cp.rejected)})
+                pid = targets[0].profile
+                try:
+                    cfg = _ADAPTER.load_raw_config(pid)
+                except Exception:
+                    blocked.append({"profileId": pid,
+                                    "reason": "config unreadable"})
                     continue
-                side_effects = []
-                for ch in cp.changes:
-                    if ch.storage_path == "model.provider" and ch.before != ch.after:
-                        # canonical provider switch seeds tool defaults —
-                        # disclosed here, applied only on Apply.
-                        side_effects.append("canonical tool defaults seeded")
-                out_changes.append({**c, "sideEffects": side_effects,
-                                    # per-change typed storage-path diff
-                                    # (relative config paths only)
-                                    "diff": [{"path": ch.storage_path,
-                                              "from": ch.before, "to": ch.after}
-                                             for ch in cp.changes]})
+                diff, side_effects = _diff_for_targets(targets, cfg, c)
+                drift = _revision_drift(watched)
+                if drift is not None:
+                    blocked.append({
+                        "profileId": drift,
+                        "slotId": c.get("slotId"),
+                        "kind": "raced",
+                        "reason": ("config changed while the preview was "
+                                   "prepared; retry the preview")})
+                    continue
+                for t in targets:
+                    entry = {"profile": t.profile,
+                             "store_kind": t.store_kind,
+                             "path": t.path, "changes": t.changes}
+                    key = (t.profile, t.store_kind, t.path)
+                    if watched.get(key) is not None:
+                        # Pin the revision the mutation was prepared FROM, not
+                        # whatever the store holds at bind time.
+                        entry["expected_revision"] = watched[key]
+                    prepared.append(entry)
+                out_changes.append({**_sanitize_change(c),
+                                    "sideEffects": side_effects,
+                                    "diff": diff})
         preview_id = "pv-" + uuid.uuid4().hex[:12]
         with _LOCK:
-            _PREVIEW_CACHE[preview_id] = copy.deepcopy(changes)
-            if len(_PREVIEW_CACHE) > 32:
-                for k in list(_PREVIEW_CACHE)[:-32]:
-                    _PREVIEW_CACHE.pop(k, None)
+            _PREVIEW_CACHE[preview_id] = _bind_preview(prepared, profiles, blocked)
+            _evict_previews()
         return {"ok": True, "previewId": preview_id,
                 "preview": {"id": preview_id, "changes": out_changes,
                             "blocked": blocked}}
@@ -801,22 +1483,176 @@ async def preview(body: Dict[str, Any]):
             "ok": False, "error": f"preview failed: {type(exc).__name__}"}) from None
 
 
-_PREVIEW_CACHE: Dict[str, List[Dict[str, Any]]] = {}
+# A preview entry is the EXACT prepared mutation an apply will run, bound to
+# the store revisions + profile identities it was prepared from, with an
+# expiry. It is never the raw request the client sent.
+_PREVIEW_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+# Canonical main-routing side effects: the seam writes these model.* keys when
+# the chosen provider needs a custom endpoint. They are part of the SAME
+# prepared mutation (Apply writes them) and disclosed as side effects — the
+# route diff keeps the UI contract of showing only the reviewed route fields.
+_MAIN_SIDE_EFFECT_KEYS = ("model.base_url", "model.api_mode")
+
+
+def _diff_for_targets(targets, cfg: Dict[str, Any],
+                      change: Dict[str, Any]
+                      ) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Public, allowlisted diff of the prepared mutation (relative config
+    paths only — never raw config fragments or secret neighbours)."""
+    diff: List[Dict[str, Any]] = []
+    side_effects: List[str] = []
+    removal = str(change.get("action") or "").lower() == "remove"
+    for t in targets:
+        for dotted, value in t.changes.items():
+            if dotted in _MAIN_SIDE_EFFECT_KEYS:
+                continue
+            diff.append({
+                "path": dotted,
+                "from": _public_diff_value(_observed_value(cfg, dotted), dotted),
+                "to": _public_diff_value(value, dotted),
+            })
+        if not removal:
+            if any(k in t.changes for k in _MAIN_SIDE_EFFECT_KEYS):
+                side_effects.append("canonical endpoint settings applied")
+            if "model.provider" in t.changes:
+                # a canonical provider switch seeds tool defaults — disclosed
+                # at preview, applied only on Apply.
+                side_effects.append("canonical tool defaults seeded")
+    diff.sort(key=lambda d: d["path"])
+    return diff, side_effects
+
+
+def _bind_preview(prepared: List[Dict[str, Any]],
+                  profiles: Dict[str, Dict[str, Any]],
+                  blocked: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Bind a prepared mutation to the store revision + profile identity it
+    was prepared from, with an expiry."""
+    now = time.time()
+    revisions: Dict[Tuple[str, str, str], Any] = {}
+    fingerprints: Dict[str, str] = {}
+    known = discover_profiles()
+    bound_targets: List[Dict[str, Any]] = []
+    for t in prepared:
+        key = (t["profile"], t["store_kind"], t["path"])
+        # Prefer the revision the mutation was PREPARED from (pinned by the
+        # caller around its config read); only targets without one fall back
+        # to a read here. Re-reading unconditionally would adopt an external
+        # write that landed during preparation as the expected revision.
+        rev = t.get("expected_revision")
+        if rev is None:
+            try:
+                rev = adapter_for(t["store_kind"], t["path"], t["profile"]).revision()
+            except Exception:
+                rev = None
+        revisions[key] = rev
+        ident = known.get(t["profile"])
+        if ident is not None:
+            fingerprints[t["profile"]] = ident.fingerprint
+        bound = dict(t)
+        if ident is not None:
+            # Carry the CACHED identity so the engine plans against exactly the
+            # profile the review saw, and pin the reviewed revision via
+            # ``expected_revision`` so a store that moved between verify and
+            # plan blocks instead of silently rebasing.
+            bound["identity"] = _identity_dict(ident)
+            if rev is not None and "expected_revision" not in bound:
+                bound["expected_revision"] = rev
+        bound_targets.append(bound)
+    return {"targets": bound_targets, "revisions": revisions,
+            "fingerprints": fingerprints,
+            # A preview that contained blocked changes is remembered as such:
+            # applying only its valid subset would silently drop the blocked
+            # entries, so the apply path refuses it (all-or-nothing review).
+            "blocked": list(blocked or []),
+            "created_at": now,
+            "expires_at": now + _PREVIEW_TTL_SECONDS}
+
+
+def _identity_dict(ident) -> Dict[str, Any]:
+    """Serialized profile identity (name, path, fingerprint) — the keys the
+    engine's plan records privately on each step and re-checks at apply."""
+    try:
+        from dataclasses import asdict
+        return asdict(ident)
+    except Exception:
+        return {"name": getattr(ident, "name", None),
+                "path": getattr(ident, "path", None),
+                "fingerprint": getattr(ident, "fingerprint", None)}
+
+
+def _evict_previews() -> None:
+    """Callers MUST hold ``_LOCK`` (all current callers do)."""
+    if len(_PREVIEW_CACHE) <= _PREVIEW_MAX:
+        return
+    for k in list(_PREVIEW_CACHE)[:-_PREVIEW_MAX]:
+        _PREVIEW_CACHE.pop(k, None)
+
+
+def _get_preview_entry(preview_id: str) -> Dict[str, Any]:
+    """Callers MUST hold ``_LOCK`` (all current callers do); the cache is
+    process-global and handlers now run on FastAPI's threadpool."""
+    entry = _PREVIEW_CACHE.get(preview_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail={
+            "ok": False, "error": "unknown or expired preview"})
+    if time.time() > entry.get("expires_at", 0):
+        _PREVIEW_CACHE.pop(preview_id, None)
+        raise HTTPException(status_code=409, detail={
+            "ok": False, "blocked": True, "stale": True,
+            "error": "preview expired; re-preview before applying"})
+    return entry
+
+
+def _verify_preview_fresh(entry: Dict[str, Any]) -> None:
+    """Explicit stale rejection: a preview whose store revision or profile
+    identity moved on can never be replayed. No silent re-derivation."""
+    reasons: List[str] = []
+    known = discover_profiles()
+    for profile, fp in entry.get("fingerprints", {}).items():
+        cur = known.get(profile)
+        if cur is None or cur.fingerprint != fp:
+            reasons.append(f"profile {profile!r} identity changed since preview")
+    for (profile, kind, path), rev in entry.get("revisions", {}).items():
+        try:
+            cur = adapter_for(kind, path, profile).revision()
+        except Exception:
+            cur = None
+        # An UNVERIFIABLE recorded revision (None — the read failed when the
+        # preview was bound) fails closed: None == None must never pass as
+        # "unchanged", and an unreadable store now is equally stale.
+        if rev is None or cur != rev:
+            reasons.append(
+                f"store for profile {profile!r} changed since preview")
+    if reasons:
+        raise HTTPException(status_code=409, detail={
+            "ok": False, "blocked": True, "stale": True,
+            "error": ("preview is stale; the configuration changed since "
+                      "preview — re-preview before applying"),
+            "reasons": sorted(set(reasons))})
 
 
 @router.post("/presets")
-async def save_preset(body: PresetIn):
+def save_preset(body: PresetIn):
     try:
         with _LOCK:
             profiles = _profile_inventory()
             targets, _blocked = _changes_to_targets(body.changes, profiles)
             store = _preset_store()
             pid = "p-" + uuid.uuid4().hex[:8]
-            reviewed = sorted({t.profile for t in targets})
+            # Discovery-at-review: remember every profile that existed when
+            # the preset was reviewed, so preflight's "new profile" gate flags
+            # only profiles discovered AFTER review. An existing but
+            # unselected profile must NOT block an alpha-only preset; the
+            # apply SCOPE stays exactly the reviewed targets.
+            reviewed = sorted(discover_profiles())
+            selected = sorted({t.profile for t in targets})
             preset = ReviewedPreset(
                 preset_id=pid, name=body.name,
                 billing_policy=BillingPolicy(
-                    approved_classes=["subscription_included", "metered"]),
+                    approved_classes=["subscription_included", "metered"],
+                    allow_unknown=body.allowUnknownCost),
                 targets=targets, reviewed_profile_ids=reviewed)
             # P1 #2: freeze the reviewed change intent WITH its slot identity,
             # so one-click apply restores every target onto its own slot.
@@ -825,7 +1661,7 @@ async def save_preset(body: PresetIn):
             store.save(preset)
             _persist_presets(store)
         return {"ok": True, "preset": {"id": pid, "name": body.name,
-                                       "profileIds": reviewed}}
+                                       "profileIds": selected}}
     except HTTPException:
         raise
     except Exception as exc:
@@ -834,46 +1670,59 @@ async def save_preset(body: PresetIn):
 
 
 # -- F1: ReviewedPreset.preflight runs BEFORE a one-click apply -------------
-def _profile_has_credentials(profile: str, ident) -> bool:
-    """Presence-only credential check (never reads values into responses):
-    a discovered profile is credit-bearing when its .env carries at least
-    one non-empty, non-comment entry. Fail-closed on any unreadable state."""
-    env_file = Path(ident.path) / ".env"
+def _profile_has_credentials(profile: str, ident,
+                             providers: Optional[List[str]] = None) -> bool:
+    """Provider-scoped credential readiness for a profile.
+
+    Empty ``providers`` (a scalar route with no hosted provider, or a removal)
+    is satisfied vacuously. Otherwise every referenced provider must be
+    explicable — a user-declared custom endpoint, a runtime-authenticated
+    provider, or backed by the profile's own credential material. Fail-closed
+    on unreadable state; never a blanket "any .env key ⇒ authenticated"."""
+    needed = [p for p in (providers or []) if str(p or "").strip()]
+    if not needed:
+        return True
     try:
-        if not env_file.is_file():
-            return False
-        text = env_file.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        cfg = _ADAPTER.load_raw_config(profile)
+    except Exception:
         return False
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        for sep in ("=", ":"):
-            key, _, value = stripped.partition(sep)
-            if key.strip() and value.strip():
-                return True
-    return False
+    for provider in needed:
+        try:
+            if not _provider_credentials_satisfied(profile, ident, cfg, provider):
+                return False
+        except Exception:
+            return False
+    return True
 
 
 def _live_cost_class(t: RouteTarget) -> str:
-    """The live cost class of a review-time route, derived the same way the
-    review did (provider-based) — but only for classifiable route values.
-    A drifted catalog feeds the fresh classification into preflight; an
-    unclassifiable frozen class (e.g. 'unknown') passes through verbatim so
+    """The live cost class of a review-time route, re-derived PER provider.
+    A frozen unclassifiable class (e.g. 'unknown') passes through verbatim so
     the preset's billing policy — never a silent free pass — gates it."""
     if t.cost_class not in ("subscription_included", "metered"):
         return t.cost_class  # e.g. 'unknown': unknown cost is never treated as free
-    provider = _provider_from_changes(t.changes)
-    return "subscription_included" if provider == "anthropic" else "metered"
+    return _route_cost_class(t.profile, t.changes)
 
 
-def _preset_preflight(preset: ReviewedPreset) -> List[str]:
+def _preset_preflight(preset: ReviewedPreset,
+                      allow_unknown: bool = False) -> List[str]:
     profiles = discover_profiles()
+    # Apply cannot broaden a saved policy. Save a newly reviewed preset to
+    # approve unknown costs; request acknowledgements are for custom reviews.
+    # Credentials are checked PER PROVIDER: every provider a profile's preset
+    # targets route through (chain hops included) must be explicable for that
+    # profile — not just "the profile has some .env".
+    providers_by_profile: Dict[str, List[str]] = {}
+    for t in preset.targets:
+        bucket = providers_by_profile.setdefault(t.profile, [])
+        for p in _referenced_providers(t.changes):
+            if p not in bucket:
+                bucket.append(p)
     credentials = {}
     for name, ident in profiles.items():
         try:
-            credentials[name] = _profile_has_credentials(name, ident)
+            credentials[name] = _profile_has_credentials(
+                name, ident, providers_by_profile.get(name, []))
         except Exception:
             credentials[name] = False  # fail closed, never fabricate
     live_cost_classes = {_route_key(t): _live_cost_class(t) for t in preset.targets}
@@ -882,7 +1731,200 @@ def _preset_preflight(preset: ReviewedPreset) -> List[str]:
                             discovered_profiles=sorted(profiles))
 
 
-def _resolve_changes(body: ApplyIn) -> List[Dict[str, Any]]:
+def _preset_target_dicts(preset: ReviewedPreset,
+                         profiles: Dict[str, Dict[str, Any]]
+                         ) -> List[Dict[str, Any]]:
+    """The preset's reviewed changes re-prepared against the CURRENT documents.
+
+    Derived mutations (canonical main cleanup deletions, exact-removal
+    deletions, no-op drift) are REGENERATED from the reviewed typed intents
+    (``ui_changes``) at apply time — the same code path an interactive
+    preview+apply uses — so a frozen deletion can never fire against a
+    document it was not reviewed against. A preset whose reviewed changes no
+    longer apply cleanly (identity drift, no-op, protected slot) blocks
+    wholesale with the reviewed reasons. Legacy records without reviewed
+    intents fall back to their frozen target changes.
+    """
+    known = discover_profiles()
+    ui = getattr(preset, "ui_changes", None)
+    if isinstance(ui, list) and ui:
+        watched = _watch_stores(ui, known)
+        derived, blocked = _changes_to_targets(copy.deepcopy(ui), profiles,
+                                               strict=False)
+        if blocked:
+            raise HTTPException(status_code=409, detail={
+                "ok": False, "blocked": True,
+                "error": "apply blocked: the preset no longer applies cleanly",
+                "reasons": [str(b.get("reason") or "blocked change")
+                            for b in blocked]})
+        drift = _revision_drift(watched)
+        if drift is not None:
+            raise HTTPException(status_code=409, detail={
+                "ok": False, "blocked": True, "stale": True,
+                "error": ("apply blocked: the configuration changed while the "
+                          "preset was prepared; retry the apply"),
+                "reasons": [f"store for profile {drift!r} changed during "
+                            "preparation"]})
+        out: List[Dict[str, Any]] = []
+        for t in derived:
+            ident = known.get(t.profile)
+            path = _config_path_for(t.profile, ident) if ident is not None else t.path
+            target = {"profile": t.profile, "store_kind": t.store_kind,
+                      "path": str(path), "changes": copy.deepcopy(t.changes)}
+            if ident is not None:
+                target["identity"] = _identity_dict(ident)
+            key = (t.profile, t.store_kind, str(path))
+            if watched.get(key) is not None:
+                target["expected_revision"] = watched[key]
+            out.append(target)
+        return out
+    out = []
+    for t in preset.targets:
+        ident = known.get(t.profile)
+        path = _config_path_for(t.profile, ident) if ident is not None else t.path
+        target = {"profile": t.profile, "store_kind": t.store_kind,
+                  "path": str(path), "changes": copy.deepcopy(t.changes)}
+        # Bind the discovered identity so the engine plans against exactly the
+        # profile the preset was reviewed for (no re-derivation at plan time).
+        if ident is not None:
+            target["identity"] = _identity_dict(ident)
+        out.append(target)
+    return out
+
+
+def _same_prepared_scope(a: List[Dict[str, Any]],
+                         b: List[Dict[str, Any]]) -> bool:
+    """Exact scope + typed-INTENT match between two prepared target sets.
+
+    Only the canonical scope (profile / store_kind / path) and the reviewed
+    route changes are compared. Two kinds of key are deliberately excluded
+    because they are NOT reviewed intent:
+
+    * engine GUARD metadata — ``identity`` / ``expected_revision`` — which a
+      cached preview target carries but a freshly rebuilt preset target does
+      not; and
+    * canonical MAIN side effects — ``model.base_url`` / ``model.api_mode`` —
+      which the canonical seam derives from the provider (they are excluded
+      from the public diff too), so a preview target and its frozen preset
+      target legitimately differ on them.
+    """
+    def norm(ts):
+        return sorted(
+            (t["profile"], t["store_kind"], t["path"],
+             tuple(sorted(
+                 (k, json.dumps(v, sort_keys=True, default=str))
+                 for k, v in (t.get("changes") or {}).items()
+                 if k not in _MAIN_SIDE_EFFECT_KEYS)))
+            for t in ts)
+    return norm(a) == norm(b)
+
+
+def _unchanged_provider_hops(profile: str,
+                             changes: Dict[str, Any]) -> List[str]:
+    """Providers of scalar route assignments whose companion provider field is
+    NOT part of the write map (same-provider model edits).
+
+    A model-only edit omits the unchanged ``X.provider`` companion, so the
+    credential gate would otherwise be skipped. The provider is resolved from
+    the CURRENT document through the slot's OWN descriptor companions — never
+    a generic path guess (``cron.provider`` is the scheduler, not a model
+    provider). Returns [] for deletions/unset/disable (no route is written)
+    and for slots without a provider companion.
+    """
+    if not isinstance(changes, dict) or not changes:
+        return []
+    try:
+        cfg = _ADAPTER.load_raw_config(profile)
+        inventory = build_inventory(cfg)
+    except Exception:
+        return []
+    out: List[str] = []
+    for dotted, value in changes.items():
+        if not isinstance(value, str) or not value.strip():
+            continue  # deletion / unset / disable writes no route
+        for obs in inventory:
+            desc = obs.descriptor
+            if desc.storage_path != dotted:
+                continue
+            found_any = False
+            for comp in desc.companion_paths:
+                if not comp.endswith((".provider", "_provider")):
+                    continue
+                found = _get_dotted(cfg, comp)
+                if isinstance(found, str) and found.strip() and found not in out:
+                    out.append(found)
+                if isinstance(found, str) and found.strip():
+                    found_any = True
+            if not found_any and desc.inherit_provider_from:
+                # The route INHERITS its provider (e.g. delegation.model
+                # with no delegation.provider inherits model.provider):
+                # the gate must follow the inheritance, or an edit routing
+                # through an unauthenticated hosted parent would pass.
+                base = _get_dotted(cfg, desc.inherit_provider_from)
+                if isinstance(base, str) and base.strip() and base not in out:
+                    out.append(base)
+            break
+    return out
+
+
+def _ensure_prepared_credentials(prepared: List[Dict[str, Any]]) -> None:
+    """Provider-scoped credential gate for prepared write targets.
+
+    Every provider a target routes through (chain hops and route-dict values
+    included) must be explicable for that target's profile — never a blanket
+    "profile has some .env". Raises the 409 apply-block contract when any
+    profile cannot authenticate a referenced provider.
+    """
+    known = discover_profiles()
+    missing: List[str] = []
+    for t in prepared:
+        changes = t.get("changes") or {}
+        needed = _referenced_providers(changes)
+        profile = t.get("profile")
+        if not needed and profile:
+            # Same-provider model edits omit the unchanged provider field.
+            needed = _unchanged_provider_hops(profile, changes)
+        if not needed:
+            continue
+        ident = known.get(profile)
+        if ident is None or not _profile_has_credentials(profile, ident, needed):
+            missing.append(str(profile))
+    if missing:
+        raise HTTPException(status_code=409, detail={
+            "ok": False, "blocked": True,
+            "error": "apply blocked: missing provider credentials",
+            "reasons": [f"profile {p!r} is missing provider credentials"
+                        for p in sorted(set(missing))]})
+
+
+def _resolve_apply(body: ApplyIn, profiles: Dict[str, Dict[str, Any]]
+                   ) -> List[Dict[str, Any]]:
+    """Resolve the EXACT prepared write targets for an apply.
+
+    Precedence is explicit and never silently drops a supplied id:
+      * a previewId binds the apply to the EXACT prepared mutation that was
+        reviewed (revision/identity checked, expiry enforced);
+      * a presetId binds it to the preset's frozen reviewed scope (preflight
+        gated; an explicit allowUnknownCost acknowledgement is honored);
+      * when BOTH are present they must describe the same scope — an exact
+        match, otherwise the apply is rejected rather than the preview being
+        ignored.
+    """
+    prepared: Optional[List[Dict[str, Any]]] = None
+    if body.previewId:
+        entry = _get_preview_entry(body.previewId)
+        _verify_preview_fresh(entry)
+        if entry.get("blocked"):
+            # All-or-nothing review: the preview refused part of the requested
+            # change-set; replaying only its valid subset would silently drop
+            # the blocked entries, so the apply is refused with the reviewed
+            # reasons until the user fixes them and re-previews.
+            raise HTTPException(status_code=409, detail={
+                "ok": False, "blocked": True,
+                "error": "apply blocked: the preview contained blocked changes",
+                "reasons": [str(b.get("reason") or "blocked change")
+                            for b in entry["blocked"]]})
+        prepared = copy.deepcopy(entry["targets"])
     if body.presetId:
         store = _preset_store()
         try:
@@ -893,28 +1935,76 @@ def _resolve_changes(body: ApplyIn) -> List[Dict[str, Any]]:
         # P1 #1: preflight gates EVERY one-click apply — missing credentials,
         # drifted/unknown cost classes and newly discovered profiles block
         # before any write, never silently substituted.
-        reasons = _preset_preflight(preset)
+        reasons = _preset_preflight(
+            preset, allow_unknown=bool(body.allowUnknownCost))
         if reasons:
             raise HTTPException(status_code=409, detail={
                 "ok": False, "blocked": True,
                 "error": "apply blocked: preset preflight refused",
                 "reasons": reasons})
-        # P1 #2: the preset's own reviewed intent (real slots, typed values)
-        # is authoritative — never re-derive a main-only route list.
-        ui_changes = getattr(preset, "ui_changes", None)
-        if isinstance(ui_changes, list) and ui_changes:
-            return [dict(c) for c in ui_changes]
-        return _ui_changes_from_targets(preset)
-    if body.previewId and body.previewId in _PREVIEW_CACHE:
-        return _PREVIEW_CACHE[body.previewId]
-    if body.changes:
-        return body.changes
-    raise HTTPException(status_code=422, detail={
-        "ok": False, "error": "no changes to apply"})
+        preset_targets = _preset_target_dicts(preset, profiles)
+        if prepared is not None:
+            if not _same_prepared_scope(prepared, preset_targets):
+                raise HTTPException(status_code=409, detail={
+                    "ok": False, "blocked": True, "stale": True,
+                    "error": ("preview does not match the reviewed preset "
+                              "scope; re-preview the preset before applying")})
+        else:
+            prepared = preset_targets
+    if prepared is None:
+        if not body.changes:
+            raise HTTPException(status_code=422, detail={
+                "ok": False, "error": "no changes to apply"})
+        known = discover_profiles()
+        watched = _watch_stores(body.changes, known)
+        targets, blocked = _changes_to_targets(body.changes, profiles,
+                                               strict=False)
+        if blocked:
+            if all(b.get("kind") == "route_refusal" for b in blocked):
+                # 409 apply contract: the canonical seam refused the route —
+                # the apply block (no write, no journal row) with the blocked
+                # flag set; never a blind overwrite.
+                raise HTTPException(status_code=409, detail={
+                    "ok": False, "blocked": True,
+                    "error": "apply blocked: the canonical route was rejected",
+                    "reasons": [b.get("reason", "") for b in blocked]})
+            # Request-binding errors (unknown slot/profile, protected slot,
+            # ...) keep the visible 422 block contract.
+            raise HTTPException(status_code=422, detail={
+                "ok": False, "error": "preview blocked for some profiles",
+                "blocked": blocked})
+        prepared = [{"profile": t.profile, "store_kind": t.store_kind,
+                     "path": t.path, "changes": t.changes} for t in targets]
+        # Direct applies are revision-pinned exactly like previews: the
+        # prepared mutation (canonical cleanup deletions included) is derived
+        # from these documents, so a write landing between preparation and
+        # planning must block instead of being written onto.
+        drift = _revision_drift(watched)
+        if drift is not None:
+            raise HTTPException(status_code=409, detail={
+                "ok": False, "blocked": True, "stale": True,
+                "error": ("apply blocked: the configuration changed while it "
+                          "was prepared; retry the apply"),
+                "reasons": [f"store for profile {drift!r} changed during "
+                            "preparation"]})
+        for t in prepared:
+            key = (t["profile"], t["store_kind"], t["path"])
+            if watched.get(key) is not None:
+                t["expected_revision"] = watched[key]
+    if not prepared:
+        raise HTTPException(status_code=422, detail={
+            "ok": False, "error": "no valid write targets"})
+    # Provider-scoped credential gate for EVERY resolution path. A cached
+    # preview can outlive the credential it was prepared under (or be replayed
+    # by a client that never held one), so preview-based applies are gated
+    # exactly like direct ones. Removals/unset carry no provider and are not
+    # gated.
+    _ensure_prepared_credentials(prepared)
+    return prepared
 
 
 @router.post("/operations")
-async def apply(body: ApplyIn):
+def apply(body: ApplyIn):
     if not _runtime_writable():
         raise HTTPException(status_code=409, detail={
             "ok": False, "error": "runtime is read-only; writes refused",
@@ -922,31 +2012,15 @@ async def apply(body: ApplyIn):
     try:
         with _LOCK:
             profiles = _profile_inventory()
-            changes = _resolve_changes(body)
-            targets, blocked = _changes_to_targets(changes, profiles, strict=False)
-            if blocked:
-                if all(b.get("kind") == "route_refusal" for b in blocked):
-                    # 409 apply contract: the canonical seam refused the
-                    # route — the apply block (no write, no journal row)
-                    # with the blocked flag set; never a blind overwrite.
-                    raise HTTPException(status_code=409, detail={
-                        "ok": False, "blocked": True,
-                        "error": "apply blocked: the canonical route was rejected",
-                        "reasons": [b.get("reason", "") for b in blocked]})
-                # Request-binding errors (unknown slot/profile, protected
-                # slot, ...) keep the visible 422 block contract.
-                raise HTTPException(status_code=422, detail={
-                    "ok": False, "error": "preview blocked for some profiles",
-                    "blocked": blocked})
-            if not targets:
-                raise HTTPException(status_code=422, detail={
-                    "ok": False, "error": "no valid write targets"})
+            prepared = _resolve_apply(body, profiles)
             journal = _journal()
-            op = plan_operation(journal, [
-                {"profile": t.profile, "store_kind": t.store_kind,
-                 "path": t.path, "changes": t.changes} for t in targets])
-            outcome = apply_operation(journal, op["op_id"])
-            return {"ok": True, "operation": _op_dto(journal.get(outcome["op_id"]))}
+            try:
+                op = plan_operation(journal, prepared)
+                outcome = apply_operation(journal, op["op_id"])
+                return {"ok": True,
+                        "operation": _op_dto(journal.get(outcome["op_id"]))}
+            finally:
+                journal.close()
     except HTTPException:
         raise
     except ApplyBlocked as exc:
@@ -958,20 +2032,28 @@ async def apply(body: ApplyIn):
 
 
 @router.get("/operations/{op_id}")
-async def get_operation(op_id: str):
+def get_operation(op_id: str):
     try:
-        journal = _journal()
-        op = journal.get(op_id)
-        if op is None:
-            raise HTTPException(status_code=404, detail={
-                "ok": False, "error": "unknown operation"})
-        # P1 #6: crash-recovery contract — a pending/applying/partial record
-        # is reconciled against the actual files before it is surfaced; the
-        # written configuration never stays ambiguous indefinitely and
-        # recovery_required is reported verbatim through the operation state.
-        if op["state"] in (OP_PENDING, OP_APPLYING, OP_PARTIAL):
-            op = reconcile(journal, op_id)
-        return {"ok": True, "operation": _op_dto(op)}
+        # Reconciliation COMPENSATES applied steps: it must never interleave
+        # with an in-flight Apply/Undo (threadpool handlers made that possible)
+        # or it could roll back steps while the writer continues and still
+        # report committed. Same mutation lock as every write path.
+        with _LOCK:
+            journal = _journal()
+            try:
+                op = journal.get(op_id)
+                if op is None:
+                    raise HTTPException(status_code=404, detail={
+                        "ok": False, "error": "unknown operation"})
+                # P1 #6: crash-recovery contract — a pending/applying/partial
+                # record is reconciled against the actual files before it is
+                # surfaced; the written configuration never stays ambiguous
+                # indefinitely and recovery_required is reported verbatim.
+                if op["state"] in (OP_PENDING, OP_APPLYING, OP_PARTIAL):
+                    op = reconcile(journal, op_id)
+                return {"ok": True, "operation": _op_dto(op)}
+            finally:
+                journal.close()
     except HTTPException:
         raise
     except Exception as exc:
@@ -980,17 +2062,23 @@ async def get_operation(op_id: str):
 
 
 @router.post("/operations/{op_id}/recover")
-async def recover_operation(op_id: str):
+def recover_operation(op_id: str):
     """Explicit restart path: reconcile one operation's persisted intent
     against the actual files (committed/compensated/recovery_required)."""
     try:
-        journal = _journal()
-        op = journal.get(op_id)
-        if op is None:
-            raise HTTPException(status_code=404, detail={
-                "ok": False, "error": "unknown operation"})
-        op = reconcile(journal, op_id)
-        return {"ok": True, "operation": _op_dto(op)}
+        # See get_operation: reconciliation compensates, so it serializes with
+        # the mutation handlers via the same lock.
+        with _LOCK:
+            journal = _journal()
+            try:
+                op = journal.get(op_id)
+                if op is None:
+                    raise HTTPException(status_code=404, detail={
+                        "ok": False, "error": "unknown operation"})
+                op = reconcile(journal, op_id)
+                return {"ok": True, "operation": _op_dto(op)}
+            finally:
+                journal.close()
     except HTTPException:
         raise
     except Exception as exc:
@@ -999,15 +2087,19 @@ async def recover_operation(op_id: str):
 
 
 @router.post("/operations/{op_id}/undo")
-async def undo(op_id: str):
+def undo(op_id: str):
     if not _runtime_writable():
         raise HTTPException(status_code=409, detail={
             "ok": False, "error": "runtime is read-only; writes refused"})
     try:
         with _LOCK:
             journal = _journal()
-            res = undo_operation(journal, op_id)
-            return {"ok": True, "operation": _op_dto(journal.get(op_id))}
+            try:
+                undo_operation(journal, op_id)
+                return {"ok": True,
+                        "operation": _op_dto(journal.get(op_id))}
+            finally:
+                journal.close()
     except ApplyBlocked as exc:
         raise HTTPException(status_code=409, detail={
             "ok": False, "error": f"undo blocked: {exc}"}) from None
@@ -1017,7 +2109,7 @@ async def undo(op_id: str):
 
 
 @router.post("/probe")
-async def probe(body: ProbeIn):
+def probe(body: ProbeIn):
     """New-session probe — EXPLICIT AUTHORIZATION REQUIRED.
 
     A probe starts a NEW session against the selected provider/model and

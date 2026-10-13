@@ -17,6 +17,13 @@ never touches ``cron.provider`` (the scheduler); delegation fallback chains
 preserve order and the null-vs-[] semantics (config_defaults.py:1327-1343);
 invalid MoA removals are rejected before any write (models.py:323-338's
 reject-don't-repair rule).
+
+Runtime-path discipline: every writable storage path must be a key the runtime
+actually reads (``hermes_cli/config_defaults.py`` / the registry descriptors).
+Chains live at ``fallback_providers`` and ``delegation.fallback_providers``;
+specialist routes live at the backend-specific ``stt.<provider>.model`` /
+``tts.<provider>.model``. A path with no runtime consumer is exposed explicitly
+read-only (``writable=False``), never as a fake editable route.
 """
 from __future__ import annotations
 
@@ -71,7 +78,11 @@ class SlotDescriptor:
     protected: bool = False    # never writable
     writable: bool = True
     companion_paths: Tuple[str, ...] = ()   # written together (e.g. cron.model_provider)
-    inherit_from: Optional[str] = None      # delegation/aux inheritance base slot
+    inherit_from: Optional[str] = None      # dotted base path for value inheritance
+    inherit_provider_from: Optional[str] = None  # dotted base path for provider companion
+    inherit_when_null: bool = False         # a literal null means "inherit" (chain slots)
+    inherit_when_empty: bool = False         # empty/None means "inherit" (delegation.model)
+    runtime_consumed: bool = True            # path read by the runtime; False => read-only
     notes: str = ""
 
 
@@ -82,6 +93,8 @@ class SlotObservation:
     configured_present: bool
     effective: Any             # resolved value (inheritance applied)
     source: str                # "configured" | "inherited" | "default"
+    effective_provider: Any = None   # resolved provider companion (inheritance applied)
+    provider_source: str = "default"  # "configured" | "inherited" | "default"
 
 
 @dataclass(frozen=True)
@@ -131,19 +144,63 @@ def _set(cfg: Dict[str, Any], dotted: str, value: Any) -> None:
     node[parts[-1]] = value
 
 
+def _meaningful(value: Any) -> bool:
+    """Runtime evidence: a value that is genuinely set (not absent/empty)."""
+    if value is MISSING:
+        return False
+    return value not in (None, "", {}, [])
+
+
+# Storage paths whose canonical stored value is an ordered chain (list of route
+# dicts and/or bare provider strings), or None (inherit-unset) / [] (disabled).
+_CHAIN_SLOTS = {
+    "delegation.fallback_providers",
+    "fallback_providers",
+}
+
 _BUILTIN_AUX_SLOTS = (
-    # config_defaults.py:763-800 — goal judge and review are typed slots.
-    ("auxiliary.goal_judge", PROTOCOL_TYPED_DECISION),
+    # config_defaults.py auxiliary tasks. "goal_judge" is intentionally absent:
+    # judge.goal_judge.route below owns the auxiliary.goal_judge storage path, so
+    # a second row here would duplicate the same selectable slot.
     ("auxiliary.review", PROTOCOL_TYPED_DECISION),
-    ("auxiliary.summarize", PROTOCOL_CHAT),
-    ("auxiliary.title", PROTOCOL_CHAT),
+    ("auxiliary.compression", PROTOCOL_CHAT),
+    ("auxiliary.title_generation", PROTOCOL_CHAT),
 )
 
+# Runtime-consumed, backend-specific specialist paths (tools/transcription_tools.py
+# resolves stt.<provider>.model; tts_tool*.py resolves tts.<provider>.model).
 _SPECIALIST_SLOTS = (
-    # Speech fields use model_id/streaming_model (config_defaults.py:1095-1222).
-    ("specialist.stt", "speech.model_id", PROTOCOL_SPEECH),
-    ("specialist.tts", "speech.streaming_model", PROTOCOL_SPEECH),
-    ("specialist.embedding", "embedding.model", PROTOCOL_EMBEDDING),
+    ("specialist.stt", "stt.openai.model", PROTOCOL_SPEECH),
+    ("specialist.tts", "tts.openai.model", PROTOCOL_SPEECH),
+)
+
+# Fields consumed by tools/transcription_tools.py and tools/tts_tool_*.
+_SPEECH_BACKENDS = {
+    "stt": {name: "model" for name in ("local", "groq", "openai", "mistral", "xai", "deepinfra")},
+    "tts": {name: "model" for name in ("openai", "gemini", "mistral", "minimax", "kittentts", "neutts", "deepinfra")},
+}
+for _speech_fields in _SPEECH_BACKENDS.values():
+    _speech_fields["elevenlabs"] = "model_id"
+
+
+def _speech_descriptor(cfg: Dict[str, Any], slot_id: str, provider: Optional[str] = None) -> SlotDescriptor:
+    section = slot_id.rsplit(".", 1)[-1]
+    settings = cfg.get(section)
+    if not isinstance(settings, dict):
+        settings = {}
+    backend = str(provider or settings.get("provider") or "openai")
+    field = _SPEECH_BACKENDS[section].get(backend)
+    return SlotDescriptor(slot_id, SlotFamily.SPECIALIST, PROTOCOL_SPEECH,
+        f"{section}.{backend}.{field or 'model'}", companion_paths=(f"{section}.provider",),
+        writable=field is not None, runtime_consumed=field is not None,
+        notes="Backend-specific speech model; voice and language settings are preserved")
+
+# Explicitly unsupported: there is no runtime-consumed embedding-model config key
+# (hermes_cli/config_defaults.py has no ``embedding`` section), so this row is
+# read-only rather than a fake editable route.
+_UNSUPPORTED_SPECIALIST_SLOTS = (
+    ("specialist.embedding", "embedding.model", PROTOCOL_EMBEDDING,
+     "unsupported: no runtime-consumed embedding-model config key"),
 )
 
 
@@ -158,21 +215,27 @@ def build_inventory(cfg: Dict[str, Any]) -> List[SlotObservation]:
         companion_paths=("model.provider", "model.base_url", "model.api_mode"))))
 
     # Delegation: parent/child pins + fallback chain (null vs [] semantics preserved
-    # verbatim — config_defaults.py:1327-1343).
+    # verbatim — config_defaults.py:1327-1343). An empty pin inherits the parent
+    # route; a null chain inherits the parent chain — both backed by runtime
+    # evidence (the configured base value).
     add(_obs(cfg, SlotDescriptor(
         "delegation.model", SlotFamily.DELEGATION, PROTOCOL_CHAT, "delegation.model",
-        companion_paths=("delegation.provider",))))
+        companion_paths=("delegation.provider",),
+        inherit_from="model.default", inherit_provider_from="model.provider",
+        inherit_when_empty=True,
+        notes="empty = inherit parent route/provider (config_defaults.py:1331-1332)")))
     add(_obs(cfg, SlotDescriptor(
         "delegation.fallback_chain", SlotFamily.DELEGATION, PROTOCOL_CHAT,
         "delegation.fallback_providers",
+        inherit_from="fallback_providers", inherit_when_null=True,
         notes="null means inherit-unset; [] means explicitly disabled — never normalized")))
 
     # Auxiliary built-ins (stores its own route; 'auto' is NOT 'same as main').
+    # The genuine guard is the slot's protocol (see preview_changes), not an
+    # unconditional read-only bool — valid typed routes must stay permitted.
     for slot_id, protocol in _BUILTIN_AUX_SLOTS:
         add(_obs(cfg, SlotDescriptor(
-            slot_id, SlotFamily.AUXILIARY, protocol, slot_id,
-            protected=protocol == PROTOCOL_TYPED_DECISION and slot_id.split(".")[-1] in
-            {"goal_judge", "review"} and False)))
+            slot_id, SlotFamily.AUXILIARY, protocol, slot_id)))
 
     # Judges: core typed slots + thresholds are protected.
     add(_obs(cfg, SlotDescriptor(
@@ -182,12 +245,13 @@ def build_inventory(cfg: Dict[str, Any]) -> List[SlotObservation]:
         "judge.threshold", SlotFamily.JUDGE, PROTOCOL_TYPED_DECISION,
         "auxiliary.goal_judge.threshold", protected=True, writable=False)))
 
-    # Fallback chains: main-level fallback
+    # Fallback chains: main-level fallback (top-level runtime key fallback_providers).
     add(_obs(cfg, SlotDescriptor(
-        "fallback.main_chain", SlotFamily.FALLBACK, PROTOCOL_CHAT, "fallback.providers",
+        "fallback.main_chain", SlotFamily.FALLBACK, PROTOCOL_CHAT, "fallback_providers",
         notes="order-preserving chain; null inherit vs [] disabled")))
 
-    # MoA: top-level routes and named presets, references + aggregator.
+    # MoA: default preset + named presets (references + aggregator live inside
+    # the preset dict; the route merge preserves those neighbours).
     moa = cfg.get("moa") if isinstance(cfg.get("moa"), dict) else {}
     assert isinstance(moa, dict)
     presets = moa.get("presets") if isinstance(moa.get("presets"), dict) else {}
@@ -196,13 +260,8 @@ def build_inventory(cfg: Dict[str, Any]) -> List[SlotObservation]:
         "moa.default_preset", SlotFamily.MOA, PROTOCOL_CHAT, "moa.default_preset")))
     for name in sorted(presets):
         add(_obs(cfg, SlotDescriptor(
-            f"moa.preset.{name}", SlotFamily.MOA, PROTOCOL_CHAT, f"moa.presets.{name}")))
-    # legacy flat routes
-    add(_obs(cfg, SlotDescriptor(
-        "moa.legacy.reference_models", SlotFamily.MOA, PROTOCOL_CHAT,
-        "moa.reference_models")))
-    add(_obs(cfg, SlotDescriptor(
-        "moa.legacy.aggregator", SlotFamily.MOA, PROTOCOL_CHAT, "moa.aggregator")))
+            f"moa.preset.{name}", SlotFamily.MOA, PROTOCOL_CHAT, f"moa.presets.{name}.aggregator",
+            notes="Preset aggregator route; reference models and policy settings are preserved")))
 
     # Cron: cron.model pairs with cron.model_provider; cron.provider is the
     # SCHEDULER and is never a model slot (config_defaults.py:1812-1823).
@@ -224,9 +283,13 @@ def build_inventory(cfg: Dict[str, Any]) -> List[SlotObservation]:
                         f"plugins.{name}.{key}",
                         notes="thresholds/keys beside *_model fields stay protected")))
 
-    # Specialist
+    # Specialist (writable runtime paths + explicitly read-only unsupported rows).
     for slot_id, path, protocol in _SPECIALIST_SLOTS:
-        add(_obs(cfg, SlotDescriptor(slot_id, SlotFamily.SPECIALIST, protocol, path)))
+        add(_obs(cfg, _speech_descriptor(cfg, slot_id)))
+    for slot_id, path, protocol, note in _UNSUPPORTED_SPECIALIST_SLOTS:
+        add(_obs(cfg, SlotDescriptor(
+            slot_id, SlotFamily.SPECIALIST, protocol, path,
+            writable=False, runtime_consumed=False, notes=note)))
 
     return out
 
@@ -234,17 +297,48 @@ def build_inventory(cfg: Dict[str, Any]) -> List[SlotObservation]:
 def _obs(cfg: Dict[str, Any], desc: SlotDescriptor) -> SlotObservation:
     stored = _get(cfg, desc.storage_path)
     present = stored is not MISSING
-    inherited = None
-    source = "configured" if present else "default"
-    if not present and desc.inherit_from:
+    # Owning evidence: a present value that is not the descriptor's explicit
+    # "inherit" marker (a literal null for chain slots, an empty pin for
+    # delegation). Only real evidence stops inheritance.
+    own_evidence = present
+    if desc.inherit_when_null and stored is None:
+        own_evidence = False
+    if desc.inherit_when_empty and stored in ("", None):
+        own_evidence = False
+
+    effective: Any = stored if present else None
+    source = "configured" if own_evidence else "default"
+    if not own_evidence and desc.inherit_from:
         base = _get(cfg, desc.inherit_from)
-        if base is not MISSING:
-            inherited, source = base, "inherited"
+        if _meaningful(base):
+            effective, source = base, "inherited"
+        elif present:
+            # explicit null / empty pin with no inheritance evidence: keep the
+            # literal configured value rather than inventing a route.
+            effective, source = stored, "configured"
+
+    effective_provider: Any = None
+    provider_source = "default"
+    for companion in desc.companion_paths:
+        if companion.endswith((".provider", ".model_provider")):
+            provider = _get(cfg, companion)
+            if _meaningful(provider):
+                effective_provider, provider_source = provider, "configured"
+                break
+    if desc.inherit_provider_from:
+        own_provider = _get(cfg, desc.storage_path.rsplit(".", 1)[0] + ".provider")
+        if _meaningful(own_provider):
+            effective_provider, provider_source = own_provider, "configured"
+        else:
+            base_provider = _get(cfg, desc.inherit_provider_from)
+            if _meaningful(base_provider):
+                effective_provider, provider_source = base_provider, "inherited"
+
     return SlotObservation(
         descriptor=desc, configured=stored if present else None,
         configured_present=present,
-        effective=stored if present else inherited,
-        source=source)
+        effective=effective, source=source,
+        effective_provider=effective_provider, provider_source=provider_source)
 
 
 # ----------------------------------------------------------------- preview
@@ -255,6 +349,24 @@ def _route_payload_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _is_route_payload(value: Any) -> bool:
     return isinstance(value, dict) and "model" in value
+
+
+def _is_chain_payload(value: Any) -> bool:
+    return isinstance(value, dict) and "chain" in value
+
+
+def _shape_refusal(slot_id: str, current: Any, new_stored: Any) -> Optional[str]:
+    """Refuse to change a stored value's container shape (e.g. a list replaced
+    by a scalar route dict — the MoA reference_models failure mode)."""
+    if current is MISSING:
+        return None
+    if isinstance(current, list) and not isinstance(new_stored, list) and new_stored is not None:
+        return (f"{slot_id}: stored value is a list; refusing to replace it with "
+                f"{type(new_stored).__name__}")
+    if isinstance(current, dict) and not isinstance(new_stored, dict):
+        return (f"{slot_id}: stored value is a mapping; refusing to replace it with "
+                f"{type(new_stored).__name__}")
+    return None
 
 
 _JUDGE_TYPED_KEYS = {"verdict", "labels", "schema", "typed", "structured_output"}
@@ -273,6 +385,35 @@ def _judge_payload_is_typed(payload: Dict[str, Any]) -> bool:
     return provider.startswith("typed-decision") or model.startswith("typed-decision/")
 
 
+def _bad_chain_entry(chain: List[Any]) -> Optional[str]:
+    """First invalid chain entry, described for the rejection message.
+
+    The ONLY valid entry is a route object carrying non-empty string
+    ``provider`` and ``model``: the runtime chain normalizer silently drops
+    every other shape (fallback-providers.md: "Each entry requires both
+    provider and model. Entries missing either field are ignored."), so
+    anything else would persist as a dead chain entry.
+    """
+    for index, entry in enumerate(chain, 1):
+        if isinstance(entry, dict):
+            provider = entry.get("provider")
+            model = entry.get("model")
+            if (isinstance(provider, str) and provider.strip()
+                    and isinstance(model, str) and model.strip()):
+                continue
+            return (f"chain entry {index} needs non-empty 'provider' and "
+                    f"'model' strings")
+        # The runtime chain normalizer requires complete route objects and
+        # silently DROPS anything else (fallback-providers.md: "Each entry
+        # requires both provider and model. Entries missing either field are
+        # ignored."). Storing a bare provider string or scalar would be a
+        # silently dead chain entry — reject instead.
+        return (f"chain entry {index} must be a route object with 'provider' "
+                f"and 'model' (got {type(entry).__name__}); the runtime "
+                f"ignores other shapes")
+    return None
+
+
 def preview_changes(cfg: Dict[str, Any], edits: List[RouteEdit]) -> ChangePreview:
     """Deterministic before/after preview. Validates first; any rejected edit
     fails the whole preview (invalid preflight performs no writes)."""
@@ -286,13 +427,53 @@ def preview_changes(cfg: Dict[str, Any], edits: List[RouteEdit]) -> ChangePrevie
             rejected.append(f"{edit.slot_id}: unknown slot (no descriptor, no write path)")
             continue
         desc = obs.descriptor
+        if edit.slot_id in ("specialist.stt", "specialist.tts") and isinstance(edit.value, dict):
+            desc = _speech_descriptor(cfg, edit.slot_id, edit.value.get("provider"))
+        if desc.storage_path == "moa.default_preset" and isinstance(edit.value, dict):
+            try:
+                from hermes_cli.moa_config import normalize_moa_config
+                names = normalize_moa_config(cfg.get("moa"))["presets"]
+            except (ImportError, KeyError, TypeError):
+                rejected.append(f"{edit.slot_id}: runtime preset catalog unavailable")
+                continue
+            if edit.value.get("model") not in names:
+                rejected.append(f"{edit.slot_id}: unknown preset {edit.value.get('model')!r}")
+                continue
         if not desc.writable or desc.protected:
             rejected.append(f"{edit.slot_id}: slot is protected/read-only")
             continue
-        if not isinstance(edit.value, dict) or not _is_route_payload(edit.value):
+        is_chain = desc.storage_path in _CHAIN_SLOTS
+        if not isinstance(edit.value, dict):
+            rejected.append(f"{edit.slot_id}: edit value must be a mapping")
+            continue
+        if is_chain:
+            # A chain slot must carry the chain EXPLICITLY: an absent ``chain``
+            # key would otherwise silently clear the stored chain to [].
+            if "chain" not in edit.value:
+                rejected.append(
+                    f"{edit.slot_id}: chain edit requires an explicit 'chain' "
+                    "(list or null); a missing 'chain' would silently clear the "
+                    "stored chain")
+                continue
+            chain = edit.value["chain"]
+            if chain is not None and not isinstance(chain, list):
+                rejected.append(f"{edit.slot_id}: 'chain' must be a list or null")
+                continue
+            if isinstance(chain, list):
+                # Every entry must be a shape the runtime chain resolver
+                # accepts: a COMPLETE route object with provider and model.
+                # Strings, integers, lists, or dicts missing either field
+                # would otherwise persist verbatim and be silently DROPPED by
+                # the runtime normalizer, leaving a dead chain entry.
+                bad = _bad_chain_entry(chain)
+                if bad is not None:
+                    rejected.append(f"{edit.slot_id}: {bad}")
+                    continue
+        elif not _is_route_payload(edit.value):
             rejected.append(f"{edit.slot_id}: edit value must be a route payload with a 'model'")
             continue
-        if desc.protocol == PROTOCOL_TYPED_DECISION and not _judge_payload_is_typed(edit.value):
+        if (not is_chain) and desc.protocol == PROTOCOL_TYPED_DECISION \
+                and not _judge_payload_is_typed(edit.value):
             rejected.append(
                 f"{edit.slot_id}: slot protocol {desc.protocol!r} rejects a plain chat route")
             continue
@@ -315,20 +496,26 @@ def preview_changes(cfg: Dict[str, Any], edits: List[RouteEdit]) -> ChangePrevie
         # referenced default (models.py reject-don't-repair rule) — reject the
         # whole preview before any document mutation.
         if desc.family is SlotFamily.MOA and desc.storage_path.startswith("moa.presets."):
-            name = desc.storage_path.rsplit(".", 1)[-1]
+            name = desc.storage_path.split(".")[2]
             removing = not _route_payload_fields(payload).get("model")
             default_preset = (cfg.get("moa") or {}).get("default_preset")
             if removing and default_preset == name:
                 return ChangePreview(changes=(), rejected=(
                     f"{slot_id}: cannot remove preset {name!r} while moa.default_preset "
                     f"still references it (invalid MoA removal rejected, nothing written)",))
+            if removing:
+                return ChangePreview(changes=(), rejected=(
+                    f"{slot_id}: cannot remove a required aggregator route; remove the preset through Hermes",))
 
-        value = _route_payload_fields(payload)
+        # The FULL typed payload reaches _stored_value_for (chain keys intact).
         new_stored = _stored_value_for(desc, payload)
+        current = _get(cfg, desc.storage_path)
+        refusal = _shape_refusal(slot_id, current, new_stored)
+        if refusal is not None:
+            return ChangePreview(changes=(), rejected=(refusal,))
         # Route-dict slots: merge into the existing stored dict so protected
         # neighbors beside the route (threshold/enforcement/...) survive the
         # swap — the edit is selected by address, not a full-object replace.
-        current = _get(cfg, desc.storage_path)
         if isinstance(current, dict) and isinstance(new_stored, dict):
             new_stored = {**copy.deepcopy(current), **new_stored}
         _set(after_cfg, desc.storage_path, new_stored)
@@ -364,15 +551,14 @@ def preview_changes(cfg: Dict[str, Any], edits: List[RouteEdit]) -> ChangePrevie
 
 
 def _stored_value_for(desc: SlotDescriptor, payload: Dict[str, Any]) -> Any:
-    """Canonical stored shape per slot family."""
+    """Canonical stored shape per slot family. The FULL payload is inspected —
+    chain keys are not stripped by the route-field projection."""
     route = _route_payload_fields(payload)
-    if desc.storage_path == "delegation.fallback_providers":
-        chain = payload.get("chain", [])
-        if chain is None:
-            return None  # inherit-unset semantics preserved verbatim
-        return list(chain)
-    if desc.storage_path == "fallback.providers":
-        chain = payload.get("chain", [])
+    if desc.storage_path in _CHAIN_SLOTS:
+        # Explicit key (validated upstream). None = inherit-unset, [] = disabled;
+        # entry shapes (dict routes and bare provider strings) are preserved
+        # verbatim — never normalized or rewritten.
+        chain = payload["chain"]
         if chain is None:
             return None
         return list(chain)
@@ -381,12 +567,15 @@ def _stored_value_for(desc: SlotDescriptor, payload: Dict[str, Any]) -> Any:
     if desc.family is SlotFamily.CRON:
         return str(route.get("model", ""))
     # Scalar model slots store the bare model id (config_defaults.py
-    # 1095-1222 shape): ``model.default`` and ``delegation.model`` are plain
-    # strings in the raw config, never nested route dicts.
-    if desc.storage_path in _SCALAR_ROUTE_SLOTS:
+    # 1095-1222 shape): model.default, delegation.model and the specialist
+    # stt/tts routes are plain strings in the raw config, never route dicts.
+    if desc.storage_path in _SCALAR_ROUTE_SLOTS or desc.slot_id in ("specialist.stt", "specialist.tts"):
         return str(route.get("model", ""))
     return route
 
 
 # Slots whose canonical stored value is the bare model-id string.
-_SCALAR_ROUTE_SLOTS = {"model.default", "delegation.model"}
+_SCALAR_ROUTE_SLOTS = (
+    {"model.default", "delegation.model"}
+    | {path for _slot, path, _proto in _SPECIALIST_SLOTS}
+)

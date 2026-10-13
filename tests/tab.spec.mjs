@@ -134,8 +134,8 @@ test("applying a custom preview after reviewing a preset sends no stale presetId
   await expect(page.getByTestId("preview-panel")).toContainText("2 changes");
   await expect(page.getByTestId("live-status")).toContainText("Preview ready");
 
-  // the working apply path for custom previews: "Apply reviewed changes"
-  await page.getByTestId("apply-from-drawer").click(); // must not carry the old presetId
+  // The single custom Apply control must not carry the old presetId.
+  await page.getByTestId("apply-custom").click();
   await expect(page.locator('[data-testid="operation-drawer"] h3')).toContainText("op-2");
   await expect(page.getByTestId("result-default")).toContainText("Applied + read back");
 

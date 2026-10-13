@@ -1,4 +1,7 @@
 node_modules/
+.venv/
+.pytest_cache/
+*.egg-info/
 # Build outputs stay disposable EXCEPT dashboard/dist: the Dashboard loads
 # dashboard/manifest.json's "entry" straight from the installed directory, so a
 # git install (which never runs npm) has no bundle unless it is committed.
