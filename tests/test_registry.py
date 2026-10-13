@@ -1,4 +1,6 @@
 """T0 completeness gate: every configurable model-selection slot has a descriptor."""
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,9 +17,30 @@ from model_switcher.registry import (
 )
 
 REPO = Path(__file__).resolve().parent.parent
-HERMES_REPO = Path("/home/hermes/.hermes/hermes-agent")
-# Read-only scan fixture; resolved from the environment home, not hardcoded.
-PLUGINS_DIR = Path.home() / ".hermes" / "profiles" / "brian" / "plugins"
+HERMES_REPO = Path(os.environ.get(
+    "HERMES_MODEL_SWITCHER_HERMES_REPO", Path.home() / ".hermes" / "hermes-agent"))
+# Read-only scan fixture; resolved from the environment, never a host literal.
+# The registry baseline was reviewed against a specific installed-plugin set
+# (jev-judge, jev-skill-router — see PLUGIN_ROLES). Scan the dir that actually
+# carries that baseline (env override wins), so a host with extra plugins
+# doesn't silently change the reviewed baseline; genuinely unknown plugin
+# selectors still surface as coverage gaps whenever HERMES_MODEL_SWITCHER_PLUGINS_DIR
+# points at them.
+def _default_plugins_dir() -> Path:
+    root = Path.home() / ".hermes"
+    candidates = [root / "plugins", *sorted((root / "profiles").glob("*/plugins"))]
+    baseline = [c for c in candidates
+                if c.is_dir() and (c / "jev-judge").is_dir()]
+    if baseline:
+        return baseline[0]
+    for cand in candidates:
+        if cand.is_dir() and any(cand.iterdir()):
+            return cand
+    return root / "plugins"
+
+
+PLUGINS_DIR = Path(os.environ.get("HERMES_MODEL_SWITCHER_PLUGINS_DIR",
+                                  _default_plugins_dir()))
 
 
 @pytest.fixture(scope="module")

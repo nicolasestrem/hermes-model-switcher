@@ -24,9 +24,10 @@ __all__ = ["get_registry", "registry_version", "hermes_repo_path", "PLUGIN_NAME"
 
 PLUGIN_NAME = "hermes-model-switcher"
 
-# Read-only inspection default; overridable for isolated lab homes.
+# Read-only inspection default; overridable for isolated lab homes. The
+# default is derived from the running user's home, never a tracked literal.
 _HERMES_REPO_ENV = "HERMES_MODEL_SWITCHER_HERMES_REPO"
-_DEFAULT_HERMES_REPO = "/home/hermes/.hermes/hermes-agent"
+_DEFAULT_HERMES_REPO = Path.home() / ".hermes" / "hermes-agent"
 
 
 def hermes_repo_path() -> Path:

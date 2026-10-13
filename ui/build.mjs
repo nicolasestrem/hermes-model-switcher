@@ -18,3 +18,16 @@ await esbuild.build({
   logLevel: "info",
 });
 console.log("built ui/dist/plugin.js");
+
+// Also emit the official dashboard-plugin layout (dashboard/manifest.json
+// expects dashboard/dist/index.js). Same bytes, both locations.
+import { copyFileSync, mkdirSync } from "node:fs";
+mkdirSync(new URL("../dashboard/dist", import.meta.url), { recursive: true });
+copyFileSync(
+  new URL("../ui/dist/plugin.js", import.meta.url),
+  new URL("../dashboard/dist/index.js", import.meta.url),
+);
+console.log("built dashboard/dist/index.js");
+
+// Test-harness vendor bundle (host-like React globals) — test asset only.
+await import(new URL("../tests/build-vendor.mjs", import.meta.url).pathname);

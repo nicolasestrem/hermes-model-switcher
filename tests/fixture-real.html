@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Model Switcher fixture — real router</title>
+<style>
+  body { background: #16181d; color: #e6e8ee; font-family: system-ui, sans-serif; margin: 0; }
+  .visually-hidden { position: absolute; left: -9999px; }
+  button, input, select { font: inherit; color: inherit; }
+  button { background: #23262d; border: 1px solid #2c3038; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  input, select { background: #1b1e24; border: 1px solid #2c3038; border-radius: 4px; padding: 3px 6px; }
+  table { font-size: 0.9em; }
+  td, th { padding: 4px; }
+</style>
+</head>
+<body>
+  <main data-testid="dashboard-main">
+    <div data-plugin-root="hermes-model-switcher"></div>
+  </main>
+  <script src="tests/vendor.js"></script>
+  <script src="ui/dist/plugin.js"></script>
+</body>
+</html>

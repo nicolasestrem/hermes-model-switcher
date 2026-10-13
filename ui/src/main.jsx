@@ -271,6 +271,7 @@ function PreviewPanel({ preview }) {
 const RESULT_LABEL = {
   applied: { text: "Applied + read back", color: THEME.ok },
   restored: { text: "Restored (undo verified)", color: THEME.ok },
+  compensated: { text: "Restored (undo verified)", color: THEME.ok },
   failed: { text: "FAILED — not verified", color: THEME.danger },
   conflict: { text: "Conflict — recovery required", color: THEME.warn },
 };

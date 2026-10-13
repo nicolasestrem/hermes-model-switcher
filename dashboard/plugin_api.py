@@ -29,6 +29,17 @@ Privacy contract (Phase B review):
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Import bootstrap so the packaged layout (<plugin>/python/…) and the repo
+# checkout both resolve. In the packaged plugin, plugin_api.py lives at
+# <plugin>/dashboard/plugin_api.py and the Python modules under <plugin>/python/.
+_PKG_ROOT = Path(__file__).resolve().parent.parent
+for _p in (_PKG_ROOT / "python", _PKG_ROOT):
+    if _p.is_dir() and str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
 import copy
 import json
 import os
@@ -305,10 +316,11 @@ async def state():
                 first = p.targets[0] if p.targets else None
                 assignment = {}
                 if first is not None:
-                    assignment = {
+                    # UI contract: per-family assignment map (main → route).
+                    assignment = {"main": {
                         "provider": first.changes.get("model.provider"),
                         "model": first.changes.get("model.default"),
-                    }
+                    }}
                 presets.append({
                     "id": pid,
                     "name": p.name,
@@ -333,8 +345,11 @@ async def preview(body: Dict[str, Any]):
     try:
         profiles = _profile_inventory()
         changes = body.get("changes") or []
-        # Pure preview over the raw configs; no writes anywhere.
-        previews, blocked = [], []
+        # Pure preview over the raw configs; no writes anywhere. The response
+        # echoes the REVIEWED change-set in the UI's shape (plus side effects
+        # and blocks derived from the typed route diff) — never the internal
+        # storage-path diff or raw config fragments.
+        out_changes, blocked = [], []
         with _LOCK:
             for c in changes:
                 pid = c.get("profileId")
@@ -351,12 +366,22 @@ async def preview(body: Dict[str, Any]):
                                  value={"provider": to.get("provider"),
                                         "model": to.get("model")})
                 cp = preview_changes(cfg, [edit])
-                previews.append({
-                    "profileId": pid, "slotId": slot_id,
-                    "changes": [{"path": ch.storage_path, "from": ch.before,
-                                 "to": ch.after} for ch in cp.changes],
-                    "blocked": list(cp.rejected),
-                })
+                if cp.rejected:
+                    blocked.append({"profileId": pid, "slotId": c.get("slotId"),
+                                    "reason": "; ".join(cp.rejected)})
+                    continue
+                side_effects = []
+                for ch in cp.changes:
+                    if ch.storage_path == "model.provider" and ch.before != ch.after:
+                        # canonical provider switch seeds tool defaults —
+                        # disclosed here, applied only on Apply.
+                        side_effects.append("canonical tool defaults seeded")
+                out_changes.append({**c, "sideEffects": side_effects,
+                                    # per-change typed storage-path diff
+                                    # (relative config paths only)
+                                    "diff": [{"path": ch.storage_path,
+                                              "from": ch.before, "to": ch.after}
+                                             for ch in cp.changes]})
         preview_id = "pv-" + uuid.uuid4().hex[:12]
         with _LOCK:
             _PREVIEW_CACHE[preview_id] = copy.deepcopy(changes)
@@ -364,7 +389,7 @@ async def preview(body: Dict[str, Any]):
                 for k in list(_PREVIEW_CACHE)[:-32]:
                     _PREVIEW_CACHE.pop(k, None)
         return {"ok": True, "previewId": preview_id,
-                "preview": {"id": preview_id, "changes": previews,
+                "preview": {"id": preview_id, "changes": out_changes,
                             "blocked": blocked}}
     except HTTPException:
         raise
