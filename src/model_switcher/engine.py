@@ -81,7 +81,7 @@ def plan_operation(journal: OperationJournal,
             raise ApplyBlocked(f"target missing store binding: {t!r}")
         key = f'{t["profile"]}:{t["store_kind"]}:{t["path"]}'
         try:
-            adapter = adapter_for(t["store_kind"], t["path"])
+            adapter = adapter_for(t["store_kind"], t["path"], t.get("profile"))
         except RuntimeError as exc:
             raise ApplyBlocked(str(exc)) from exc
         try:
@@ -159,7 +159,7 @@ def apply_operation(journal: OperationJournal, op_id: str,
             failure = StepFailure("injected failure before step "
                                   f'{step["seq"]}')
             break
-        adapter = adapter_for(step["store_kind"], step["path"])
+        adapter = adapter_for(step["store_kind"], step["path"], step.get("profile"))
         try:
             post = _apply_step(adapter, step["changes"], step["pre_revision"])
         except (StoreConflict, StoreUnreadable, StepFailure, OSError) as exc:
@@ -195,7 +195,7 @@ def _compensate_applied(journal: OperationJournal, op_id: str,
     for step in reversed(applied_steps):
         if step["state"] != STEP_APPLIED:
             continue
-        adapter = adapter_for(step["store_kind"], step["path"])
+        adapter = adapter_for(step["store_kind"], step["path"], step.get("profile"))
         try:
             adapter.compensate(step["snapshot"], step["post_revision"])
         except StoreConflict:
@@ -235,7 +235,7 @@ def reconcile(journal: OperationJournal, op_id: str) -> Dict[str, Any]:
 
     ambiguous = False
     for step in op["steps"]:
-        adapter = adapter_for(step["store_kind"], step["path"])
+        adapter = adapter_for(step["store_kind"], step["path"], step.get("profile"))
         current = adapter.revision()
         if step["state"] == STEP_APPLIED:
             if current != step["post_revision"] or \
@@ -300,7 +300,7 @@ def undo_operation(journal: OperationJournal, op_id: str) -> Dict[str, Any]:
         raise ApplyBlocked("operation has no applied steps to undo")
     conflicts = 0
     for step in reversed(applied):
-        adapter = adapter_for(step["store_kind"], step["path"])
+        adapter = adapter_for(step["store_kind"], step["path"], step.get("profile"))
         try:
             adapter.compensate(step["snapshot"], step["post_revision"])
         except StoreConflict:

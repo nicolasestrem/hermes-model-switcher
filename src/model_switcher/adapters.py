@@ -153,11 +153,96 @@ class JsonPluginStoreAdapter(JsonFileStoreAdapter):
     store_kind = "plugin"
 
 
-def adapter_for(store_kind: str, path: str) -> StoreAdapter:
+class YamlFileStoreAdapter(JsonFileStoreAdapter):
+    """YAML store — the real on-disk format of a Hermes home's config.yaml.
+
+    Shares the whole revision/snapshot/compensation contract with the JSON
+    adapter; only serialization differs. Reads are strict: a malformed YAML
+    file raises StoreUnreadable (never silently treated as empty)."""
+
+    store_kind = "yaml_config"
+
+    def read(self) -> Optional[Dict[str, Any]]:
+        raw = self._raw_bytes()
+        if raw is None:
+            return None
+        try:
+            import yaml
+            data = yaml.safe_load(raw.decode("utf-8"))
+        except Exception as exc:
+            raise StoreUnreadable(f"{self.path}: {exc}") from exc
+        if data is None:
+            return {}
+        if not isinstance(data, dict):
+            raise StoreUnreadable(f"{self.path}: top-level YAML is not a mapping")
+        return data
+
+    def serialize(self, data: Dict[str, Any]) -> bytes:
+        import yaml
+        return yaml.safe_dump(data, sort_keys=True, default_flow_style=False).encode("utf-8")
+
+
+class CanonicalConfigStoreAdapter(YamlFileStoreAdapter):
+    """config.yaml writes that go through Hermes' own canonical save seam.
+
+    Every write/restore calls ``HermesAdapter.apply_canonical_save``, which
+    runs inside the explicit profile's scope AND Hermes' ``_CONFIG_LOCK``
+    (plus this adapter set's own write lock) and normalizes/strips defaults
+    exactly as ``hermes_cli.config.save_config`` would. There is NO raw-YAML
+    fallback: if the runtime is unsupported or no profile is bound, the
+    write raises — the caller sees a visible block, never a textual YAML
+    rewrite behind its back.
+    """
+
+    store_kind = "canonical_config"
+
+    def __init__(self, path: str, profile: str, hermes_adapter=None,
+                 identity=None):
+        if not profile:
+            raise RuntimeError(
+                "canonical_config store requires an explicit profile; "
+                "raw YAML writes are refused")
+        super().__init__(path)
+        self.profile = profile
+        self._identity = identity
+        self._hermes_adapter = hermes_adapter
+
+    def _adapter(self):
+        if self._hermes_adapter is None:
+            from hermes_adapter import HermesAdapter
+            self._hermes_adapter = HermesAdapter()
+        return self._hermes_adapter
+
+    def write(self, data: Dict[str, Any]) -> None:
+        # Full-document canonical save through Hermes' own seam: explicit
+        # profile scope + config lock + revision readback live inside
+        # apply_canonical_save. Raises ReadOnlyRuntime / UnknownProfile /
+        # ProfileIdentityChanged on any violation — never a raw file write.
+        result = self._adapter().apply_canonical_save(
+            self.profile, data, identity=self._identity)
+        self.last_canonical_result = result
+
+    def compensate(self, snapshot: Optional[Dict[str, Any]],
+                   expected_revision: str) -> WriteOutcome:
+        if snapshot is None:
+            # A profile's config.yaml always exists; "restore absent" would
+            # mean deleting it — refuse rather than remove live config.
+            raise StoreConflict(
+                f"{self.path}: canonical config store cannot be removed")
+        return super().compensate(snapshot, expected_revision)
+
+
+def adapter_for(store_kind: str, path: str, profile: Optional[str] = None,
+                hermes_adapter=None) -> StoreAdapter:
+    if store_kind == "canonical_config":
+        # requires an explicit profile — refuse (no raw-YAML fallback)
+        return CanonicalConfigStoreAdapter(
+            path, profile or "", hermes_adapter=hermes_adapter)
     kinds = {
         "config": JsonConfigStoreAdapter,
         "cron": JsonCronStoreAdapter,
         "plugin": JsonPluginStoreAdapter,
+        "yaml_config": YamlFileStoreAdapter,
     }
     cls = kinds.get(store_kind)
     if cls is None:

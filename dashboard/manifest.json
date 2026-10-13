@@ -1,0 +1,13 @@
+{
+  "name": "hermes-model-switcher",
+  "label": "Model Switcher",
+  "description": "Reviewed provider/model preset application across profiles. In-process Dashboard writes only; hosted-isolation mode is read-only.",
+  "icon": "Zap",
+  "version": "0.1.0",
+  "tab": {
+    "path": "/model-switcher",
+    "position": "after:config"
+  },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}
