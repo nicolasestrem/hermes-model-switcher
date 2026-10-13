@@ -127,9 +127,18 @@ class JsonFileStoreAdapter(StoreAdapter):
         if parent:
             os.makedirs(parent, exist_ok=True)
         tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2, sort_keys=True)
+        with open(tmp, "wb") as fh:
+            fh.write(self.serialize(data))
         os.replace(tmp, self.path)  # atomic replacement
+
+    def serialize(self, data: Dict[str, Any]) -> bytes:
+        """Canonical byte serialization; revision is derived from this,
+        so an on-disk file equals what our write would have produced iff
+        revisions match (used for crash reconciliation)."""
+        return json.dumps(data, indent=2, sort_keys=True).encode("utf-8")
+
+    def expected_revision(self, data: Dict[str, Any]) -> str:
+        return _revision_of_bytes(self.serialize(data))
 
 
 class JsonConfigStoreAdapter(JsonFileStoreAdapter):
