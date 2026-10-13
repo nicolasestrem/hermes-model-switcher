@@ -31,11 +31,15 @@ function transport() {
 }
 
 async function request(path, opts = {}) {
+  // Merge headers instead of letting a caller's `opts.headers` silently drop
+  // Content-Type: `{headers: X, ...opts}` would replace the whole object, and
+  // SDK transports add their own auth headers on top.
+  const { headers, ...rest } = opts;
   let res;
   try {
     res = await transport()(BASE + path, {
-      headers: { "Content-Type": "application/json" },
-      ...opts,
+      ...rest,
+      headers: { "Content-Type": "application/json", ...(headers || {}) },
     });
   } catch (e) {
     throw new ApiError("Network failure: " + (e && e.message ? e.message : String(e)));
@@ -52,9 +56,7 @@ async function request(path, opts = {}) {
   }
   if (!body || body.ok !== true) {
     // ok:false (or missing ok) is a failure, not empty data.
-    throw new ApiError(
-      (body && body.error) || "Response carried ok:false", { status: res.status, body },
-    );
+    throw new ApiError(errorMessage(body, res.status), { status: res.status, body });
   }
   return body;
 }
@@ -64,10 +66,15 @@ async function request(path, opts = {}) {
 // sentence, e.g. "apply blocked: the canonical route was rejected" plus the reason
 // ("Nous Portal is not connected: no API key or login was found…"). Reporting only
 // the status leaves the user with "HTTP 409" and nothing to fix.
-function errorMessage(body, status) {
+// Exported for unit tests: the unwrapping rules are the difference between an
+// actionable sentence and a bare "HTTP 409".
+export function errorMessage(body, status) {
   const detail = body && typeof body.detail === "object" && body.detail !== null ? body.detail : null;
   const message = (detail && detail.error) || (body && body.error) || null;
-  const reasons = (detail && detail.reasons) || (body && body.reasons) || [];
+  // `reasons` may arrive as a slug list (array) or, unexpectedly, a plain
+  // string — `.join` on a string would throw inside the error path itself.
+  const raw = (detail && detail.reasons) || (body && body.reasons);
+  const reasons = Array.isArray(raw) ? raw : raw ? [raw] : [];
   if (!message) return "HTTP " + status;
   return reasons.length ? `${message} — ${reasons.join("; ")}` : message;
 }

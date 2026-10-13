@@ -8,6 +8,11 @@ async function open(page) {
   await expect(page.getByRole("button", { name: /Fast lane/ })).toBeVisible();
 }
 
+// Computed colour of the visible status line — how the specs tell an explicit
+// error kind apart from a neutral announcement.
+const statusColor = (page) =>
+  page.getByTestId("visible-status").evaluate((el) => getComputedStyle(el).color);
+
 test("select → preview → save → apply → readback → undo", async ({ page }) => {
   await open(page);
 
@@ -183,6 +188,11 @@ test("failed read and ok:false are not success", async ({ page }) => {
   await expect(page.getByTestId("result-default")).toContainText("FAILED — readback not verified");
   await expect(page.getByTestId("result-research")).toContainText("FAILED — readback not verified");
   await expect(page.locator("[data-status='applied']")).toHaveCount(0);
+  // Severity is explicit, not substring-matched: this summary legitimately
+  // CONTAINS "failed" (per-profile statuses) but is not an app-level error, so
+  // it must stay neutral instead of being painted red.
+  await expect(page.getByTestId("live-status")).toContainText("finished");
+  expect(await statusColor(page)).toBe("rgb(154, 161, 173)"); // THEME.muted fallback
   // undo remains available for recovery, but guarded
   await expect(page.getByTestId("undo-button")).toBeDisabled();
   await page.getByTestId("undo-guard").check();
@@ -198,22 +208,30 @@ test("a blocked apply reports the engine's reason, not a bare status code", asyn
     sessionStorage.setItem("hms-mock-flags", JSON.stringify({ blockedApply: true }));
   });
   await page.reload();
-  await expect(page.getByRole("button", { name: /Fast lane/ })).toBeVisible();
+  try {
+    await expect(page.getByRole("button", { name: /Fast lane/ })).toBeVisible();
 
-  await page.getByRole("button", { name: /Fast lane/ }).click();
-  await expect(page.getByTestId("preview-panel")).toBeVisible();
-  await page.getByTestId("apply-preset").click();
+    await page.getByRole("button", { name: /Fast lane/ }).click();
+    await expect(page.getByTestId("preview-panel")).toBeVisible();
+    await page.getByTestId("apply-preset").click();
 
-  // FastAPI wraps the engine's refusal under `detail`; that sentence is the
-  // whole point — "HTTP 409" alone tells the user nothing to fix.
-  await expect(page.getByTestId("live-status")).toContainText("the canonical route was rejected");
-  await expect(page.getByTestId("live-status")).toContainText("Nous Portal is not connected");
-  // ...and it is on screen, not only in the screen-reader region: a refused
-  // apply that shows nothing is exactly how "the tab does nothing" happens.
-  await expect(page.getByTestId("visible-status")).toBeVisible();
-  await expect(page.getByTestId("visible-status")).toContainText("the canonical route was rejected");
-  await expect(page.getByTestId("operation-drawer")).toHaveCount(0);
-  await page.evaluate(() => sessionStorage.removeItem("hms-mock-flags"));
+    // FastAPI wraps the engine's refusal under `detail`; that sentence is the
+    // whole point — "HTTP 409" alone tells the user nothing to fix.
+    await expect(page.getByTestId("live-status")).toContainText("the canonical route was rejected");
+    await expect(page.getByTestId("live-status")).toContainText("Nous Portal is not connected");
+    // ...and it is on screen, not only in the screen-reader region: a refused
+    // apply that shows nothing is exactly how "the tab does nothing" happens.
+    await expect(page.getByTestId("visible-status")).toBeVisible();
+    await expect(page.getByTestId("visible-status")).toContainText("the canonical route was rejected");
+    // ...and it carries the explicit error kind (danger colour), not the muted
+    // neutral one — a refusal must not read like a routine announcement.
+    expect(await statusColor(page)).toBe("rgb(229, 83, 75)"); // THEME.danger fallback
+    await expect(page.getByTestId("operation-drawer")).toHaveCount(0);
+  } finally {
+    // Clear in `finally`: a failed assertion above used to leave the flag set
+    // and leak the blocked-apply behaviour into every later test.
+    await page.evaluate(() => sessionStorage.removeItem("hms-mock-flags"));
+  }
 });
 
 test("keyboard navigation and aria-live announcements", async ({ page }) => {
@@ -239,4 +257,21 @@ test("keyboard navigation and aria-live announcements", async ({ page }) => {
   // matrix filters are keyboard-reachable labelled controls
   await page.getByLabel("Filter by family").selectOption("main");
   await expect(page.getByRole("row", { name: /Default/ })).toBeVisible();
+});
+
+test("the sticky matrix header stays opaque when the host surface token is transparent", async ({ page }) => {
+  // `var(--surface-color, fallback)` only falls back when the variable is
+  // UNDEFINED. A host theme defining it as a transparent value would leave the
+  // sticky header see-through, with rows scrolling visibly underneath it.
+  await page.addInitScript(() => {
+    document.documentElement.style.setProperty("--surface-color", "transparent");
+  });
+  await page.goto(URL);
+  await expect(page.getByRole("button", { name: /Fast lane/ })).toBeVisible();
+
+  const th = page.locator('[data-testid="matrix-scroll"] thead th').first();
+  await expect(th).toHaveCSS("position", "sticky");
+  const bg = await th.evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(bg).toBe("rgb(22, 24, 29)"); // solid fallback, never transparent
+  expect(bg).not.toBe("rgba(0, 0, 0, 0)");
 });

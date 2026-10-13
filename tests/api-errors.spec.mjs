@@ -1,0 +1,48 @@
+// Unit tests for the error-unwrapping rules in ui/src/api.js.
+//
+// These run in Node (no browser): errorMessage is pure. It decides whether the
+// user sees the engine's actionable sentence or a bare "HTTP 409" — the exact
+// difference between "the apply button does nothing" and a message that says
+// what to fix.
+import { test, expect } from "@playwright/test";
+import { errorMessage } from "../ui/src/api.js";
+
+test("unwraps a FastAPI detail payload (the host's real refusal shape)", () => {
+  const body = {
+    detail: {
+      ok: false,
+      blocked: true,
+      error: "apply blocked: the canonical route was rejected",
+      reasons: ["Nous Portal is not connected: no API key or login was found for it."],
+    },
+  };
+  expect(errorMessage(body, 409)).toBe(
+    "apply blocked: the canonical route was rejected — Nous Portal is not connected: no API key or login was found for it.",
+  );
+});
+
+test("unwraps a flat body and joins several reasons", () => {
+  expect(errorMessage({ error: "preview failed", reasons: ["a", "b"] }, 400))
+    .toBe("preview failed — a; b");
+});
+
+test("a string-valued reasons field does not throw", () => {
+  // `.join` on a string would throw inside the error path itself, swallowing
+  // the real message and leaving the user with a broken status line.
+  expect(errorMessage({ error: "boom", reasons: "single reason" }, 500))
+    .toBe("boom — single reason");
+  expect(errorMessage({ detail: { error: "boom", reasons: "nested reason" } }, 500))
+    .toBe("boom — nested reason");
+});
+
+test("a string detail does not throw and falls back to the status", () => {
+  expect(errorMessage({ detail: "Not Found" }, 404)).toBe("HTTP 404");
+  expect(errorMessage({ detail: "Not Found", error: "flat error" }, 404)).toBe("flat error");
+});
+
+test("a null/absent body falls back to the status and never says ok", () => {
+  expect(errorMessage(null, 502)).toBe("HTTP 502");
+  expect(errorMessage(undefined, 401)).toBe("HTTP 401");
+  expect(errorMessage({}, 500)).toBe("HTTP 500");
+  expect(errorMessage({ ok: false }, 200)).toBe("HTTP 200");
+});

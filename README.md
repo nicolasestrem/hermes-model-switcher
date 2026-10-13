@@ -171,8 +171,11 @@ publication checks; no hosted CI/CD was added for this fix):
 - Full backend pytest suite (97 tests) incl. real dashboard-plugin discovery
   and module load of the INSTALLED package in a throwaway Hermes home, and an
   install → uninstall round-trip that refuses the live home (fail-closed).
-- Playwright suite (11 tests) covers the SDK registration/auth transport contract,
-  visible refusal messages, and the real FastAPI backend (uvicorn) over a
+- Playwright suite (17 tests) covers the SDK registration/auth transport contract,
+  visible refusal messages and their explicit error severity, header-opacity
+  under a transparent host surface token, the error-unwrapping rules (flat
+  body, string `reasons`, string `detail`, absent body), and the real FastAPI
+  backend (uvicorn) over a
   throwaway lab home: real preview/apply with on-disk config verification and
   guarded undo restoring the exact original files; fake credentials only,
   real file saves, no inference calls; every plugin-api response is asserted

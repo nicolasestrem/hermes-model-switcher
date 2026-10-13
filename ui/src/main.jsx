@@ -18,6 +18,29 @@ const THEME = {
   warn: t("warning-color", "#d29922"),
 };
 
+// The sticky matrix header must be OPAQUE or rows scroll visibly underneath it.
+// `var(--surface-color, #16181d)` does not guarantee that: a var() fallback only
+// applies when the variable is *undefined*, so a host theme that defines the
+// surface token as a transparent value would leave the header see-through. Resolve
+// the token once and keep a solid colour when the host's value is not opaque.
+const FALLBACK_BG = "#16181d";
+function resolveOpaqueSurface() {
+  if (typeof document === "undefined" || !document.body) return FALLBACK_BG;
+  const probe = document.createElement("div");
+  probe.style.cssText = `position:absolute;visibility:hidden;pointer-events:none;background:var(--surface-color, ${FALLBACK_BG})`;
+  document.body.appendChild(probe);
+  let resolved = "";
+  try {
+    resolved = getComputedStyle(probe).backgroundColor || "";
+  } finally {
+    probe.remove();
+  }
+  return resolved && resolved !== "transparent" && resolved !== "rgba(0, 0, 0, 0)"
+    ? resolved
+    : FALLBACK_BG;
+}
+const STICKY_BG = resolveOpaqueSurface();
+
 const FAMILIES = [
   { id: "main", label: "Main" },
   { id: "delegation", label: "Delegation" },
@@ -116,7 +139,7 @@ function Matrix({ profiles, slots, selection, onToggle, onExpand, expanded, filt
             {["", "Profile", "Slot", "Family", "Configured route", "Last observed"].map((h) => (
               <th key={h} scope="col" style={{
                 textAlign: "left", borderBottom: `1px solid ${THEME.border}`, padding: 4,
-                position: "sticky", top: 0, background: THEME.bg, zIndex: 1,
+                position: "sticky", top: 0, background: STICKY_BG, zIndex: 1,
               }}>{h}</th>
             ))}
           </tr>
@@ -333,7 +356,9 @@ function OperationDrawer({ operation, onUndo, undoGuarded, setUndoGuarded, busy 
 function App() {
   const [state, setState] = useState(null);
   const [loadError, setLoadError] = useState(null);
-  const [status, setStatus] = useState("");
+  // {text, kind}. Severity is explicit, never inferred from the message text:
+  // a success line that merely contains the word "failed" must stay neutral.
+  const [status, setStatus] = useState({ text: "", kind: "info" });
   const [selection, setSelection] = useState(new Map()); // key -> slot
   const [expanded, setExpanded] = useState({});
   const [filters, setFilters] = useState({ profileIds: [], family: "all", provider: "", model: "", state: "all" });
@@ -346,7 +371,7 @@ function App() {
   const [saveName, setSaveName] = useState("");
   
 
-  const announce = (msg) => setStatus(msg);
+  const announce = (msg, kind = "info") => setStatus({ text: msg, kind });
 
   const load = async () => {
     setBusy(true);
@@ -358,7 +383,7 @@ function App() {
     } catch (e) {
       setState(null);
       setLoadError(e instanceof ApiError ? e.message : String(e));
-      announce("Load failed: " + (e instanceof ApiError ? e.message : String(e)));
+      announce("Load failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
     } finally {
       setBusy(false);
     }
@@ -381,7 +406,7 @@ function App() {
     } catch (e) {
       setPreview(null);
       setPreviewFor("");
-      announce("Preview failed: " + (e instanceof ApiError ? e.message : String(e)));
+      announce("Preview failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
     } finally {
       setBusy(false);
     }
@@ -418,7 +443,7 @@ function App() {
       announce(`Operation ${op.operation.id} finished: ` +
         op.operation.results.map((r) => `${r.profileId} ${r.status}`).join(", "));
     } catch (e) {
-      announce("Apply failed: " + (e instanceof ApiError ? e.message : String(e)));
+      announce("Apply failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
     } finally {
       setBusy(false);
     }
@@ -432,7 +457,7 @@ function App() {
       announce(`Preset saved: ${p.preset.name}`);
       await load();
     } catch (e) {
-      announce("Save preset failed: " + (e instanceof ApiError ? e.message : String(e)));
+      announce("Save preset failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
     } finally {
       setBusy(false);
     }
@@ -447,7 +472,7 @@ function App() {
       setUndoGuarded(false);
       announce("Undo finished: " + op.operation.results.map((r) => `${r.profileId} ${r.status}`).join(", "));
     } catch (e) {
-      announce("Undo failed: " + (e instanceof ApiError ? e.message : String(e)));
+      announce("Undo failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
     } finally {
       setBusy(false);
     }
@@ -464,7 +489,7 @@ function App() {
     return (
       <div style={{ padding: 12, color: THEME.fg }}>
         <div aria-live="polite" role="status" data-testid="live-status"
-          style={{ position: "absolute", left: -9999 }}>{status}</div>
+          style={{ position: "absolute", left: -9999 }}>{status.text}</div>
         <div role="alert" data-testid="load-error" style={{ color: THEME.danger, marginBottom: 8 }}>
           Load failed: {loadError}
         </div>
@@ -477,7 +502,7 @@ function App() {
   return (
     <div className="hms-root" style={{ color: THEME.fg, padding: 12, fontFamily: "inherit" }}>
       <div aria-live="polite" role="status" data-testid="live-status"
-        style={{ position: "absolute", left: -9999 }}>{status}</div>
+        style={{ position: "absolute", left: -9999 }}>{status.text}</div>
       <h2>Model Switcher</h2>
       <PresetsBar presets={state.presets} onReview={reviewPreset} busy={busy} />
 
@@ -504,13 +529,13 @@ function App() {
             seam) or a failed preview used to be silent on screen: the button
             just did nothing. Mirror the same message visibly, next to the
             buttons that trigger it. */}
-        {status && (
+        {status.text && (
           <p data-testid="visible-status"
             style={{
               margin: "0 0 8px", fontSize: "0.9em",
-              color: /(failed|Failed)/.test(status) ? THEME.danger : THEME.muted,
+              color: status.kind === "error" ? THEME.danger : THEME.muted,
             }}>
-            {status}
+            {status.text}
           </p>
         )}
         <ChangeEditor
