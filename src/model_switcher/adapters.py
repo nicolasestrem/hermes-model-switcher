@@ -108,6 +108,24 @@ class StoreAdapter:
         return WriteOutcome(applied=True, pre_revision=pre,
                             post_revision=self.revision(), readback_ok=True)
 
+    def intended_write_matches(self, snapshot: Optional[Dict[str, Any]],
+                               changes: Dict[str, Any],
+                               current_revision: str) -> bool:
+        """Decidable crash-window predicate for engine.reconcile: True iff the
+        on-disk document is EXACTLY what an apply of *changes* on *snapshot*
+        would have produced and the intended values read back. False (or an
+        undecidable store) means the file differs from our intended write —
+        an external edit — and the caller treats the step as ambiguous."""
+        if not self.exists():
+            return False
+        if hasattr(self, "expected_revision"):
+            expected = _changes_applied(snapshot if snapshot is not None else {},
+                                        changes)
+            if (self.expected_revision(expected) == current_revision
+                    and self.readback(changes)):
+                return True
+        return False
+
 
 class JsonFileStoreAdapter(StoreAdapter):
     """JSON-serializable file store (test/lab stand-in for config.yaml;
@@ -127,9 +145,18 @@ class JsonFileStoreAdapter(StoreAdapter):
         if parent:
             os.makedirs(parent, exist_ok=True)
         tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2, sort_keys=True)
+        with open(tmp, "wb") as fh:
+            fh.write(self.serialize(data))
         os.replace(tmp, self.path)  # atomic replacement
+
+    def serialize(self, data: Dict[str, Any]) -> bytes:
+        """Canonical byte serialization; revision is derived from this,
+        so an on-disk file equals what our write would have produced iff
+        revisions match (used for crash reconciliation)."""
+        return json.dumps(data, indent=2, sort_keys=True).encode("utf-8")
+
+    def expected_revision(self, data: Dict[str, Any]) -> str:
+        return _revision_of_bytes(self.serialize(data))
 
 
 class JsonConfigStoreAdapter(JsonFileStoreAdapter):
@@ -144,11 +171,119 @@ class JsonPluginStoreAdapter(JsonFileStoreAdapter):
     store_kind = "plugin"
 
 
-def adapter_for(store_kind: str, path: str) -> StoreAdapter:
+class YamlFileStoreAdapter(JsonFileStoreAdapter):
+    """YAML store — the real on-disk format of a Hermes home's config.yaml.
+
+    Shares the whole revision/snapshot/compensation contract with the JSON
+    adapter; only serialization differs. Reads are strict: a malformed YAML
+    file raises StoreUnreadable (never silently treated as empty)."""
+
+    store_kind = "yaml_config"
+
+    def read(self) -> Optional[Dict[str, Any]]:
+        raw = self._raw_bytes()
+        if raw is None:
+            return None
+        try:
+            import yaml
+            data = yaml.safe_load(raw.decode("utf-8"))
+        except Exception as exc:
+            raise StoreUnreadable(f"{self.path}: {exc}") from exc
+        if data is None:
+            return {}
+        if not isinstance(data, dict):
+            raise StoreUnreadable(f"{self.path}: top-level YAML is not a mapping")
+        return data
+
+    def serialize(self, data: Dict[str, Any]) -> bytes:
+        import yaml
+        return yaml.safe_dump(data, sort_keys=True, default_flow_style=False).encode("utf-8")
+
+
+class CanonicalConfigStoreAdapter(YamlFileStoreAdapter):
+    """config.yaml writes that go through Hermes' own canonical save seam.
+
+    Every write/restore calls ``HermesAdapter.apply_canonical_save``, which
+    runs inside the explicit profile's scope AND Hermes' ``_CONFIG_LOCK``
+    (plus this adapter set's own write lock) and normalizes/strips defaults
+    exactly as ``hermes_cli.config.save_config`` would. There is NO raw-YAML
+    fallback: if the runtime is unsupported or no profile is bound, the
+    write raises — the caller sees a visible block, never a textual YAML
+    rewrite behind its back.
+    """
+
+    store_kind = "canonical_config"
+
+    def __init__(self, path: str, profile: str, hermes_adapter=None,
+                 identity=None):
+        if not profile:
+            raise RuntimeError(
+                "canonical_config store requires an explicit profile; "
+                "raw YAML writes are refused")
+        super().__init__(path)
+        self.profile = profile
+        self._identity = identity
+        self._hermes_adapter = hermes_adapter
+
+    def _adapter(self):
+        if self._hermes_adapter is None:
+            from hermes_adapter import HermesAdapter
+            self._hermes_adapter = HermesAdapter()
+        return self._hermes_adapter
+
+    def write(self, data: Dict[str, Any]) -> None:
+        # Full-document canonical save through Hermes' own seam: explicit
+        # profile scope + config lock + revision readback live inside
+        # apply_canonical_save. Raises ReadOnlyRuntime / UnknownProfile /
+        # ProfileIdentityChanged on any violation — never a raw file write.
+        result = self._adapter().apply_canonical_save(
+            self.profile, data, identity=self._identity)
+        self.last_canonical_result = result
+
+    def compensate(self, snapshot: Optional[Dict[str, Any]],
+                   expected_revision: str) -> WriteOutcome:
+        if snapshot is None:
+            # A profile's config.yaml always exists; "restore absent" would
+            # mean deleting it — refuse rather than remove live config.
+            raise StoreConflict(
+                f"{self.path}: canonical config store cannot be removed")
+        return super().compensate(snapshot, expected_revision)
+
+    def intended_write_matches(self, snapshot: Optional[Dict[str, Any]],
+                               changes: Dict[str, Any],
+                               current_revision: str) -> bool:
+        """Canonical-store crash-window predicate. The write landed through
+        Hermes' canonical save seam (normalize + strip-defaults), so raw
+        serialized bytes from a naive projection never match: decide from the
+        documents themselves — the intended document is run through the SAME
+        canonical pipeline (plan_canonical_save) and compared against the
+        strictly re-read on-disk document. Anything undecidable is False, so
+        the reconcile caller fails closed to recovery_required."""
+        if not self.exists() or not self.readback(changes):
+            return False
+        try:
+            intended = _changes_applied(
+                snapshot if snapshot is not None else {}, changes)
+            adapter = self._adapter()
+            planned = adapter.plan_canonical_save(
+                self.profile, intended)["planned_document"]
+            on_disk = adapter.load_raw_config(self.profile)
+        except Exception:
+            return False  # undecidable -> ambiguous, never guessed
+        return planned == on_disk
+
+
+def adapter_for(store_kind: str, path: str, profile: Optional[str] = None,
+                hermes_adapter=None) -> StoreAdapter:
+    if store_kind == "canonical_config":
+        # requires an explicit profile — refuse (no raw-YAML fallback)
+        return CanonicalConfigStoreAdapter(
+            path, profile or "", hermes_adapter=hermes_adapter)
     kinds = {
         "config": JsonConfigStoreAdapter,
         "cron": JsonCronStoreAdapter,
         "plugin": JsonPluginStoreAdapter,
+        "yaml_config": YamlFileStoreAdapter,
     }
     cls = kinds.get(store_kind)
     if cls is None:
@@ -183,3 +318,13 @@ def _get_dotted(data: Dict[str, Any], dotted: str) -> Any:
 
 
 _MISSING = object()
+
+
+def _changes_applied(base: Dict[str, Any],
+                     changes: Dict[str, Any]) -> Dict[str, Any]:
+    """In-memory projection of snapshot + planned changes (no I/O)."""
+    import copy
+    data = copy.deepcopy(base)
+    for dotted, value in changes.items():
+        _set_dotted(data, dotted, value)
+    return data
