@@ -71,6 +71,36 @@ used for registry scans (default `/home/hermes/.hermes/hermes-agent`).
   plugin does not silently undo already-applied model choices; use the
   operation drawer's guarded Undo or restore from the private snapshots.
 
+## Privacy & local data handling
+
+- **The operation journal (SQLite) is private by construction.** It refuses
+  to be created inside ANY git worktree (including git-ignored directories —
+  ignore rules alone give no guarantee), refuses symlinked DB paths or
+  symlinked parent directories, and is created with `0600` permissions in a
+  `0700` parent directory.
+- **Recovery snapshots stay local.** Private per-store snapshots (the only
+  source for exact undo) live solely in the private journal DB — they are
+  never exported, logged, or returned by the public API.
+- **Public operations use a safe DTO.** `to_public_operation` /
+  `PublicOperationView` allowlist only operation status and per-step slot
+  outcomes (state, profile, store kind, revisions). Raw configs, store
+  paths, payloads, changes, snapshots and exception strings never cross the
+  boundary.
+- **Local privacy gate (no CI/CD).** `scripts/privacy_guard.py` scans
+  tracked and staged files by path AND content for full Hermes
+  configs/exports/snapshots and credentials, rejecting findings without
+  printing values. Install local hooks with:
+
+  ```sh
+  bash scripts/install_hooks.sh
+  ```
+
+  This installs `pre-commit` (staged files) and `pre-push` (full tree)
+  hooks into the repo's git hooks dir. `.gitignore` additionally blocks
+  `*.db`, `*.sqlite*`, `journals/`, `snapshots/`, `backups/`, `.env`,
+  credentials dumps and session transcripts — but the hooks, not ignore
+  rules, are the actual enforcement.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

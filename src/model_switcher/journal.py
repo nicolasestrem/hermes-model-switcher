@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import stat
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -29,11 +30,53 @@ STEP_COMPENSATED = "compensated"
 STEP_CONFLICT = "conflict"
 
 
+def is_inside_git_worktree(path: str) -> bool:
+    """True if `path` (or any parent up to /) contains a `.git` entry.
+
+    Covers both checkouts (`.git` directory) and linked worktrees
+    (`.git` file pointing at a common dir), so journal files can never be
+    persisted inside ANY git worktree — including git-ignored subdirs,
+    since ignores give no guarantee against accidental `git add -f`.
+    """
+    p = os.path.abspath(path)
+    while True:
+        if os.path.exists(os.path.join(p, ".git")):
+            return True
+        parent = os.path.dirname(p)
+        if parent == p:
+            return False
+        p = parent
+
+
 class OperationJournal:
     def __init__(self, db_path: str):
-        os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+        if os.path.islink(db_path):
+            raise ValueError(
+                "journal db_path must not be a symlink: %r" % db_path)
+        if is_inside_git_worktree(db_path):
+            raise ValueError(
+                "refusing to store operation journal inside a git worktree "
+                "(%r); journal DBs may contain private recovery snapshots "
+                "and must stay in a private directory" % db_path)
+        db_dir = os.path.dirname(db_path) or "."
+        os.makedirs(db_dir, mode=0o700, exist_ok=True)
+        # Private DB and parent: group/other get no access. Private
+        # recovery snapshots stay local — they are the only source for
+        # exact undo, but they must never be readable beyond the user.
+        for d in (db_dir,):
+            try:
+                os.chmod(d, stat.S_IRWXU)
+            except OSError:
+                pass
+        if os.path.islink(db_dir):
+            raise ValueError(
+                "journal parent directory must not be a symlink: %r" % db_dir)
         self.db_path = db_path
         self._conn = sqlite3.connect(db_path, isolation_level=None)
+        try:
+            os.chmod(db_path, stat.S_IRUSR | stat.S_IWUSR)  # 0600
+        except OSError:
+            pass
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(
             """
@@ -131,3 +174,52 @@ class OperationJournal:
 
     def close(self) -> None:
         self._conn.close()
+
+
+# Public DTO allowlist: only operation status and slot outcomes. The full
+# raw config, store paths, payload, recovery snapshots, changes and any
+# exception strings NEVER leave the journal through this projection.
+_PUBLIC_OP_FIELDS = ("op_id", "state", "created_at", "updated_at")
+_PUBLIC_STEP_FIELDS = ("seq", "profile", "store_kind", "state",
+                       "pre_revision", "post_revision")
+
+
+def to_public_operation(op: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Project an internal journal operation into a safe public DTO.
+
+    Allowlist-only: anything not explicitly listed below (payload, step
+    paths, changes, snapshots, error strings) is dropped.
+    """
+    if op is None:
+        return None
+    pub: Dict[str, Any] = {k: op[k] for k in _PUBLIC_OP_FIELDS if k in op}
+    pub["steps"] = [
+        {k: s[k] for k in _PUBLIC_STEP_FIELDS if k in s}
+        for s in op.get("steps", [])
+    ]
+    return pub
+
+
+class PublicOperationView:
+    """Read-only public accessor over a journal: get/list by allowlisted DTO."""
+
+    def __init__(self, journal: "OperationJournal"):
+        self._journal = journal
+
+    def get(self, op_id: str) -> Optional[Dict[str, Any]]:
+        return to_public_operation(self._journal.get(op_id))
+
+    def unfinished(self) -> List[Dict[str, Any]]:
+        return [pub for pub in (to_public_operation(op)
+                                for op in self._journal.unfinished_operations())
+                if pub is not None]
+
+    def list_operations(self) -> List[Dict[str, Any]]:
+        rows = self._journal._conn.execute(
+            "SELECT op_id FROM operations ORDER BY created_at").fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            pub = to_public_operation(self._journal.get(r["op_id"]))
+            if pub is not None:
+                out.append(pub)
+        return out

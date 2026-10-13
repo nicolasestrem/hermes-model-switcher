@@ -4,3 +4,23 @@ playwright-report/
 test-results/
 __pycache__/
 *.pyc
+
+# --- Private data: ignore alone is NOT a guarantee (git add -f can still
+# stage these); scripts/privacy_guard.py is the actual gate. ---
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite*
+journals/
+snapshots/
+backups/
+.env
+.env.*
+*.env
+auth/
+credentials*
+*credentials*
+secrets*
+session-transcripts/
+*transcript*
+
