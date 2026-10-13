@@ -90,6 +90,16 @@ def test_node_modules_not_tracked():
         "node_modules must not be committed"
 
 
-def test_feature_branch_active():
+def test_no_direct_work_on_main():
+    """Implementation must land through a PR.
+
+    Being checked out on `main` is normal once a feature is merged, so that
+    alone is not a failure. What must never happen is implementation work
+    sitting uncommitted on the integration branch, i.e. about to be committed
+    straight to main.
+    """
     branch = git(["rev-parse", "--abbrev-ref", "HEAD"]).strip()
-    assert branch != "main", "implementation must happen off main"
+    if branch != "main":
+        return
+    dirty = git(["status", "--porcelain"]).strip()
+    assert dirty == "", "uncommitted work on main: commit on a feature branch instead"
