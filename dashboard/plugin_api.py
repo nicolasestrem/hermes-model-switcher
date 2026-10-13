@@ -663,7 +663,11 @@ def _profile_inventory() -> Dict[str, Dict[str, Any]]:
                 # removed and an inherited chain look configured.
                 state, chain = _chain_slot_state(obs)
                 entry["state"] = state
-                entry["chain"] = chain
+                # A stored chain can carry route METADATA beside provider/model
+                # (base_url with userinfo, api_key, headers). The public state
+                # DTO is allowlisted + URL-sanitized exactly like the preview
+                # diff and the effective route — never the raw document value.
+                entry["chain"] = _public_diff_value(chain, "")
             slots.append(entry)
         profiles[name] = {"id": name, "name": name,
                           "writable": _runtime_writable(), "slots": slots}
@@ -1615,7 +1619,10 @@ def _verify_preview_fresh(entry: Dict[str, Any]) -> None:
             cur = adapter_for(kind, path, profile).revision()
         except Exception:
             cur = None
-        if cur != rev:
+        # An UNVERIFIABLE recorded revision (None — the read failed when the
+        # preview was bound) fails closed: None == None must never pass as
+        # "unchanged", and an unreadable store now is equally stale.
+        if rev is None or cur != rev:
             reasons.append(
                 f"store for profile {profile!r} changed since preview")
     if reasons:
@@ -2027,21 +2034,26 @@ def apply(body: ApplyIn):
 @router.get("/operations/{op_id}")
 def get_operation(op_id: str):
     try:
-        journal = _journal()
-        try:
-            op = journal.get(op_id)
-            if op is None:
-                raise HTTPException(status_code=404, detail={
-                    "ok": False, "error": "unknown operation"})
-            # P1 #6: crash-recovery contract — a pending/applying/partial
-            # record is reconciled against the actual files before it is
-            # surfaced; the written configuration never stays ambiguous
-            # indefinitely and recovery_required is reported verbatim.
-            if op["state"] in (OP_PENDING, OP_APPLYING, OP_PARTIAL):
-                op = reconcile(journal, op_id)
-            return {"ok": True, "operation": _op_dto(op)}
-        finally:
-            journal.close()
+        # Reconciliation COMPENSATES applied steps: it must never interleave
+        # with an in-flight Apply/Undo (threadpool handlers made that possible)
+        # or it could roll back steps while the writer continues and still
+        # report committed. Same mutation lock as every write path.
+        with _LOCK:
+            journal = _journal()
+            try:
+                op = journal.get(op_id)
+                if op is None:
+                    raise HTTPException(status_code=404, detail={
+                        "ok": False, "error": "unknown operation"})
+                # P1 #6: crash-recovery contract — a pending/applying/partial
+                # record is reconciled against the actual files before it is
+                # surfaced; the written configuration never stays ambiguous
+                # indefinitely and recovery_required is reported verbatim.
+                if op["state"] in (OP_PENDING, OP_APPLYING, OP_PARTIAL):
+                    op = reconcile(journal, op_id)
+                return {"ok": True, "operation": _op_dto(op)}
+            finally:
+                journal.close()
     except HTTPException:
         raise
     except Exception as exc:
@@ -2054,16 +2066,19 @@ def recover_operation(op_id: str):
     """Explicit restart path: reconcile one operation's persisted intent
     against the actual files (committed/compensated/recovery_required)."""
     try:
-        journal = _journal()
-        try:
-            op = journal.get(op_id)
-            if op is None:
-                raise HTTPException(status_code=404, detail={
-                    "ok": False, "error": "unknown operation"})
-            op = reconcile(journal, op_id)
-            return {"ok": True, "operation": _op_dto(op)}
-        finally:
-            journal.close()
+        # See get_operation: reconciliation compensates, so it serializes with
+        # the mutation handlers via the same lock.
+        with _LOCK:
+            journal = _journal()
+            try:
+                op = journal.get(op_id)
+                if op is None:
+                    raise HTTPException(status_code=404, detail={
+                        "ok": False, "error": "unknown operation"})
+                op = reconcile(journal, op_id)
+                return {"ok": True, "operation": _op_dto(op)}
+            finally:
+                journal.close()
     except HTTPException:
         raise
     except Exception as exc:

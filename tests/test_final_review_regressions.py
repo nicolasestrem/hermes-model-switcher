@@ -1,5 +1,6 @@
 """Final independent-review regressions, isolated data only."""
 import inspect
+from typing import Any, Dict
 import json
 import pytest
 import yaml
@@ -363,6 +364,55 @@ def test_picker_auth_prefers_an_authenticated_duplicate_row(hermes_home, monkeyp
         "M", (), {"_load_picker_payload": staticmethod(lambda refresh: {
             "providers": [{"slug": "nous", "authenticated": False}]})}))
     assert api._runtime_provider_authenticated("alpha", "nous") is False
+
+
+def test_state_chain_entries_are_sanitized(hermes_home):
+    """A stored chain can carry route metadata beside provider/model (base_url
+    with userinfo, api_key, headers). The public /state DTO is allowlisted and
+    URL-sanitized — never the raw configured value."""
+    _profile(hermes_home, "default", config=(
+        ROUTE_CONFIG
+        + "delegation:\n"
+        + "  fallback_providers:\n"
+        + "    - provider: nous\n"
+        + "      model: hermes-4\n"
+        + "      base_url: http://user:tok3n@127.0.0.1:9000/v1?t=abc\n"
+        + "      api_key: SECRET-KEY\n"
+        + "      headers: {Authorization: 'Bearer SECRET-TOK'}\n"))
+    slot = next(s for s in api._profile_inventory()["default"]["slots"]
+                if s["slotId"] == "delegation.fallback_chain")
+    blob = json.dumps(slot)
+    assert "SECRET" not in blob and "tok3n" not in blob
+    assert "api_key" not in blob and "headers" not in blob
+    entry = slot["chain"][0]
+    assert entry["provider"] == "nous" and entry["model"] == "hermes-4"
+    # the endpoint survives, sanitized: no userinfo, no query
+    assert entry["base_url"] == "http://127.0.0.1:9000/v1"
+
+
+def test_reconciliation_runs_under_the_mutation_lock(hermes_home, monkeypatch):
+    """Threadpool handlers made concurrent reconciliation possible; /recover
+    must serialize with Apply/Undo through the same mutation lock."""
+    _profile(hermes_home, "default")
+    tc = _client()
+    r = tc.post("/operations", json={"changes": [
+        {"profileId": "default", "slotId": "auxiliary.compression",
+         "action": "set", "to": {"provider": "lablocal", "model": "lab-7b"}}]})
+    assert r.status_code == 200, r.text
+    op_id = r.json()["operation"]["id"]
+
+    held: Dict[str, Any] = {}
+    real = api.reconcile
+
+    def probe(journal, oid):
+        if hasattr(api._LOCK, "_is_owned"):
+            held["owned"] = api._LOCK._is_owned()
+        return real(journal, oid)
+
+    monkeypatch.setattr(api, "reconcile", probe)
+    r = tc.post(f"/operations/{op_id}/recover")
+    assert r.status_code == 200, r.text
+    assert held.get("owned") is True, "reconcile must run under _LOCK"
 
 
 def test_speech_observation_uses_selected_runtime_backend():

@@ -56,6 +56,15 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     await page.getByRole('button', { name: 'Preview changes', exact: true }).click();
     await expect(page.getByTestId('preview-panel')).toBeVisible();
     await capture('preview');
+    // Editing the reviewed route invalidates the review BEFORE apply: the
+    // panel clears and Apply is disabled (the changed review lifecycle).
+    await page.getByLabel('New model', { exact: true }).fill('glm-5.3-flash-edited');
+    await expect(page.getByTestId('preview-panel')).toHaveCount(0);
+    await expect(page.getByTestId('apply-custom')).toBeDisabled();
+    await capture('invalidated');
+    await page.getByLabel('New model', { exact: true }).fill('glm-5.3-flash');
+    await page.getByRole('button', { name: 'Preview changes', exact: true }).click();
+    await expect(page.getByTestId('preview-panel')).toBeVisible();
     await page.getByTestId('apply-custom').click();
     await expect(page.getByTestId('operation-drawer')).toBeVisible();
     const drawer = await page.getByTestId('operation-drawer').boundingBox();
@@ -74,7 +83,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     await page.unrouteAll({ behavior: 'wait' });
     fs.writeFileSync(path.join(out, `${viewport.width}-manifest.json`), JSON.stringify({
       lineage, viewport, captures, consoleErrors, failedRequests, observedAt: new Date().toISOString(),
-      journeys: ['profile filter and reset', 'review and apply', 'keyboard close and reopen', 'guarded undo'] }, null, 2));
+      journeys: ['profile filter and reset', 'review and edit-invalidation', 'review and apply',
+        'keyboard close and reopen', 'guarded undo'] }, null, 2));
     expect(consoleErrors).toEqual([]);
     expect(failedRequests).toEqual([]);
   });

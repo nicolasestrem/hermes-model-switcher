@@ -709,6 +709,10 @@ function App() {
     setPreview(null);
     setPreviewFor("");
     setReviewPreset(null);
+    // Cancel any review that is still in flight: its response is superseded
+    // and will (correctly) leave the busy flag alone, so clearing it here is
+    // what keeps "busy" meaning "a review request is actually pending".
+    setBusy(false);
   };
   const editEditor = (next) => {
     const { ackUnknownCost: oldAck, ...oldIntent } = editor;
@@ -776,7 +780,10 @@ function App() {
       setPreviewFor("");
       announce("Preview failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
     } finally {
-      setBusy(false);
+      // A SUPERSEDED response must not clear the busy flag while a newer
+      // review is still in flight (the lifecycle stays honest; the gates
+      // would still prevent a wrong write, but Apply would flicker enabled).
+      if (seq === reviewSeq.current) setBusy(false);
     }
   };
 
