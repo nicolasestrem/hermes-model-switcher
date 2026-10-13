@@ -758,6 +758,18 @@ def _removal_changes_for(desc, cfg: Dict[str, Any],
             raise ValueError("change is a no-op for this slot")
         return changes
     # Scalar / chain slots: unset the slot key plus its companions.
+    # The reviewed ``from`` identity is validated against the CURRENT stored
+    # route FIRST: when the route changed after review, the removal blocks
+    # instead of deleting a route the user never selected. (Route-dict slots
+    # run the same check above; scalar slots previously skipped it.)
+    if isinstance(current, str):
+        observed = {
+            "provider": _provider_from_changes(
+                {c: _get_dotted(cfg, c) for c in desc.companion_paths
+                 if _get_dotted(cfg, c) is not _STORE_MISSING}),
+            "model": current,
+        }
+        _assert_removal_identity(desc, observed, from_payload)
     changes[desc.storage_path] = None
     for comp in desc.companion_paths:
         if desc.family is SlotFamily.CRON and comp.endswith("model_provider"):
@@ -1276,6 +1288,27 @@ def models(response: Response, provider: str = "",
     return result
 
 
+def _watched_store(change: Dict[str, Any], known) -> Optional[Tuple[str, str, str]]:
+    """The canonical store a change is prepared from (profile, kind, path)."""
+    pid = change.get("profileId")
+    if not isinstance(pid, str):
+        return None
+    ident = known.get(pid)
+    if ident is None:
+        return None
+    return (pid, "canonical_config", str(_config_path_for(pid, ident)))
+
+
+def _store_revision(watched: Optional[Tuple[str, str, str]]) -> Optional[str]:
+    if watched is None:
+        return None
+    profile, kind, path = watched
+    try:
+        return adapter_for(kind, path, profile).revision()
+    except Exception:
+        return None
+
+
 @router.post("/preview")
 def preview(body: Dict[str, Any]):
     try:
@@ -1286,8 +1319,16 @@ def preview(body: Dict[str, Any]):
         # writes, chain edits, base_url/api_mode side effects and canonical
         # main preparation included. No writes happen here.
         out_changes, blocked, prepared = [], [], []
+        known = discover_profiles()
         with _LOCK:
             for c in changes:
+                # Watch the target's canonical store ACROSS preparation: the
+                # prepared mutation (canonical cleanup deletions included) is
+                # derived from that document, so a write landing between the
+                # read and the bind must abort the preview — never be adopted
+                # as the mutation's expected revision.
+                watched = _watched_store(c, known)
+                rev_before = _store_revision(watched)
                 targets, blk = _changes_to_targets([c], profiles, strict=False)
                 if blk:
                     blocked.extend(blk)
@@ -1305,10 +1346,25 @@ def preview(body: Dict[str, Any]):
                                     "reason": "config unreadable"})
                     continue
                 diff, side_effects = _diff_for_targets(targets, cfg, c)
+                rev_after = _store_revision(watched)
+                if (watched is not None and rev_before is not None
+                        and rev_after != rev_before):
+                    blocked.append({
+                        "profileId": c.get("profileId"),
+                        "slotId": c.get("slotId"),
+                        "kind": "raced",
+                        "reason": ("config changed while the preview was "
+                                   "prepared; retry the preview")})
+                    continue
                 for t in targets:
-                    prepared.append({"profile": t.profile,
-                                     "store_kind": t.store_kind,
-                                     "path": t.path, "changes": t.changes})
+                    entry = {"profile": t.profile,
+                             "store_kind": t.store_kind,
+                             "path": t.path, "changes": t.changes}
+                    if watched is not None and rev_after is not None:
+                        # Pin the revision the mutation was prepared FROM, not
+                        # whatever the store holds at bind time.
+                        entry["expected_revision"] = rev_after
+                    prepared.append(entry)
                 out_changes.append({**_sanitize_change(c),
                                     "sideEffects": side_effects,
                                     "diff": diff})
@@ -1379,11 +1435,16 @@ def _bind_preview(prepared: List[Dict[str, Any]],
     bound_targets: List[Dict[str, Any]] = []
     for t in prepared:
         key = (t["profile"], t["store_kind"], t["path"])
-        rev = None
-        try:
-            rev = adapter_for(t["store_kind"], t["path"], t["profile"]).revision()
-        except Exception:
-            rev = None
+        # Prefer the revision the mutation was PREPARED from (pinned by the
+        # caller around its config read); only targets without one fall back
+        # to a read here. Re-reading unconditionally would adopt an external
+        # write that landed during preparation as the expected revision.
+        rev = t.get("expected_revision")
+        if rev is None:
+            try:
+                rev = adapter_for(t["store_kind"], t["path"], t["profile"]).revision()
+            except Exception:
+                rev = None
         revisions[key] = rev
         ident = known.get(t["profile"])
         if ident is not None:
@@ -1395,7 +1456,7 @@ def _bind_preview(prepared: List[Dict[str, Any]],
             # ``expected_revision`` so a store that moved between verify and
             # plan blocks instead of silently rebasing.
             bound["identity"] = _identity_dict(ident)
-            if rev is not None:
+            if rev is not None and "expected_revision" not in bound:
                 bound["expected_revision"] = rev
         bound_targets.append(bound)
     return {"targets": bound_targets, "revisions": revisions,

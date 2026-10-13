@@ -2,6 +2,7 @@
 import inspect
 import json
 import pytest
+import yaml
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -101,6 +102,61 @@ def test_route_handlers_are_sync_so_blocking_work_leaves_the_event_loop():
         if endpoint is not None:
             assert not inspect.iscoroutinefunction(endpoint), \
                 f"{getattr(route, 'path', '?')} handler is async"
+
+
+def test_preview_preparation_race_is_refused_not_adopted(hermes_home, monkeypatch):
+    """An external write landing between preparation and bind must abort the
+    preview — never be adopted as the mutation's expected revision."""
+    cfg = _profile(hermes_home, "default")
+    tc = _client()
+    real = api._changes_to_targets
+
+    def raced(changes, profiles, strict=True):
+        targets, blocked = real(changes, profiles, strict=strict)
+        with open(cfg, "a") as fh:
+            fh.write("\nexternal:\n  marker: true\n")  # external writer
+        return targets, blocked
+
+    monkeypatch.setattr(api, "_changes_to_targets", raced)
+    r = tc.post("/preview", json={"changes": [
+        {"profileId": "default", "slotId": "auxiliary.compression",
+         "action": "set", "to": {"provider": "lablocal", "model": "lab-7b-instruct"}}]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert not body["preview"]["changes"], body
+    assert body["preview"]["blocked"], body
+    assert "changed while the preview was prepared" in body["preview"]["blocked"][0]["reason"]
+
+    r = tc.post("/operations", json={"previewId": body["previewId"]})
+    assert r.status_code == 409, r.text
+    assert "contained blocked changes" in r.json()["detail"]["error"]
+
+
+def test_scalar_removal_validates_reviewed_from_identity(hermes_home):
+    """An exact-model removal whose reviewed `from` no longer matches the
+    stored scalar route blocks; a matching one applies."""
+    cfg = _profile(hermes_home, "default", config=(
+        ROUTE_CONFIG + "delegation:\n  provider: dele\n  model: del-model\n"))
+    tc = _client()
+    stale = {"profileId": "default", "slotId": "delegation.model",
+             "action": "remove", "from": {"provider": "someoneelse",
+                                          "model": "del-model"}}
+    r = tc.post("/preview", json={"changes": [stale]})
+    assert r.status_code == 200, r.text
+    blocked = r.json()["preview"]["blocked"]
+    assert blocked, "a stale reviewed identity must block the removal"
+    assert "changed since review" in blocked[0]["reason"]
+
+    before = cfg.read_text()
+    fresh = {**stale, "from": {"provider": "dele", "model": "del-model"}}
+    r = tc.post("/preview", json={"changes": [fresh]})
+    body = r.json()
+    assert not body["preview"]["blocked"], body
+    r = tc.post("/operations", json={"previewId": body["previewId"]})
+    assert r.status_code == 200 and r.json()["operation"]["state"] == "committed", r.text
+    assert cfg.read_text() != before
+    doc = yaml.safe_load(cfg.read_text())
+    assert (doc.get("delegation") or {}).get("model") is None
 
 
 def test_speech_observation_uses_selected_runtime_backend():

@@ -288,7 +288,7 @@ def test_removal_edit_previews_as_unset_not_route_assignment(hermes_home):
     # cron removal unsets the inference pair, never the scheduler key
     r = tc.post("/preview", json={"changes": [
         {"profileId": "alpha", "slotId": "cron", "action": "remove",
-         "from": {"provider": "judge-old", "model": "old-cron-model"}, "to": None},
+         "from": {"provider": "", "model": "old-model"}, "to": None},
     ]})
     assert r.status_code == 200, r.text
     body = r.json()
