@@ -192,6 +192,30 @@ test("failed read and ok:false are not success", async ({ page }) => {
   await expect(page.locator("[data-status='restored']")).toHaveCount(0);
 });
 
+test("a blocked apply reports the engine's reason, not a bare status code", async ({ page }) => {
+  await page.goto(URL);
+  await page.evaluate(() => {
+    sessionStorage.setItem("hms-mock-flags", JSON.stringify({ blockedApply: true }));
+  });
+  await page.reload();
+  await expect(page.getByRole("button", { name: /Fast lane/ })).toBeVisible();
+
+  await page.getByRole("button", { name: /Fast lane/ }).click();
+  await expect(page.getByTestId("preview-panel")).toBeVisible();
+  await page.getByTestId("apply-preset").click();
+
+  // FastAPI wraps the engine's refusal under `detail`; that sentence is the
+  // whole point — "HTTP 409" alone tells the user nothing to fix.
+  await expect(page.getByTestId("live-status")).toContainText("the canonical route was rejected");
+  await expect(page.getByTestId("live-status")).toContainText("Nous Portal is not connected");
+  // ...and it is on screen, not only in the screen-reader region: a refused
+  // apply that shows nothing is exactly how "the tab does nothing" happens.
+  await expect(page.getByTestId("visible-status")).toBeVisible();
+  await expect(page.getByTestId("visible-status")).toContainText("the canonical route was rejected");
+  await expect(page.getByTestId("operation-drawer")).toHaveCount(0);
+  await page.evaluate(() => sessionStorage.removeItem("hms-mock-flags"));
+});
+
 test("keyboard navigation and aria-live announcements", async ({ page }) => {
   await open(page);
 

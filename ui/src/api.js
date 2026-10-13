@@ -48,10 +48,7 @@ async function request(path, opts = {}) {
     body = null;
   }
   if (!res.ok) {
-    throw new ApiError(
-      (body && body.error) || "HTTP " + res.status,
-      { status: res.status, body },
-    );
+    throw new ApiError(errorMessage(body, res.status), { status: res.status, body });
   }
   if (!body || body.ok !== true) {
     // ok:false (or missing ok) is a failure, not empty data.
@@ -60,6 +57,19 @@ async function request(path, opts = {}) {
     );
   }
   return body;
+}
+
+// The host mounts these routes on FastAPI, which wraps an HTTPException's payload
+// under ``detail`` — and that payload is where the engine puts the ACTIONABLE
+// sentence, e.g. "apply blocked: the canonical route was rejected" plus the reason
+// ("Nous Portal is not connected: no API key or login was found…"). Reporting only
+// the status leaves the user with "HTTP 409" and nothing to fix.
+function errorMessage(body, status) {
+  const detail = body && typeof body.detail === "object" && body.detail !== null ? body.detail : null;
+  const message = (detail && detail.error) || (body && body.error) || null;
+  const reasons = (detail && detail.reasons) || (body && body.reasons) || [];
+  if (!message) return "HTTP " + status;
+  return reasons.length ? `${message} — ${reasons.join("; ")}` : message;
 }
 
 export const api = {

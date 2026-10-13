@@ -4,7 +4,7 @@
   const BASE = "/api/plugins/hermes-model-switcher";
 
   window.__mockApi = Object.assign(
-    { failState: false, failReadback: false, failUndo: false, failSavePreset: false, failStateHttp: false },
+    { failState: false, failReadback: false, failUndo: false, failSavePreset: false, failStateHttp: false, blockedApply: false },
     JSON.parse(sessionStorage.getItem("hms-mock-flags") || "{}"),
   );
   // Recorded API calls: [{ path, method, body }] — lets specs assert exact request bodies.
@@ -72,6 +72,13 @@
       return { status: 200, body: { ok: true, preset } };
     }
     if (path === BASE + "/operations" && method === "POST") {
+      // Host-shaped 409: FastAPI wraps the engine's refusal under ``detail``.
+      // The UI must show that sentence, not a bare status code.
+      if (M.blockedApply) return { status: 409, body: { detail: {
+        ok: false, blocked: true,
+        error: "apply blocked: the canonical route was rejected",
+        reasons: ["Nous Portal is not connected: no API key or login was found for it."],
+      } } };
       const preview = lastPreview;
       if (!preview || (body.previewId && body.previewId !== preview.id))
         return { status: 200, body: { ok: false, error: "unknown or stale preview" } };
