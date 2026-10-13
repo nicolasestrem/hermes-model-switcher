@@ -1,0 +1,109 @@
+/* Model Switcher — plugin-owned control styling.
+ *
+ * The web Dashboard loads Tailwind preflight, which resets every button,
+ * input, select and textarea to a transparent background, zero border and
+ * zero padding. Native controls in the DOM are not proof of visible
+ * affordances: without this sheet the tab's controls are invisible grey
+ * shapes. Everything is scoped under `.hms-root` (the plugin's root class)
+ * so the host's own controls are never touched.
+ *
+ * Host tokens: --background / --midground / --foreground (current Dashboard
+ * theme), with the legacy --surface-color / --text-color names supported for
+ * older hosts and the test fixtures. --midground is the host's text colour;
+ * --foreground is a potentially transparent overlay, not a text colour.
+ */
+
+.hms-root {
+  --hms-accent: var(--color-ring, var(--accent-color, #6f9bff));
+  --hms-surface: var(--background, var(--surface-color, #1b1e24));
+  --hms-border: var(--color-border, var(--border-color, #3a3f48));
+  --hms-radius: 6px;
+
+  color: var(--midground, var(--text-color, #e6e8ee));
+}
+
+/* Text-like fields and selects (NOT checkboxes — those stay natural below) */
+.hms-root input:not([type]),
+.hms-root input[type="text"],
+.hms-root input[type="search"],
+.hms-root input[type="url"],
+.hms-root input[type="password"],
+.hms-root input[type="number"],
+.hms-root select,
+.hms-root textarea {
+  appearance: none;
+  min-height: 38px; /* touch-reachable, per approved control spec */
+  padding: 6px 10px;
+  border: 1px solid var(--hms-border);
+  border-radius: var(--hms-radius);
+  background: var(--hms-surface);
+  color: inherit;
+  font: inherit;
+  vertical-align: middle;
+  box-sizing: border-box;
+}
+
+.hms-root select,
+.hms-root input[type="number"] {
+  appearance: auto;
+}
+
+/* Buttons */
+.hms-root button {
+  appearance: none;
+  min-height: 38px;
+  padding: 6px 14px;
+  border: 1px solid var(--hms-border);
+  border-radius: var(--hms-radius);
+  background: var(--hms-surface);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.hms-root button:hover:not(:disabled) {
+  border-color: var(--hms-accent);
+}
+
+/* Keyboard focus must be visible even through the host reset */
+.hms-root button:focus-visible,
+.hms-root input:focus-visible,
+.hms-root select:focus-visible,
+.hms-root textarea:focus-visible {
+  outline: 2px solid var(--hms-accent);
+  outline-offset: 2px;
+}
+
+/* Disabled state must be VISIBLY distinct, not just inert */
+.hms-root button:disabled,
+.hms-root input:disabled,
+.hms-root select:disabled,
+.hms-root textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Checkboxes: natural size/shape, host accent for the checked tick */
+.hms-root input[type="checkbox"] {
+  appearance: auto;
+  width: 1rem;
+  height: 1rem;
+  min-height: 0;
+  padding: 0;
+  border: initial;
+  border-radius: 0.25rem;
+  background: initial;
+  accent-color: var(--hms-accent);
+  cursor: pointer;
+}
+
+/* Checkbox labels flow naturally — no stretching, no forced flex */
+.hms-root label {
+  align-items: baseline;
+}
+
+.hms-root label > input[type="checkbox"] {
+  margin-right: 0.4em;
+  vertical-align: middle;
+}

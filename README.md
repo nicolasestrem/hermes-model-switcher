@@ -41,6 +41,16 @@ outside the supported in-process Dashboard path.
      registered name must equal `dashboard/manifest.json`'s `name`, and the host
      renders the component inside the tab. There is no ReactDOM on the SDK and no
      host-provided root element.
+   - Control styling is plugin-owned: the manifest declares `css: "dist/style.css"`,
+     built from `ui/src/styles.css` and shipped beside the JS in both checkout and
+     assembled package. Tailwind's host reset removes native button/input/select
+     chrome; an unstyled control in the DOM is not a usable action. Scoped styles
+     supply borders, padding, focus rings and disabled feedback without changing
+     other Dashboard tabs. Fixtures load this same asset under the host reset,
+     rather than supplying their own control styles.
+   - Theme colours follow the Dashboard's background/midground tokens, with legacy
+     aliases supported. Sticky headers reject unsafe alpha values and use an opaque
+     theme background instead of a universally dark fallback in light themes.
    - API calls use `window.__HERMES_PLUGIN_SDK__.authedFetch` so the host's
      authentication and profile scope are preserved. Bare `fetch` is only a
      standalone/fixture fallback, not the Dashboard transport.

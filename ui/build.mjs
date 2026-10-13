@@ -29,5 +29,19 @@ copyFileSync(
 );
 console.log("built dashboard/dist/index.js");
 
+// Stylesheet: the manifest's `css: "dist/style.css"` asset (the host injects
+// it next to the entry) and the same file copied under ui/dist/ for the
+// Playwright fixtures, which link dashboard/dist/style.css.
+mkdirSync(new URL("../ui/dist", import.meta.url), { recursive: true });
+copyFileSync(
+  new URL("../ui/src/styles.css", import.meta.url),
+  new URL("../dashboard/dist/style.css", import.meta.url),
+);
+copyFileSync(
+  new URL("../ui/src/styles.css", import.meta.url),
+  new URL("../ui/dist/style.css", import.meta.url),
+);
+console.log("built dashboard/dist/style.css + ui/dist/style.css");
+
 // Test-harness vendor bundle (host-like React globals) — test asset only.
 await import(new URL("../tests/build-vendor.mjs", import.meta.url).pathname);

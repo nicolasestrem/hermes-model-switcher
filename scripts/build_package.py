@@ -40,6 +40,7 @@ PY_MODULES = ["hermes_adapter.py", "route_inventory.py"]
 PY_PACKAGE = "model_switcher"
 DASHBOARD = ["manifest.json", "plugin_api.py"]
 BUNDLE = "dist/index.js"  # built by `npm run build`
+STYLES = "dist/style.css"
 
 
 def fail(msg: str) -> None:
@@ -59,6 +60,10 @@ def main() -> None:
     if not bundle.is_file():
         fail(f"missing {bundle} — run `npm run build` first")
 
+    stylesheet = REPO / "dashboard" / STYLES
+    if not stylesheet.is_file():
+        fail(f"missing {stylesheet} — run `npm run build` first")
+
     dash = out / "dashboard" / "dist"
     dash.mkdir(parents=True)
     for f in COPY_FILES:
@@ -76,6 +81,7 @@ def main() -> None:
     for f in DASHBOARD:
         shutil.copy2(REPO / "dashboard" / f, out / "dashboard" / f)
     (dash / "index.js").write_bytes(bundle.read_bytes())
+    (dash / "style.css").write_bytes(stylesheet.read_bytes())
     print(f"package assembled at {out}")
 
 
