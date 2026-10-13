@@ -28,9 +28,16 @@ for p in (str(REPO), str(REPO / "src"), str(HERMES_SRC)):
         sys.path.insert(0, p)
 
 PROFILES = {
-    "default": "model:\n  provider: anthropic\n  default: claude-sonnet-4-6\n",
-    "research": "model:\n  provider: openai\n  default: gpt-5.1\n",
-    "archived": "model:\n  provider: anthropic\n  default: claude-sonnet-4-6\n",
+    "default": (
+        "model:\n  provider: anthropic\n  default: claude-sonnet-4-6\n"
+        "providers:\n"
+        "  zhipu:\n    base_url: http://127.0.0.1:8080/v1\n"
+    ),
+    "research": (
+        "model:\n  provider: openai\n  default: gpt-5.1\n"
+        "providers:\n"
+        "  zhipu:\n    base_url: http://127.0.0.1:8080/v1\n"
+    ),
 }
 # Deterministic mock credentials (lab-only, never a real provider key; no
 # 'sk-' prefix so leak assertions can look for real key shapes safely).
@@ -40,26 +47,42 @@ FAKE_CREDENTIAL = "LAB-LOCAL-FAKE-CREDENTIAL-0000000001"
 def seed_home(home: Path) -> Path:
     home.mkdir(parents=True, exist_ok=True)
     (home / "config.yaml").write_text(PROFILES["default"])
-    for name, raw in PROFILES.items():
+    # the "default" profile's credential marker lives at the home root
+    (home / ".env").write_text(f"OPENAI_API_KEY={FAKE_CREDENTIAL}\n")
+    names = [n for n in PROFILES if n != "default"]
+    for name in names:
         pdir = home / "profiles" / name
         pdir.mkdir(parents=True, exist_ok=True)
-        (pdir / "config.yaml").write_text(raw)
+        (pdir / "config.yaml").write_text(PROFILES[name])
         (pdir / ".env").write_text(f"OPENAI_API_KEY={FAKE_CREDENTIAL}\n")
-    state = home / "plugins" / "hermes-model-switcher"
+    # The plugin's state dir lives INSIDE the home but OUTSIDE the plugin
+    # checkout (dashboard/plugin_api.py: _state_dir_for) — mirror it here so
+    # the seeded preset is found by the real backend.
+    state = home / "state" / "hermes-model-switcher"
     state.mkdir(parents=True, exist_ok=True)
-    # Seed the reviewed "Fast lane" preset the same way the UI would save it.
+    # Seed the reviewed "Fast lane" preset the same way the UI would save it:
+    # the reviewed change intent (with slot identity) + slot-bound targets.
+    ui_changes = [
+        {"profileId": "default", "slotId": "main", "action": "set",
+         "from": {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+         "to": {"provider": "zhipu", "model": "glm-5.3-flash"}},
+        {"profileId": "research", "slotId": "main", "action": "set",
+         "from": {"provider": "openai", "model": "gpt-5.1"},
+         "to": {"provider": "zhipu", "model": "glm-5.3-flash"}},
+    ]
     (state / "presets.json").write_text(json.dumps([{
         "preset_id": "p-fast",
         "name": "Fast lane",
         "approved_classes": ["subscription_included", "metered"],
         "allow_unknown": False,
         "reviewed_profile_ids": ["default", "research"],
+        "ui_changes": ui_changes,
         "targets": [
-            {"profile": "default", "store_kind": "canonical_config",
-             "path": str(home / "profiles" / "default" / "config.yaml"),
+            {"profile": "default", "slot_id": "main", "store_kind": "canonical_config",
+             "path": str(home / "config.yaml"),
              "changes": {"model.provider": "zhipu", "model.default": "glm-5.3-flash"},
              "cost_class": "metered"},
-            {"profile": "research", "store_kind": "canonical_config",
+            {"profile": "research", "slot_id": "main", "store_kind": "canonical_config",
              "path": str(home / "profiles" / "research" / "config.yaml"),
              "changes": {"model.provider": "zhipu", "model.default": "glm-5.3-flash"},
              "cost_class": "metered"},

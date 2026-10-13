@@ -108,6 +108,24 @@ class StoreAdapter:
         return WriteOutcome(applied=True, pre_revision=pre,
                             post_revision=self.revision(), readback_ok=True)
 
+    def intended_write_matches(self, snapshot: Optional[Dict[str, Any]],
+                               changes: Dict[str, Any],
+                               current_revision: str) -> bool:
+        """Decidable crash-window predicate for engine.reconcile: True iff the
+        on-disk document is EXACTLY what an apply of *changes* on *snapshot*
+        would have produced and the intended values read back. False (or an
+        undecidable store) means the file differs from our intended write —
+        an external edit — and the caller treats the step as ambiguous."""
+        if not self.exists():
+            return False
+        if hasattr(self, "expected_revision"):
+            expected = _changes_applied(snapshot if snapshot is not None else {},
+                                        changes)
+            if (self.expected_revision(expected) == current_revision
+                    and self.readback(changes)):
+                return True
+        return False
+
 
 class JsonFileStoreAdapter(StoreAdapter):
     """JSON-serializable file store (test/lab stand-in for config.yaml;
@@ -231,6 +249,29 @@ class CanonicalConfigStoreAdapter(YamlFileStoreAdapter):
                 f"{self.path}: canonical config store cannot be removed")
         return super().compensate(snapshot, expected_revision)
 
+    def intended_write_matches(self, snapshot: Optional[Dict[str, Any]],
+                               changes: Dict[str, Any],
+                               current_revision: str) -> bool:
+        """Canonical-store crash-window predicate. The write landed through
+        Hermes' canonical save seam (normalize + strip-defaults), so raw
+        serialized bytes from a naive projection never match: decide from the
+        documents themselves — the intended document is run through the SAME
+        canonical pipeline (plan_canonical_save) and compared against the
+        strictly re-read on-disk document. Anything undecidable is False, so
+        the reconcile caller fails closed to recovery_required."""
+        if not self.exists() or not self.readback(changes):
+            return False
+        try:
+            intended = _changes_applied(
+                snapshot if snapshot is not None else {}, changes)
+            adapter = self._adapter()
+            planned = adapter.plan_canonical_save(
+                self.profile, intended)["planned_document"]
+            on_disk = adapter.load_raw_config(self.profile)
+        except Exception:
+            return False  # undecidable -> ambiguous, never guessed
+        return planned == on_disk
+
 
 def adapter_for(store_kind: str, path: str, profile: Optional[str] = None,
                 hermes_adapter=None) -> StoreAdapter:
@@ -277,3 +318,13 @@ def _get_dotted(data: Dict[str, Any], dotted: str) -> Any:
 
 
 _MISSING = object()
+
+
+def _changes_applied(base: Dict[str, Any],
+                     changes: Dict[str, Any]) -> Dict[str, Any]:
+    """In-memory projection of snapshot + planned changes (no I/O)."""
+    import copy
+    data = copy.deepcopy(base)
+    for dotted, value in changes.items():
+        _set_dotted(data, dotted, value)
+    return data

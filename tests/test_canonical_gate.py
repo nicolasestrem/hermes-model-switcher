@@ -35,6 +35,9 @@ CRON_CONFIG = """\
 model:
   provider: openai
   default: gpt-4o-mini
+providers:
+  lablocal:
+    base_url: http://127.0.0.1:8080/v1
 cron:
   provider: /usr/bin/systemd-run   # the SCHEDULER — never a model slot
   model: j/old

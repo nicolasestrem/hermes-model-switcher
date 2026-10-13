@@ -266,17 +266,15 @@ def reconcile(journal: OperationJournal, op_id: str) -> Dict[str, Any]:
                 journal.set_step_state(op_id, step["seq"], STEP_CONFLICT)
         elif step["state"] == "pending":
             if current != step["pre_revision"]:
-                # the file changed since our recheck. Determine whether the
-                # on-disk bytes are exactly what our write would have
-                # produced (crash between write and journal update) —
-                # canonical serialization makes this decidable. Anything
-                # else is an external edit -> ambiguous.
-                base = step["snapshot"] if step["snapshot"] is not None else {}
-                expected = _changes_applied(base, step["changes"])
-                if (hasattr(adapter, "expected_revision")
-                        and adapter.exists()
-                        and adapter.expected_revision(expected) == current
-                        and adapter.readback(step["changes"])):
+                # The file changed since our recheck. Determine whether the
+                # on-disk document is exactly what our write would have
+                # produced (crash between write and journal update) — the
+                # adapter-level intended-write predicate makes this decidable
+                # (including canonical stores, whose bytes come from Hermes'
+                # normalize/strip-default save seam, not a naive dump).
+                # Anything else is an external edit -> ambiguous.
+                if adapter.intended_write_matches(
+                        step["snapshot"], step["changes"], current):
                     journal.set_step_state(op_id, step["seq"], STEP_APPLIED,
                                            current)
                 else:

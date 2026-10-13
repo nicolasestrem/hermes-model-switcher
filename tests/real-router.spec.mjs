@@ -17,8 +17,12 @@ const profiles = {
 const cfg = (p) => readFileSync(profiles[p], "utf8");
 
 const ORIGINAL = {
-  default: "model:\n  provider: anthropic\n  default: claude-sonnet-4-6\n",
-  research: "model:\n  provider: openai\n  default: gpt-5.1\n",
+  // Seeded documents (tests/real_app.py PROFILES) — the undo contract is a
+  // byte-exact restore of the pre-apply file, providers rows included.
+  default: "model:\n  provider: anthropic\n  default: claude-sonnet-4-6\n"
+    + "providers:\n  zhipu:\n    base_url: http://127.0.0.1:8080/v1\n",
+  research: "model:\n  provider: openai\n  default: gpt-5.1\n"
+    + "providers:\n  zhipu:\n    base_url: http://127.0.0.1:8080/v1\n",
 };
 const seedCfg = (p) =>
   p === "default" ? ORIGINAL.default
