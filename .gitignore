@@ -4,6 +4,7 @@ playwright-report/
 test-results/
 __pycache__/
 *.pyc
+real-home.json
 
 # --- Private data: ignore alone is NOT a guarantee (git add -f can still
 # stage these); scripts/privacy_guard.py is the actual gate. ---
