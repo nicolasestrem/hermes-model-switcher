@@ -41,6 +41,9 @@ outside the supported in-process Dashboard path.
      registered name must equal `dashboard/manifest.json`'s `name`, and the host
      renders the component inside the tab. There is no ReactDOM on the SDK and no
      host-provided root element.
+   - API calls use `window.__HERMES_PLUGIN_SDK__.authedFetch` so the host's
+     authentication and profile scope are preserved. Bare `fetch` is only a
+     standalone/fixture fallback, not the Dashboard transport.
    - `ui/dist/plugin.js` (the standalone layout) keeps a self-mount fallback for
      hosts that provide `globalThis.React`/`ReactDOM` instead — that is what the
      local Playwright fixture uses.
@@ -70,6 +73,28 @@ outside the supported in-process Dashboard path.
 Environment: `HERMES_MODEL_SWITCHER_HERMES_REPO` overrides the Hermes checkout
 used for registry scans (default `~/.hermes/hermes-agent`, resolved relative
 to the running user's home — never a baked-in path).
+
+## Using the tab
+
+1. Select the profile/slot checkboxes in the matrix, then enter the new provider
+   and model in the change editor above it. The matrix scrolls internally with
+   sticky headers; it does not push the editor below every row.
+2. Click **Preview changes** and review the affected routes and side effects.
+   Acknowledge unknown-cost routes when required before applying a custom change.
+3. Click **Apply** to apply the reviewed change, or enter a preset name and click
+   **Save as preset** for reuse. Favorite presets appear above the editor; an empty
+   list shows guidance rather than an unexplained blank section.
+4. Clicking a favorite preset reviews/previews it; **Apply preset** performs the
+   reviewed application. Check the operation drawer's per-profile readback result.
+   Undo remains an explicit, guarded recovery action.
+
+Status and failures are shown beside the action controls as well as announced
+through the screen-reader status region. A refused apply preserves the server's
+reason, including FastAPI's nested `detail.error` and `detail.reasons`, rather
+than displaying only `HTTP 409`. A missing provider connection is a real refusal,
+not a successful model switch; connect that provider through Hermes or choose a
+connected route. A state-loading authentication failure is separate from a layout
+problem: the tab must use the host SDK transport even if the bundle renders.
 
 ## Limitations
 
@@ -140,17 +165,25 @@ to the running user's home — never a baked-in path).
 
 ## Verified scope & known gaps
 
-Verified locally (no CI/CD exists in this repo; the local privacy gate and
-this suite are the enforcement):
+Verified locally through Hermes (local build/tests and the privacy gate are the
+publication checks; no hosted CI/CD was added for this fix):
 
-- Full backend pytest suite (96 tests) incl. real dashboard-plugin discovery
+- Full backend pytest suite (97 tests) incl. real dashboard-plugin discovery
   and module load of the INSTALLED package in a throwaway Hermes home, and an
   install → uninstall round-trip that refuses the live home (fail-closed).
-- Playwright suite (8 tests) drives the real FastAPI backend (uvicorn) over a
+- Playwright suite (11 tests) covers the SDK registration/auth transport contract,
+  visible refusal messages, and the real FastAPI backend (uvicorn) over a
   throwaway lab home: real preview/apply with on-disk config verification and
   guarded undo restoring the exact original files; fake credentials only,
   real file saves, no inference calls; every plugin-api response is asserted
   free of keys, host paths, snapshots and payloads.
+- Independent Chromium before/after check against a real Dashboard in an
+  isolated lab home: at 1280×577 with 34 matrix rows and scroll position zero,
+  **Preview changes** moved from y=1335–1358 to y=417–441. The editor now precedes
+  the matrix; the matrix has a 317px scroll viewport for 880px of content.
+  Both renders had no console errors. Desktop and narrow mobile lab renders
+  were also inspected; a real missing-provider refusal was visible on screen.
+  These are lab observations, not evidence of deployment to a live installation.
 
 Known gaps (not yet verified — do not assume them):
 
