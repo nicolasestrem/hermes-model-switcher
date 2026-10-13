@@ -1,5 +1,12 @@
 node_modules/
-dist/
+# Build outputs stay disposable EXCEPT dashboard/dist: the Dashboard loads
+# dashboard/manifest.json's "entry" straight from the installed directory, so a
+# git install (which never runs npm) has no bundle unless it is committed.
+# hermes-memory-ui, agent-analytics and hermes-relay all track dashboard/dist
+# for exactly this reason. Ignoring it made every git install serve a 404 bundle
+# and an unimportable backend.
+ui/dist/
+dist-package/
 playwright-report/
 test-results/
 __pycache__/

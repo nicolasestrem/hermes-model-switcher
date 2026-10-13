@@ -36,7 +36,7 @@ def package(tmp_path_factory):
                    capture_output=True, text=True)
     pkg = out / "hermes-model-switcher"
     # package completeness: manifest, IIFE bundle, backend, python modules
-    for rel in ("plugin.yaml", "LICENSE", "README.md",
+    for rel in ("plugin.yaml", "__init__.py", "LICENSE", "README.md",
                 "dashboard/manifest.json", "dashboard/dist/index.js",
                 "dashboard/plugin_api.py",
                 "python/hermes_adapter.py", "python/route_inventory.py",
@@ -120,12 +120,20 @@ def test_install_uninstall_roundtrip(hermes_home, package):
     assert (home / "config.yaml").exists()
 
 
-def test_install_script_refuses_live_home(package, monkeypatch):
-    # With no override, the installer must refuse the live ~/.hermes home.
-    live = Path.home() / ".hermes"
+def test_install_script_refuses_live_home(package, tmp_path):
+    """The installer must refuse the declared live home — asserted hermetically.
+
+    HERMES_MODEL_SWITCHER_LIVE_HOME names the home to refuse, so this test does
+    not depend on the operator's real ~/.hermes. Keying it off ``Path.home()``
+    meant that on a workstation where the plugin IS installed live the test
+    asserted the operator's own install out of existence.
+    """
+    live = tmp_path / "live-home"
+    (live / "plugins").mkdir(parents=True)
     r = subprocess.run(
         ["bash", str(REPO / "scripts" / "install-local.sh"), str(live), str(package)],
-        env={"PATH": "/usr/bin:/bin", "HERMES_HOME": str(Path.home() / ".hermes"),
+        env={"PATH": "/usr/bin:/bin", "HERMES_HOME": str(live),
+             "HERMES_MODEL_SWITCHER_LIVE_HOME": str(live),
              "HERMES_MODEL_SWITCHER_ALLOW_LIVE": "0"},
         capture_output=True, text=True)
     # Refusal = exit 3 (live home detected) or 4 (live home undeterminable —
