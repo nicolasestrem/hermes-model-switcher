@@ -267,6 +267,104 @@ def test_undo_restore_detects_interleaved_writer(hermes_home, monkeypatch):
         adapter.compensate(snapshot, adapter.revision())
 
 
+def test_typed_decision_markers_reach_validation_but_are_never_stored(hermes_home):
+    """A judge edit carrying typed-decision markers passes the protocol check;
+    the markers are VALIDATION-only and never land in the stored route."""
+    _profile(hermes_home, "default", config=(
+        ROUTE_CONFIG + "auxiliary:\n  goal_judge:\n    model: old\n    threshold: 0.8\n"))
+    tc = _client()
+    change = {"profileId": "default", "slotId": "judge.goal_judge.route",
+              "action": "set", "to": {"provider": "typed-decision-lab",
+                                      "model": "judge-1",
+                                      "labels": ["pass", "fail"]}}
+    r = tc.post("/preview", json={"changes": [change]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert not body["preview"]["blocked"], body
+    preview = ri.preview_changes(
+        {"auxiliary": {"goal_judge": {"model": "old", "threshold": 0.8}}},
+        [ri.RouteEdit("judge.goal_judge.route", change["to"])])
+    after = next(c for c in preview.changes
+                 if c.storage_path == "auxiliary.goal_judge").after
+    assert after.get("model") == "judge-1"
+    assert "labels" not in after and "threshold" not in change["to"]
+
+
+def test_duplicate_slot_changes_rejected_everywhere(hermes_home):
+    """A set and an exact-removal for the SAME slot are refused on every entry
+    path — the engine would coalesce them and silently drop one."""
+    _profile(hermes_home, "default")
+    tc = _client()
+    duplicates = [
+        {"profileId": "default", "slotId": "auxiliary.compression",
+         "action": "set", "to": {"provider": "lablocal", "model": "new"}},
+        {"profileId": "default", "slotId": "auxiliary.compression",
+         "action": "remove", "to": None,
+         "from": {"provider": "lablocal", "model": "old"}},
+    ]
+    r = tc.post("/preview", json={"changes": duplicates})
+    assert r.status_code == 200, r.text
+    body = r.json()["preview"]
+    assert body["changes"] == [] and body["blocked"], body
+    assert "duplicate change" in body["blocked"][0]["reason"]
+
+    r = tc.post("/operations", json={"changes": duplicates})
+    assert r.status_code == 422, r.text
+    assert any("duplicate change" in str(b.get("reason"))
+               for b in r.json()["detail"]["blocked"])
+
+    r = tc.post("/presets", json={"name": "dup", "changes": duplicates})
+    assert r.status_code == 422, r.text
+
+
+def test_delegation_inherited_provider_is_credential_gated(hermes_home):
+    """delegation.model with NO delegation.provider inherits model.provider;
+    a model-only edit through an unauthenticated parent must be refused."""
+    _profile(hermes_home, "default", config=(
+        "model:\n  provider: somecloud\n  default: m1\n"
+        "delegation:\n  model: d1\n"))
+    tc = _client()
+    r = tc.post("/operations", json={"changes": [
+        {"profileId": "default", "slotId": "delegation.model",
+         "action": "set", "to": {"model": "d2"}}]})
+    assert r.status_code == 409, r.text
+    assert "missing provider credentials" in r.json()["detail"]["error"]
+
+
+def test_main_slot_without_provider_never_reports_base_url_as_provider(hermes_home):
+    """The inventory's configured provider comes from a PROVIDER companion
+    only — an endpoint URL (which can carry credentials) never becomes it."""
+    secret_url = "http://user:secret-token@127.0.0.1:9000/v1?token=abc"
+    _profile(hermes_home, "default", config=(
+        f"model:\n  default: m1\n  base_url: {secret_url}\n"))
+    slot = next(s for s in api._profile_inventory()["default"]["slots"]
+                if s["slotId"] == "main")
+    assert slot["provider"] == ""
+    assert slot["model"] == "m1"
+    assert "secret-token" not in json.dumps(slot)
+
+
+def test_picker_auth_prefers_an_authenticated_duplicate_row(hermes_home, monkeypatch):
+    """Duplicate picker rows for one slug: an earlier unauthenticated row must
+    not shadow a later authenticated one."""
+    hermes_home.make_profile("alpha")
+
+    class StubCatalog:
+        @staticmethod
+        def _load_picker_payload(refresh):
+            return {"providers": [
+                {"slug": "nous", "authenticated": False},
+                {"slug": "nous", "authenticated": True},
+            ]}
+
+    monkeypatch.setattr(api, "_model_catalog_module", lambda: StubCatalog)
+    assert api._runtime_provider_authenticated("alpha", "nous") is True
+    monkeypatch.setattr(api, "_model_catalog_module", lambda: type(
+        "M", (), {"_load_picker_payload": staticmethod(lambda refresh: {
+            "providers": [{"slug": "nous", "authenticated": False}]})}))
+    assert api._runtime_provider_authenticated("alpha", "nous") is False
+
+
 def test_speech_observation_uses_selected_runtime_backend():
     cfg = {'stt': {'provider': 'groq', 'groq': {'model': 'whisper-large-v3'}}}
     obs = next(item for item in ri.build_inventory(cfg) if item.descriptor.slot_id == 'specialist.stt')

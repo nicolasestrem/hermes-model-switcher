@@ -59,7 +59,8 @@ from pydantic import BaseModel
 
 from hermes_adapter import HermesAdapter
 from hermes_adapter import discover_profiles
-from route_inventory import RouteEdit, SlotFamily, build_inventory, preview_changes
+from route_inventory import (RouteEdit, SlotFamily, build_inventory,
+                             preview_changes, _JUDGE_TYPED_KEYS)
 
 from model_switcher.adapters import adapter_for
 from model_switcher.adapters import _get_dotted
@@ -543,8 +544,14 @@ def _slot_configured_view(obs, cfg: Dict[str, Any],
         model = stored
     if provider is None:
         for comp in d.companion_paths:
+            # Only PROVIDER companions qualify: a route dict's neighbours can
+            # include model.base_url/api_mode, and reporting the endpoint URL
+            # as the provider would corrupt /state identities (and leak an
+            # unsanitized URL into the inventory).
+            if not comp.endswith((".provider", "_provider")):
+                continue
             cv = _get_dotted(cfg, comp)
-            if cv is not _STORE_MISSING:
+            if isinstance(cv, str) and cv.strip():
                 provider = cv
                 break
     return (provider if provider is not None else "",
@@ -785,6 +792,31 @@ def _removal_changes_for(desc, cfg: Dict[str, Any],
     return changes
 
 
+def _duplicate_slot_changes(changes: List[Dict[str, Any]]
+                            ) -> List[Dict[str, Any]]:
+    """Changes that repeat a (profile, slot) pair.
+
+    Two intents for one slot (e.g. a set AND an exact-removal from the same
+    editor session) would be coalesced by the engine's same-store grouping
+    (later ``changes.update()`` wins), silently applying only one of them.
+    Every entry path rejects them instead: browser, direct API, and preset.
+    """
+    seen = set()
+    blocked: List[Dict[str, Any]] = []
+    for c in changes:
+        key = (c.get("profileId"), _slot_alias(c.get("slotId")))
+        if key in seen:
+            blocked.append({
+                "profileId": c.get("profileId"),
+                "slotId": c.get("slotId"),
+                "reason": ("duplicate change for the same slot; combine the "
+                           "set and removal into one intent"),
+            })
+        else:
+            seen.add(key)
+    return blocked
+
+
 def _changes_to_targets(changes: List[Dict[str, Any]],
                         profiles: Dict[str, Dict[str, Any]],
                         strict: bool = True):
@@ -793,6 +825,15 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
     profile, or a slot not present in that profile's inventory, is blocked —
     never silently substituted."""
     targets, blocked = [], []
+    duplicates = _duplicate_slot_changes(changes)
+    if duplicates:
+        # Two intents for one slot would be coalesced (later wins) and only
+        # ONE of them applied — reject the whole request instead.
+        if strict:
+            raise HTTPException(status_code=422, detail={
+                "ok": False, "error": "preview blocked for some profiles",
+                "blocked": duplicates})
+        return [], duplicates
     for c in changes:
         pid = c.get("profileId")
         prof = profiles.get(pid)
@@ -1008,6 +1049,11 @@ def _runtime_provider_authenticated(profile: str, provider: str) -> Optional[boo
     rows = payload.get("providers") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         return None
+    # Scan ALL matching rows before concluding: the picker payload can carry
+    # duplicate rows for one slug (aliases/canonical entries), and returning
+    # the FIRST match's flag would let an unauthenticated duplicate shadow a
+    # genuinely authenticated row — refusing a valid connection.
+    explicit_false = False
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -1016,8 +1062,11 @@ def _runtime_provider_authenticated(profile: str, provider: str) -> Optional[boo
         if provider not in ids:
             continue
         value = row.get("authenticated")
-        return value if isinstance(value, bool) else None
-    return None
+        if value is True:
+            return True
+        if value is False:
+            explicit_false = True
+    return False if explicit_false else None
 
 
 def _provider_credentials_satisfied(profile: str, ident, cfg: Dict[str, Any],
@@ -1092,10 +1141,20 @@ def _typed_payload(to: Dict[str, Any]) -> Dict[str, Any]:
     including ``chain`` — so the exact reviewed intent (a chain edit, base_url,
     api_mode) reaches route_inventory verbatim and is never narrowed to a bare
     provider/model pair. Unknown/foreign keys never reach the prepared
-    mutation."""
+    mutation.
+
+    Typed-decision VALIDATION markers (``verdict``/``labels``/``schema``/
+    ``typed``/``structured_output``) ride along so route_inventory's protocol
+    check can see them — they are never STORED: the stored shape is built from
+    ``_route_payload_fields`` (provider/model/base_url/api_mode) only.
+    """
     if not isinstance(to, dict):
         return {}
-    return {k: to[k] for k in _TYPED_PAYLOAD_KEYS if k in to}
+    out = {k: to[k] for k in _TYPED_PAYLOAD_KEYS if k in to}
+    for key in _JUDGE_TYPED_KEYS:
+        if key in to:
+            out[key] = to[key]
+    return out
 
 
 def _sanitize_public_url(value: Any) -> Any:
@@ -1341,6 +1400,18 @@ def preview(body: Dict[str, Any]):
     try:
         profiles = _profile_inventory()
         changes = body.get("changes") or []
+        duplicates = _duplicate_slot_changes(changes)
+        if duplicates:
+            # A request repeating one slot is refused as a whole: applying the
+            # coalesced subset would silently drop the other intent.
+            preview_id = "pv-" + uuid.uuid4().hex[:12]
+            with _LOCK:
+                _PREVIEW_CACHE[preview_id] = _bind_preview([], profiles,
+                                                           duplicates)
+                _evict_previews()
+            return {"ok": True, "previewId": preview_id,
+                    "preview": {"id": preview_id, "changes": [],
+                                "blocked": duplicates}}
         # A preview is the SAME prepared mutation an apply would run (one code
         # path: _changes_to_targets) — so the diff shown is exactly what Apply
         # writes, chain edits, base_url/api_mode side effects and canonical
@@ -1768,12 +1839,23 @@ def _unchanged_provider_hops(profile: str,
             desc = obs.descriptor
             if desc.storage_path != dotted:
                 continue
+            found_any = False
             for comp in desc.companion_paths:
                 if not comp.endswith((".provider", "_provider")):
                     continue
                 found = _get_dotted(cfg, comp)
                 if isinstance(found, str) and found.strip() and found not in out:
                     out.append(found)
+                if isinstance(found, str) and found.strip():
+                    found_any = True
+            if not found_any and desc.inherit_provider_from:
+                # The route INHERITS its provider (e.g. delegation.model
+                # with no delegation.provider inherits model.provider):
+                # the gate must follow the inheritance, or an edit routing
+                # through an unauthenticated hosted parent would pass.
+                base = _get_dotted(cfg, desc.inherit_provider_from)
+                if isinstance(base, str) and base.strip() and base not in out:
+                    out.append(base)
             break
     return out
 

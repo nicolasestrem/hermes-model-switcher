@@ -138,3 +138,20 @@ test('real API: object-shaped diff values render as JSON, never [object Object]'
   await expect(diff).toContainText('{"provider":"nous","model":"hermes-4"}');
   await expect(diff).not.toContainText('[object Object]');
 });
+
+test('real API: one slot carries either a set or a removal — never both', async ({ page }) => {
+  // The engine coalesces same-slot changes (later wins); the editor must not
+  // emit both intents for one slot. The removal owns the slot here.
+  await open(page);
+  await page.getByLabel('Select default main', { exact: true }).check();
+  await page.getByLabel('New provider', { exact: true }).fill('zhipu');
+  await page.getByLabel('New model', { exact: true }).fill('glm-5.3-flash');
+  await page.getByLabel('Exact provider/model to remove', { exact: true })
+    .fill('anthropic/claude-sonnet-4-6');
+  await page.getByLabel('I acknowledge unknown-cost routes').check();
+  await page.getByRole('button', { name: 'Preview changes', exact: true }).click();
+  const panel = page.getByTestId('preview-panel');
+  await expect(panel).toContainText('Preview (1 change)');
+  await expect(page.getByTestId('preview-diff')).toContainText('model.default');
+  await expect(panel).not.toContainText('zhipu');
+});

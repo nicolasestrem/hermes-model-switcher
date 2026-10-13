@@ -626,21 +626,27 @@ export function buildCustomChanges(editor, selectedSlots) {
   const removalTargets = selectedSlots.filter((s) =>
     s.writable && normalizeState(s.state) === "configured" &&
     `${s.provider}/${s.model}` === removal);
+  // A slot can never carry BOTH a set and an exact-removal in one review: the
+  // engine coalesces same-slot changes (later wins) and would silently apply
+  // only one. The removal owns the slot; the set skips it (server-side
+  // duplicate rejection backs this up for API/preset callers).
+  const removalKeys = new Set(removalTargets.map((s) => s.profileId + "/" + s.slotId));
+  const settable = writable.filter((s) => !removalKeys.has(s.profileId + "/" + s.slotId));
   const type = editor.changeType;
   let setPart = [];
   if (type === "chain") {
     const entries = parseChain(editor.chainText);
     if (entries.length && !chainInvalid(entries)) {
-      setPart = writable.map((s) => mkChange(s,
+      setPart = settable.map((s) => mkChange(s,
         { chain: entries.map((e) => ({ provider: e.provider, model: e.model })) }));
     }
   } else if (type === "unset") {
-    setPart = writable.map((s) => isChainSlot(s) ? mkChange(s, { chain: null }) : mkChange(s, null, "remove"));
+    setPart = settable.map((s) => isChainSlot(s) ? mkChange(s, { chain: null }) : mkChange(s, null, "remove"));
   } else if (type === "disable") {
-    setPart = writable.filter(isChainSlot).map((s) => mkChange(s, { chain: [] }));
+    setPart = settable.filter(isChainSlot).map((s) => mkChange(s, { chain: [] }));
   } else if (editor.provider && editor.model) {
     const route = { provider: editor.provider, model: editor.model };
-    setPart = writable.map((s) => mkChange(s, isChainSlot(s) ? { chain: [route] } : route));
+    setPart = settable.map((s) => mkChange(s, isChainSlot(s) ? { chain: [route] } : route));
   }
   const removalPart = removal ? removalTargets.map((s) => mkChange(s, null, "remove")) : [];
   return [...setPart, ...removalPart];
