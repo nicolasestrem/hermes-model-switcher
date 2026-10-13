@@ -133,7 +133,14 @@ function Matrix({ profiles, slots, selection, onToggle, onExpand, expanded, filt
       </div>
       <div data-testid="matrix-scroll" style={{ maxHeight: "55vh", overflow: "auto" }}>
       <table style={{ borderCollapse: "collapse", width: "100%" }}>
-        <caption className="visually-hidden">Model slots per profile with configured and last-observed state</caption>
+        {/* Screen-reader-only caption. The hidden styles are INLINE: the host
+            Dashboard does not define `.visually-hidden`, so a class-based hide
+            renders the caption as a stray visible line above the table (measured
+            on the real host: position static, 961x23 at 1280px wide). */}
+        <caption className="visually-hidden"
+          style={{ position: "absolute", left: -9999, width: 1, height: 1, overflow: "hidden" }}>
+          Model slots per profile with configured and last-observed state
+        </caption>
         <thead>
           <tr>
             {["", "Profile", "Slot", "Family", "Configured route", "Last observed"].map((h) => (

@@ -259,6 +259,22 @@ test("keyboard navigation and aria-live announcements", async ({ page }) => {
   await expect(page.getByRole("row", { name: /Default/ })).toBeVisible();
 });
 
+test("the table caption stays screen-reader-only without a host CSS class", async ({ page }) => {
+  // The host Dashboard does not define `.visually-hidden` (unlike the earlier
+  // fixtures), so a class-based hide rendered the caption as a stray visible
+  // line above the matrix. The hidden styles are inline now.
+  await open(page);
+  const cap = page.locator('[data-testid="matrix-scroll"] caption');
+  await expect(cap).toHaveCount(1);
+  const r = await cap.evaluate((el) => {
+    const b = el.getBoundingClientRect();
+    return { left: b.left, width: b.width, text: el.textContent.trim() };
+  });
+  expect(r.text).toContain("Model slots per profile");
+  expect(r.left).toBeLessThan(-1000); // off-screen, not a visible line
+  expect(r.width).toBeLessThanOrEqual(1);
+});
+
 test("the sticky matrix header stays opaque when the host surface token is transparent", async ({ page }) => {
   // `var(--surface-color, fallback)` only falls back when the variable is
   // UNDEFINED. A host theme defining it as a transparent value would leave the
