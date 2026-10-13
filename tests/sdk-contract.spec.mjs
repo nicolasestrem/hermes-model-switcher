@@ -47,6 +47,12 @@ test("registers with the host SDK and renders with no globalThis.React present",
   expect(await page.evaluate(() => window.__mockApi.requests.some((r) => r.path.endsWith("/state"))))
     .toBe(true);
 
+  // Every call to our own API went through the host SDK's authedFetch — the one
+  // transport that carries dashboard auth. Bare fetch() 401s on a real
+  // session-token (loopback / desktop) dashboard, which renders a plugin tab
+  // that looks alive but can do nothing.
+  expect(await page.evaluate(() => window.__sdkFetchCalls.authedFetch)).toBeGreaterThan(0);
+
   expect(errors).toEqual([]);
 });
 

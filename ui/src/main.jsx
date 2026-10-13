@@ -4,6 +4,7 @@
 import React, { useEffect, useMemo, useState } from "shims/react.js";
 import { createRoot } from "shims/react-dom-client.js";
 import { api, ApiError } from "./api.js";
+import { resolveOpaqueSurface } from "./theme.js";
 
 const t = (v, fb) => `var(--${v}, ${fb})`;
 
@@ -17,6 +18,27 @@ const THEME = {
   ok: t("success-color", "#3fb950"),
   warn: t("warning-color", "#d29922"),
 };
+
+// Theme-reactive opaque colour for the sticky matrix header. Never a
+// module-scope snapshot: the host can switch theme (class/profile/light-dark)
+// without reloading the plugin, which would leave the header on the previous
+// surface colour while its text and borders follow the live variables.
+function useOpaqueSurface() {
+  const [bg, setBg] = useState(() => resolveOpaqueSurface());
+  useEffect(() => {
+    if (typeof MutationObserver === "undefined") return undefined;
+    const sync = () => setBg(resolveOpaqueSurface());
+    const obs = new MutationObserver(sync);
+    const opts = {
+      attributes: true,
+      attributeFilter: ["class", "style", "data-theme", "data-color-mode"],
+    };
+    obs.observe(document.documentElement, opts);
+    if (document.body) obs.observe(document.body, opts);
+    return () => obs.disconnect();
+  }, []);
+  return bg;
+}
 
 const FAMILIES = [
   { id: "main", label: "Main" },
@@ -46,6 +68,11 @@ function PresetsBar({ presets, onReview, busy }) {
   return (
     <section aria-label="Favorite presets" style={{ marginBottom: 12 }}>
       <h3 style={{ margin: "4px 0" }}>Favorite presets</h3>
+      {presets.length === 0 && (
+        <p data-testid="presets-empty" style={{ color: THEME.muted, margin: "4px 0" }}>
+          No presets saved yet — select slots below, preview a change, then save it as a preset.
+        </p>
+      )}
       <div role="list" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
         {presets.map((p) => (
           <button
@@ -68,6 +95,9 @@ function PresetsBar({ presets, onReview, busy }) {
 }
 
 function Matrix({ profiles, slots, selection, onToggle, onExpand, expanded, filters, setFilters }) {
+  // Resolved per render-source and refreshed on host theme changes, never a
+  // module-scope snapshot (see useOpaqueSurface).
+  const stickyBg = useOpaqueSurface();
   const filtered = useMemo(() => {
     const profIds = new Set(filters.profileIds.length ? filters.profileIds : profiles.map((p) => p.id));
     return slots.filter((s) => {
@@ -103,12 +133,23 @@ function Matrix({ profiles, slots, selection, onToggle, onExpand, expanded, filt
           <option value="unset">Unset / auto</option>
         </select>
       </div>
+      <div data-testid="matrix-scroll" style={{ maxHeight: "55vh", overflow: "auto" }}>
       <table style={{ borderCollapse: "collapse", width: "100%" }}>
-        <caption className="visually-hidden">Model slots per profile with configured and last-observed state</caption>
+        {/* Screen-reader-only caption. The hidden styles are INLINE: the host
+            Dashboard does not define `.visually-hidden`, so a class-based hide
+            renders the caption as a stray visible line above the table (measured
+            on the real host: position static, 961x23 at 1280px wide). */}
+        <caption className="visually-hidden"
+          style={{ position: "absolute", left: -9999, width: 1, height: 1, overflow: "hidden" }}>
+          Model slots per profile with configured and last-observed state
+        </caption>
         <thead>
           <tr>
             {["", "Profile", "Slot", "Family", "Configured route", "Last observed"].map((h) => (
-              <th key={h} scope="col" style={{ textAlign: "left", borderBottom: `1px solid ${THEME.border}`, padding: 4 }}>{h}</th>
+              <th key={h} scope="col" style={{
+                textAlign: "left", borderBottom: `1px solid ${THEME.border}`, padding: 4,
+                position: "sticky", top: 0, background: stickyBg, zIndex: 1,
+              }}>{h}</th>
             ))}
           </tr>
         </thead>
@@ -153,6 +194,7 @@ function Matrix({ profiles, slots, selection, onToggle, onExpand, expanded, filt
           )}
         </tbody>
       </table>
+      </div>
     </section>
   );
 }
@@ -200,7 +242,7 @@ function ChangeEditor({ selection, slots, onPreview, onApply, preview, previewIn
   ];
 
   return (
-    <section aria-label="Custom change editor" style={{ marginTop: 16, borderTop: `1px solid ${THEME.border}`, paddingTop: 8 }}>
+    <section aria-label="Custom change editor" data-testid="change-editor" style={{ marginTop: 16, borderTop: `1px solid ${THEME.border}`, paddingTop: 8 }}>
       <h3 style={{ margin: "4px 0" }}>Custom change / exact-model removal</h3>
       {!hasSelection && <p style={{ color: THEME.muted }}>Select slots in the matrix to build a change.</p>}
       <div style={{ display: "grid", gap: 6, maxWidth: 640 }}>
@@ -323,7 +365,9 @@ function OperationDrawer({ operation, onUndo, undoGuarded, setUndoGuarded, busy 
 function App() {
   const [state, setState] = useState(null);
   const [loadError, setLoadError] = useState(null);
-  const [status, setStatus] = useState("");
+  // {text, kind}. Severity is explicit, never inferred from the message text:
+  // a success line that merely contains the word "failed" must stay neutral.
+  const [status, setStatus] = useState({ text: "", kind: "info" });
   const [selection, setSelection] = useState(new Map()); // key -> slot
   const [expanded, setExpanded] = useState({});
   const [filters, setFilters] = useState({ profileIds: [], family: "all", provider: "", model: "", state: "all" });
@@ -336,7 +380,7 @@ function App() {
   const [saveName, setSaveName] = useState("");
   
 
-  const announce = (msg) => setStatus(msg);
+  const announce = (msg, kind = "info") => setStatus({ text: msg, kind });
 
   const load = async () => {
     setBusy(true);
@@ -348,7 +392,7 @@ function App() {
     } catch (e) {
       setState(null);
       setLoadError(e instanceof ApiError ? e.message : String(e));
-      announce("Load failed: " + (e instanceof ApiError ? e.message : String(e)));
+      announce("Load failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
     } finally {
       setBusy(false);
     }
@@ -371,7 +415,7 @@ function App() {
     } catch (e) {
       setPreview(null);
       setPreviewFor("");
-      announce("Preview failed: " + (e instanceof ApiError ? e.message : String(e)));
+      announce("Preview failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
     } finally {
       setBusy(false);
     }
@@ -408,7 +452,7 @@ function App() {
       announce(`Operation ${op.operation.id} finished: ` +
         op.operation.results.map((r) => `${r.profileId} ${r.status}`).join(", "));
     } catch (e) {
-      announce("Apply failed: " + (e instanceof ApiError ? e.message : String(e)));
+      announce("Apply failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
     } finally {
       setBusy(false);
     }
@@ -422,7 +466,7 @@ function App() {
       announce(`Preset saved: ${p.preset.name}`);
       await load();
     } catch (e) {
-      announce("Save preset failed: " + (e instanceof ApiError ? e.message : String(e)));
+      announce("Save preset failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
     } finally {
       setBusy(false);
     }
@@ -437,7 +481,7 @@ function App() {
       setUndoGuarded(false);
       announce("Undo finished: " + op.operation.results.map((r) => `${r.profileId} ${r.status}`).join(", "));
     } catch (e) {
-      announce("Undo failed: " + (e instanceof ApiError ? e.message : String(e)));
+      announce("Undo failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
     } finally {
       setBusy(false);
     }
@@ -454,7 +498,7 @@ function App() {
     return (
       <div style={{ padding: 12, color: THEME.fg }}>
         <div aria-live="polite" role="status" data-testid="live-status"
-          style={{ position: "absolute", left: -9999 }}>{status}</div>
+          style={{ position: "absolute", left: -9999 }}>{status.text}</div>
         <div role="alert" data-testid="load-error" style={{ color: THEME.danger, marginBottom: 8 }}>
           Load failed: {loadError}
         </div>
@@ -467,7 +511,7 @@ function App() {
   return (
     <div className="hms-root" style={{ color: THEME.fg, padding: 12, fontFamily: "inherit" }}>
       <div aria-live="polite" role="status" data-testid="live-status"
-        style={{ position: "absolute", left: -9999 }}>{status}</div>
+        style={{ position: "absolute", left: -9999 }}>{status.text}</div>
       <h2>Model Switcher</h2>
       <PresetsBar presets={state.presets} onReview={reviewPreset} busy={busy} />
 
@@ -485,32 +529,51 @@ function App() {
         </section>
       )}
 
+      {/* Action surface: the only click targets the user needs sit above the
+          fold, BEFORE the (potentially ~130-row) profile matrix, so the table
+          can never push the flow controls off-screen. */}
+      <div data-testid="action-surface">
+        {/* The aria-live region above is screen-reader only. Every action here
+            reports through it — so a refused apply (409 from the canonical
+            seam) or a failed preview used to be silent on screen: the button
+            just did nothing. Mirror the same message visibly, next to the
+            buttons that trigger it. */}
+        {status.text && (
+          <p data-testid="visible-status"
+            style={{
+              margin: "0 0 8px", fontSize: "0.9em",
+              color: status.kind === "error" ? THEME.danger : THEME.muted,
+            }}>
+            {status.text}
+          </p>
+        )}
+        <ChangeEditor
+          selection={selection} slots={slots}
+          onPreview={(changes) => runPreview(changes, "custom:" + selectionKey + ":" + JSON.stringify(changes))}
+          onApply={applyPreview}
+          preview={preview && previewFor.startsWith("custom:") ? preview : null}
+          previewInvalid={false}
+          busy={busy}
+        />
+        <PreviewPanel preview={preview} />
+
+        {previewFor.startsWith("custom:") && preview && (
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+            <input aria-label="Save as preset name" placeholder="Preset name" value={saveName}
+              onChange={(e) => setSaveName(e.target.value)} />
+            <button className="hms-save-preset" data-testid="save-preset"
+              disabled={!saveName.trim() || busy} onClick={saveAsPreset}>Save as preset</button>
+            <button className="hms-apply" data-testid="apply-from-drawer"
+              disabled={busy} onClick={applyPreview}>Apply reviewed changes</button>
+          </div>
+        )}
+      </div>
+
       <Matrix
         profiles={state.profiles} slots={slots} selection={selection} onToggle={toggle}
         expanded={expanded} onExpand={(k) => setExpanded({ ...expanded, [k]: !expanded[k] })}
         filters={filters} setFilters={setFilters}
       />
-
-      <ChangeEditor
-        selection={selection} slots={slots}
-        onPreview={(changes) => runPreview(changes, "custom:" + selectionKey + ":" + JSON.stringify(changes))}
-        onApply={applyPreview}
-        preview={preview && previewFor.startsWith("custom:") ? preview : null}
-        previewInvalid={false}
-        busy={busy}
-      />
-      <PreviewPanel preview={preview} />
-
-      {previewFor.startsWith("custom:") && preview && (
-        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
-          <input aria-label="Save as preset name" placeholder="Preset name" value={saveName}
-            onChange={(e) => setSaveName(e.target.value)} />
-          <button className="hms-save-preset" data-testid="save-preset"
-            disabled={!saveName.trim() || busy} onClick={saveAsPreset}>Save as preset</button>
-          <button className="hms-apply" data-testid="apply-from-drawer"
-            disabled={busy} onClick={applyPreview}>Apply reviewed changes</button>
-        </div>
-      )}
 
       <OperationDrawer operation={operation} onUndo={undo} undoGuarded={undoGuarded}
         setUndoGuarded={setUndoGuarded} busy={busy} />

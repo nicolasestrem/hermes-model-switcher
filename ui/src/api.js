@@ -15,12 +15,31 @@ export class ApiError extends Error {
 
 const BASE = "/api/plugins/hermes-model-switcher";
 
+// Transport. The Dashboard SDK's ``authedFetch`` attaches the shell's auth
+// (loopback session-token header, or the gated-mode session cookie) and the
+// shell's base path / profile scope. A bare ``fetch`` carries none of that: in
+// a session-token dashboard (loopback ``hermes dashboard``, the desktop app)
+// every call 401s while the tab itself renders fine — the tab then looks
+// inert. plugins/sdk.d.ts states plugins MUST route through the SDK; the bare
+// fetch stays only as the fixture/standalone fallback.
+function transport() {
+  const sdk = globalThis.__HERMES_PLUGIN_SDK__;
+  if (sdk && typeof sdk.authedFetch === "function") {
+    return (url, init) => sdk.authedFetch(url, init);
+  }
+  return (url, init) => fetch(url, init);
+}
+
 async function request(path, opts = {}) {
+  // Merge headers instead of letting a caller's `opts.headers` silently drop
+  // Content-Type: `{headers: X, ...opts}` would replace the whole object, and
+  // SDK transports add their own auth headers on top.
+  const { headers, ...rest } = opts;
   let res;
   try {
-    res = await fetch(BASE + path, {
-      headers: { "Content-Type": "application/json" },
-      ...opts,
+    res = await transport()(BASE + path, {
+      ...rest,
+      headers: { "Content-Type": "application/json", ...(headers || {}) },
     });
   } catch (e) {
     throw new ApiError("Network failure: " + (e && e.message ? e.message : String(e)));
@@ -33,18 +52,43 @@ async function request(path, opts = {}) {
     body = null;
   }
   if (!res.ok) {
-    throw new ApiError(
-      (body && body.error) || "HTTP " + res.status,
-      { status: res.status, body },
-    );
+    throw new ApiError(errorMessage(body, res.status), { status: res.status, body });
   }
   if (!body || body.ok !== true) {
     // ok:false (or missing ok) is a failure, not empty data.
-    throw new ApiError(
-      (body && body.error) || "Response carried ok:false", { status: res.status, body },
-    );
+    throw new ApiError(errorMessage(body, res.status), { status: res.status, body });
   }
   return body;
+}
+
+// The host mounts these routes on FastAPI, which wraps an HTTPException's payload
+// under ``detail`` — and that payload is where the engine puts the ACTIONABLE
+// sentence, e.g. "apply blocked: the canonical route was rejected" plus the reason
+// ("Nous Portal is not connected: no API key or login was found…"). Reporting only
+// the status leaves the user with "HTTP 409" and nothing to fix.
+// Exported for unit tests: the unwrapping rules are the difference between an
+// actionable sentence and a bare "HTTP 409".
+export function errorMessage(body, status) {
+  const detail = body && typeof body.detail === "object" && body.detail !== null ? body.detail : null;
+  const message = asText(detail && detail.error) || asText(body && body.error) || null;
+  // `reasons` may arrive as a slug list (array) or, unexpectedly, a plain
+  // string — `.join` on a string would throw inside the error path itself.
+  const raw = asPresent(detail && detail.reasons) || asPresent(body && body.reasons);
+  const reasons = (Array.isArray(raw) ? raw : raw ? [raw] : []).map(asText).filter(Boolean);
+  if (!message) return "HTTP " + status;
+  return reasons.length ? `${message} — ${reasons.join("; ")}` : message;
+}
+
+// Only scalars are displayable. Ternaries alone are not enough: an object lands
+// in the middle of a template string and the user reads "[object Object]".
+function asText(v) {
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  return null;
+}
+
+function asPresent(v) {
+  return v === undefined || v === null || v === "" ? null : v;
 }
 
 export const api = {
