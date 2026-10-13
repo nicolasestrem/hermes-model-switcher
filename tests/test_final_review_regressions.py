@@ -223,6 +223,50 @@ def test_chain_entries_are_shape_validated():
     assert ok.clean, ok.rejected
 
 
+def test_direct_apply_preparation_race_is_refused(hermes_home, monkeypatch):
+    """Direct (no-preview) applies are revision-pinned too: an external write
+    during preparation blocks instead of being written onto."""
+    cfg = _profile(hermes_home, "default")
+    tc = _client()
+    real = api._changes_to_targets
+
+    def raced(changes, profiles, strict=True):
+        targets, blocked = real(changes, profiles, strict=strict)
+        with open(cfg, "a") as fh:
+            fh.write("\nexternal:\n  marker: true\n")
+        return targets, blocked
+
+    monkeypatch.setattr(api, "_changes_to_targets", raced)
+    r = tc.post("/operations", json={"changes": [
+        {"profileId": "default", "slotId": "auxiliary.compression",
+         "action": "set", "to": {"provider": "lablocal", "model": "lab-7b-instruct"}}]})
+    assert r.status_code == 409, r.text
+    assert "changed while it was prepared" in r.json()["detail"]["error"]
+
+
+def test_undo_restore_detects_interleaved_writer(hermes_home, monkeypatch):
+    """A writer landing between the restore and its verification turns undo
+    into a conflict (recovery_required), never a blind success."""
+    home = hermes_home.path
+    (home / "config.yaml").write_text("model:\n  provider: openai\n  default: m1\n")
+    import hermes_adapter as ha
+    from model_switcher.adapters import adapter_for, StoreConflict
+
+    adapter = adapter_for("canonical_config", str(home / "config.yaml"), "default")
+    snapshot = adapter.read()
+    real_save = ha.HermesAdapter.apply_canonical_save
+
+    def racing(self, profile, data, **kwargs):
+        result = real_save(self, profile, data, **kwargs)
+        with open(home / "config.yaml", "a") as fh:
+            fh.write("interloper:\n  marker: true\n")
+        return result
+
+    monkeypatch.setattr(ha.HermesAdapter, "apply_canonical_save", racing)
+    with pytest.raises(StoreConflict, match="changed during restore"):
+        adapter.compensate(snapshot, adapter.revision())
+
+
 def test_speech_observation_uses_selected_runtime_backend():
     cfg = {'stt': {'provider': 'groq', 'groq': {'model': 'whisper-large-v3'}}}
     obs = next(item for item in ri.build_inventory(cfg) if item.descriptor.slot_id == 'specialist.stt')

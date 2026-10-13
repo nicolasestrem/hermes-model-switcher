@@ -125,3 +125,16 @@ test('picker contract fixture: search and selection preserve provider-native IDs
     await expect(page.getByLabel('New model', { exact: true })).toHaveValue(id);
   }
 });
+
+test('real API: object-shaped diff values render as JSON, never [object Object]', async ({ page }) => {
+  await open(page);
+  await page.getByLabel('Select research delegation.fallback_chain', { exact: true }).check();
+  await page.getByLabel('Change type').selectOption('chain');
+  await page.getByLabel('Fallback chain entries', { exact: true }).fill('nous/hermes-4');
+  await page.getByLabel('I acknowledge unknown-cost routes').check();
+  await page.getByRole('button', { name: 'Preview changes', exact: true }).click();
+  const diff = page.getByTestId('preview-diff');
+  await expect(diff).toBeVisible();
+  await expect(diff).toContainText('{"provider":"nous","model":"hermes-4"}');
+  await expect(diff).not.toContainText('[object Object]');
+});

@@ -1309,6 +1309,33 @@ def _store_revision(watched: Optional[Tuple[str, str, str]]) -> Optional[str]:
         return None
 
 
+def _watch_stores(changes: List[Dict[str, Any]], known
+                  ) -> Dict[Tuple[str, str, str], Optional[str]]:
+    """Revision snapshot of every canonical store the changes touch, taken
+    BEFORE preparation, so the caller can pin and verify it afterwards."""
+    watched: Dict[Tuple[str, str, str], Optional[str]] = {}
+    for c in changes:
+        store = _watched_store(c, known)
+        if store is not None:
+            watched[store] = _store_revision(store)
+    return watched
+
+
+def _revision_drift(watched: Dict[Tuple[str, str, str], Optional[str]]
+                    ) -> Optional[str]:
+    """Profile whose watched store no longer matches its pre-preparation
+    revision, or None when every store still matches.
+
+    FAILS CLOSED: an unreadable/absent revision is treated as drift — an
+    unverifiable guard must not silently disable the race check.
+    """
+    for (profile, kind, path), before in watched.items():
+        now = _store_revision((profile, kind, path))
+        if before is None or now != before:
+            return profile
+    return None
+
+
 @router.post("/preview")
 def preview(body: Dict[str, Any]):
     try:
@@ -1327,8 +1354,7 @@ def preview(body: Dict[str, Any]):
                 # derived from that document, so a write landing between the
                 # read and the bind must abort the preview — never be adopted
                 # as the mutation's expected revision.
-                watched = _watched_store(c, known)
-                rev_before = _store_revision(watched)
+                watched = _watch_stores([c], known)
                 targets, blk = _changes_to_targets([c], profiles, strict=False)
                 if blk:
                     blocked.extend(blk)
@@ -1346,11 +1372,10 @@ def preview(body: Dict[str, Any]):
                                     "reason": "config unreadable"})
                     continue
                 diff, side_effects = _diff_for_targets(targets, cfg, c)
-                rev_after = _store_revision(watched)
-                if (watched is not None and rev_before is not None
-                        and rev_after != rev_before):
+                drift = _revision_drift(watched)
+                if drift is not None:
                     blocked.append({
-                        "profileId": c.get("profileId"),
+                        "profileId": drift,
                         "slotId": c.get("slotId"),
                         "kind": "raced",
                         "reason": ("config changed while the preview was "
@@ -1360,10 +1385,11 @@ def preview(body: Dict[str, Any]):
                     entry = {"profile": t.profile,
                              "store_kind": t.store_kind,
                              "path": t.path, "changes": t.changes}
-                    if watched is not None and rev_after is not None:
+                    key = (t.profile, t.store_kind, t.path)
+                    if watched.get(key) is not None:
                         # Pin the revision the mutation was prepared FROM, not
                         # whatever the store holds at bind time.
-                        entry["expected_revision"] = rev_after
+                        entry["expected_revision"] = watched[key]
                     prepared.append(entry)
                 out_changes.append({**_sanitize_change(c),
                                     "sideEffects": side_effects,
@@ -1644,6 +1670,7 @@ def _preset_target_dicts(preset: ReviewedPreset,
     known = discover_profiles()
     ui = getattr(preset, "ui_changes", None)
     if isinstance(ui, list) and ui:
+        watched = _watch_stores(ui, known)
         derived, blocked = _changes_to_targets(copy.deepcopy(ui), profiles,
                                                strict=False)
         if blocked:
@@ -1652,6 +1679,14 @@ def _preset_target_dicts(preset: ReviewedPreset,
                 "error": "apply blocked: the preset no longer applies cleanly",
                 "reasons": [str(b.get("reason") or "blocked change")
                             for b in blocked]})
+        drift = _revision_drift(watched)
+        if drift is not None:
+            raise HTTPException(status_code=409, detail={
+                "ok": False, "blocked": True, "stale": True,
+                "error": ("apply blocked: the configuration changed while the "
+                          "preset was prepared; retry the apply"),
+                "reasons": [f"store for profile {drift!r} changed during "
+                            "preparation"]})
         out: List[Dict[str, Any]] = []
         for t in derived:
             ident = known.get(t.profile)
@@ -1660,6 +1695,9 @@ def _preset_target_dicts(preset: ReviewedPreset,
                       "path": str(path), "changes": copy.deepcopy(t.changes)}
             if ident is not None:
                 target["identity"] = _identity_dict(ident)
+            key = (t.profile, t.store_kind, str(path))
+            if watched.get(key) is not None:
+                target["expected_revision"] = watched[key]
             out.append(target)
         return out
     out = []
@@ -1828,6 +1866,8 @@ def _resolve_apply(body: ApplyIn, profiles: Dict[str, Dict[str, Any]]
         if not body.changes:
             raise HTTPException(status_code=422, detail={
                 "ok": False, "error": "no changes to apply"})
+        known = discover_profiles()
+        watched = _watch_stores(body.changes, known)
         targets, blocked = _changes_to_targets(body.changes, profiles,
                                                strict=False)
         if blocked:
@@ -1846,6 +1886,22 @@ def _resolve_apply(body: ApplyIn, profiles: Dict[str, Dict[str, Any]]
                 "blocked": blocked})
         prepared = [{"profile": t.profile, "store_kind": t.store_kind,
                      "path": t.path, "changes": t.changes} for t in targets]
+        # Direct applies are revision-pinned exactly like previews: the
+        # prepared mutation (canonical cleanup deletions included) is derived
+        # from these documents, so a write landing between preparation and
+        # planning must block instead of being written onto.
+        drift = _revision_drift(watched)
+        if drift is not None:
+            raise HTTPException(status_code=409, detail={
+                "ok": False, "blocked": True, "stale": True,
+                "error": ("apply blocked: the configuration changed while it "
+                          "was prepared; retry the apply"),
+                "reasons": [f"store for profile {drift!r} changed during "
+                            "preparation"]})
+        for t in prepared:
+            key = (t["profile"], t["store_kind"], t["path"])
+            if watched.get(key) is not None:
+                t["expected_revision"] = watched[key]
     if not prepared:
         raise HTTPException(status_code=422, detail={
             "ok": False, "error": "no valid write targets"})

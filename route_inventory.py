@@ -388,9 +388,11 @@ def _judge_payload_is_typed(payload: Dict[str, Any]) -> bool:
 def _bad_chain_entry(chain: List[Any]) -> Optional[str]:
     """First invalid chain entry, described for the rejection message.
 
-    A valid entry is a non-empty ``provider/model`` string token or a route
-    object carrying non-empty string ``provider`` and ``model`` — the shapes
-    the runtime chain resolver consumes.
+    The ONLY valid entry is a route object carrying non-empty string
+    ``provider`` and ``model``: the runtime chain normalizer silently drops
+    every other shape (fallback-providers.md: "Each entry requires both
+    provider and model. Entries missing either field are ignored."), so
+    anything else would persist as a dead chain entry.
     """
     for index, entry in enumerate(chain, 1):
         if isinstance(entry, dict):
@@ -459,10 +461,10 @@ def preview_changes(cfg: Dict[str, Any], edits: List[RouteEdit]) -> ChangePrevie
                 continue
             if isinstance(chain, list):
                 # Every entry must be a shape the runtime chain resolver
-                # accepts: a bare ``provider/model`` token or a COMPLETE route
-                # object. Integers, lists, or dicts missing provider/model
-                # would otherwise persist verbatim and make the chain
-                # silently unusable.
+                # accepts: a COMPLETE route object with provider and model.
+                # Strings, integers, lists, or dicts missing either field
+                # would otherwise persist verbatim and be silently DROPPED by
+                # the runtime normalizer, leaving a dead chain entry.
                 bad = _bad_chain_entry(chain)
                 if bad is not None:
                     rejected.append(f"{edit.slot_id}: {bad}")

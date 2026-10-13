@@ -115,6 +115,16 @@ function routeText(slot) {
   return `${slot.provider || "auto"}/${slot.model || "auto"}`;
 }
 
+// Diff values are arbitrary storage values: scalars, lists (chains) and route
+// dicts. `String(value)` would print "[object Object]" for the object shapes,
+// hiding exactly the before/after the review must show.
+export function formatDiffValue(value) {
+  if (value === undefined) return "unset";
+  if (value === null) return "null";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
 // ---------- API-driven views ----------
 
 function PresetsBar({ presets, onReview, busy }) {
@@ -531,7 +541,7 @@ function PreviewPanel({ preview }) {
               <ul data-testid="preview-diff" style={{ margin: "2px 0 0", paddingLeft: 18, color: THEME.muted }}>
                 {c.diff.map((d, j) => (
                   <li key={j} data-diff-path={d.path}>
-                    <code>{d.path}</code>: {String(d.from)} → {String(d.to)}
+                    <code>{d.path}</code>: {formatDiffValue(d.from)} → {formatDiffValue(d.to)}
                   </li>
                 ))}
               </ul>

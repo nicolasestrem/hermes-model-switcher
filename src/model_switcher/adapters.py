@@ -187,7 +187,14 @@ class StoreAdapter:
             if self.exists():
                 os.remove(self.path)
         else:
-            self.write(snapshot)
+            written = self.write(snapshot)
+            # Content-verify the restore before reporting a post revision: a
+            # writer landing between our write and this check makes the undo
+            # unverifiable — surface a conflict (recovery_required), never a
+            # blind success whose revision belongs to someone else.
+            if written is None and self.read() != snapshot:
+                raise StoreConflict(
+                    f"{self.path}: store changed during restore; undo refused")
         return WriteOutcome(applied=True, pre_revision=pre,
                             post_revision=self.revision(), readback_ok=True)
 
@@ -394,9 +401,17 @@ class CanonicalConfigStoreAdapter(YamlFileStoreAdapter):
         # Restore THROUGH the canonical seam carrying the recorded post-write
         # revision, so the guard is re-checked under Hermes' config lock: an
         # intervening external edit is preserved, never clobbered.
-        self.write(snapshot, expected_revision=expected_revision)
+        written = self.write(snapshot, expected_revision=expected_revision)
+        # Report the revision OUR restore produced, never a blind re-read: a
+        # writer landing right after the save must surface as a conflict (the
+        # engine then records recovery_required) instead of being adopted as
+        # this operation's post-write state.
+        post = written if written is not None else self.revision()
+        if written is not None and self.revision() != written:
+            raise StoreConflict(
+                f"{self.path}: store changed during restore; undo refused")
         return WriteOutcome(applied=True, pre_revision=pre,
-                            post_revision=self.revision(), readback_ok=True)
+                            post_revision=post, readback_ok=True)
 
     def intended_write_matches(self, snapshot: Optional[Dict[str, Any]],
                                changes: Dict[str, Any],
