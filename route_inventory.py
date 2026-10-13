@@ -292,7 +292,7 @@ def preview_changes(cfg: Dict[str, Any], edits: List[RouteEdit]) -> ChangePrevie
         if not isinstance(edit.value, dict) or not _is_route_payload(edit.value):
             rejected.append(f"{edit.slot_id}: edit value must be a route payload with a 'model'")
             continue
-        if desc.protocol != PROTOCOL_CHAT and not _judge_payload_is_typed(edit.value):
+        if desc.protocol == PROTOCOL_TYPED_DECISION and not _judge_payload_is_typed(edit.value):
             rejected.append(
                 f"{edit.slot_id}: slot protocol {desc.protocol!r} rejects a plain chat route")
             continue
@@ -325,6 +325,12 @@ def preview_changes(cfg: Dict[str, Any], edits: List[RouteEdit]) -> ChangePrevie
 
         value = _route_payload_fields(payload)
         new_stored = _stored_value_for(desc, payload)
+        # Route-dict slots: merge into the existing stored dict so protected
+        # neighbors beside the route (threshold/enforcement/...) survive the
+        # swap — the edit is selected by address, not a full-object replace.
+        current = _get(cfg, desc.storage_path)
+        if isinstance(current, dict) and isinstance(new_stored, dict):
+            new_stored = {**copy.deepcopy(current), **new_stored}
         _set(after_cfg, desc.storage_path, new_stored)
         companion_writes: list = []
         for comp in desc.companion_paths:
@@ -374,4 +380,13 @@ def _stored_value_for(desc: SlotDescriptor, payload: Dict[str, Any]) -> Any:
         return str(route.get("model", ""))
     if desc.family is SlotFamily.CRON:
         return str(route.get("model", ""))
+    # Scalar model slots store the bare model id (config_defaults.py
+    # 1095-1222 shape): ``model.default`` and ``delegation.model`` are plain
+    # strings in the raw config, never nested route dicts.
+    if desc.storage_path in _SCALAR_ROUTE_SLOTS:
+        return str(route.get("model", ""))
     return route
+
+
+# Slots whose canonical stored value is the bare model-id string.
+_SCALAR_ROUTE_SLOTS = {"model.default", "delegation.model"}

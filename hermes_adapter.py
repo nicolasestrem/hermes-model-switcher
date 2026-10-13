@@ -47,6 +47,10 @@ class ProfileIdentityChanged(RuntimeError):
     """The profile directory identity changed after discovery/preview."""
 
 
+class StoreConflict(RuntimeError):
+    """The store's revision changed underneath us — refuse, never force."""
+
+
 @dataclass(frozen=True)
 class RuntimeInfo:
     importable: bool
@@ -208,10 +212,16 @@ class HermesAdapter:
 
     # -- writes ------------------------------------------------------
     def apply_canonical_save(self, profile: str, updated: Dict[str, Any],
-                             identity: Optional[ProfileIdentity] = None) -> Dict[str, Any]:
+                             identity: Optional[ProfileIdentity] = None,
+                             expected_revision: Optional[str] = None
+                             ) -> Dict[str, Any]:
         """Journalled-style single-profile canonical save inside Hermes' own
         profile scope + config lock, with an identity recheck against the
-        discovered profile set and a post-write readback of the exact target."""
+        discovered profile set and a post-write readback of the exact target.
+
+        expected_revision: when given, the revision fingerprint of the freshly
+        read config must still match, otherwise a StoreConflict is raised
+        BEFORE any write (refuse-stale, never overwrite an intervening edit)."""
         self._assert_writable()
         if not profile:
             raise ValueError("explicit profile required for writes")
@@ -221,6 +231,12 @@ class HermesAdapter:
         with self.scoped(profile):
             with self._write_lock, config_mod._CONFIG_LOCK:
                 fresh = config_mod.require_readable_config_before_write()
+                if expected_revision is not None and _rev(fresh) != expected_revision:
+                    raise StoreConflict(
+                        f"profile {profile!r}: config changed since the revision "
+                        f"was taken (current {(_rev(fresh))!r}, expected "
+                        f"{expected_revision!r}) — refusing the save; re-read "
+                        "and re-plan the edit")
                 config_mod.save_config(updated)
                 after = config_mod.require_readable_config_before_write()
                 return {"ok": True, "profile": profile,

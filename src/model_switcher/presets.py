@@ -85,14 +85,18 @@ class ReviewedPreset:
                 reasons.append(
                     f"profile {t.profile!r} is missing provider credentials "
                     f"for store {t.store_kind}")
-            # unknown cost is never free
+            # unknown cost is never free — unless the preset's billing policy
+            # explicitly acknowledges unknown-cost routes; when allowed it
+            # produces no reason and no cost-class-mismatch false positive.
             live = live_cost_classes.get(key, t.cost_class)
             if live == COST_UNKNOWN:
-                reasons.append(
-                    f"route {key} has unknown cost; unknown cost is never "
-                    "treated as free or approved")
+                if not self.billing_policy.allow_unknown:
+                    reasons.append(
+                        f"route {key} has unknown cost; unknown cost is never "
+                        "treated as free or approved")
+                continue  # allow_unknown: no reason, no class-change check
             # unapproved cost change blocks
-            elif live != t.cost_class:
+            if live != t.cost_class:
                 reasons.append(
                     f"route {key} cost changed after review: reviewed "
                     f"{t.cost_class!r}, now {live!r}; not approved")
