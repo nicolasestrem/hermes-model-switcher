@@ -12,14 +12,20 @@ outside the supported in-process Dashboard path.
 1. Requirements: a running Hermes installation (baseline tested:
    `590af66a58c2b3eb3c5edd1dcfefa09c625ae18a`, v0.21.7+18.g590af66) with the
    Web Dashboard enabled, Python 3.11+, Node.js 18+ (build only).
-2. Copy or clone this repository into your Hermes plugins directory, or point
-   the Dashboard's plugin discovery at it.
-3. Build the UI bundle (the Dashboard loads the prebuilt asset — Node is not
-   needed at runtime):
+2. Install it into your Hermes plugins directory — either copy/clone this
+   repository there, or copy the assembled package
+   (`python scripts/build_package.py` → `dist-package/hermes-model-switcher/`).
+   Either layout must leave `plugin.yaml` beside a root `__init__.py`: a
+   manifest with no `__init__.py`, `desktop/plugin.js` or `plugin.json` next to
+   it is rejected by `hermes plugins validate` and fails to load.
+3. The Dashboard loads the prebuilt bundle, so Node is a build-time dependency
+   only. `dashboard/dist/index.js` is committed for that reason — a clone or a
+   plain copy installs straight from the repo. Rebuild it after changing the
+   UI:
 
    ```
    npm install
-   npm run build      # produces ui/dist/plugin.js
+   npm run build      # produces dashboard/dist/index.js and ui/dist/plugin.js
    ```
 
 4. Enable `hermes-model-switcher` in the Dashboard plugin settings and reload.
@@ -116,10 +122,10 @@ to the running user's home — never a baked-in path).
 Verified locally (no CI/CD exists in this repo; the local privacy gate and
 this suite are the enforcement):
 
-- Full backend pytest suite (64 tests) incl. real dashboard-plugin discovery
+- Full backend pytest suite (96 tests) incl. real dashboard-plugin discovery
   and module load of the INSTALLED package in a throwaway Hermes home, and an
   install → uninstall round-trip that refuses the live home (fail-closed).
-- Playwright suite (7 tests) drives the real FastAPI backend (uvicorn) over a
+- Playwright suite (8 tests) drives the real FastAPI backend (uvicorn) over a
   throwaway lab home: real preview/apply with on-disk config verification and
   guarded undo restoring the exact original files; fake credentials only,
   real file saves, no inference calls; every plugin-api response is asserted
