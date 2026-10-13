@@ -5,12 +5,13 @@
 <title>Model Switcher — Dashboard SDK fixture</title>
 <style>
   body { background: #16181d; color: #e6e8ee; font-family: system-ui, sans-serif; margin: 0; }
-  button, input, select { font: inherit; color: inherit; }
-  button { background: #23262d; border: 1px solid #2c3038; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
-  input, select { background: #1b1e24; border: 1px solid #2c3038; border-radius: 4px; padding: 3px 6px; }
+  /* Host Tailwind preflight: fixtures must not supply missing plugin chrome. */
+  *, ::before, ::after { box-sizing: border-box; border: 0 solid; margin: 0; padding: 0; }
+  button, input, select, textarea { font: inherit; color: inherit; background: transparent; border-radius: 0; }
+
   td, th { padding: 4px; }
 </style>
+<link rel="stylesheet" href="dashboard/dist/style.css">
 <script>window.__mockApi = { failState: false, failReadback: false, failUndo: false, failSavePreset: false, failStateHttp: false };</script>
 <script src="tests/mock-api.js"></script>
 </head>

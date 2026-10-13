@@ -8,10 +8,13 @@ import { resolveOpaqueSurface } from "./theme.js";
 
 const t = (v, fb) => `var(--${v}, ${fb})`;
 
+// The Dashboard paints --midground text over --background. --foreground is
+// an overlay token and may be fully transparent; do not use it for text.
+// Legacy surface/text aliases remain supported for older hosts and fixtures.
 const THEME = {
   accent: t("accent-color", "#6f9bff"),
-  bg: t("surface-color", "#16181d"),
-  fg: t("text-color", "#e6e8ee"),
+  bg: "var(--background, var(--surface-color, #16181d))",
+  fg: "var(--midground, var(--text-color, #e6e8ee))",
   muted: t("text-muted-color", "#9aa1ad"),
   border: t("border-color", "#2c3038"),
   danger: t("danger-color", "#e5534b"),
@@ -262,7 +265,7 @@ function ChangeEditor({ selection, slots, onPreview, onApply, preview, previewIn
             <input type="checkbox" checked={ackUnknownCost} onChange={(e) => setAckUnknownCost(e.target.checked)} />
             I acknowledge unknown-cost routes are never treated as free
           </label>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <button className="hms-preview" disabled={!changes.length || busy}
               onClick={() => onPreview(changes)}>
               Preview changes
@@ -496,17 +499,22 @@ function App() {
 
   if (loadError) {
     return (
-      <div style={{ padding: 12, color: THEME.fg }}>
+      <div className="hms-root" style={{ padding: 12, color: THEME.fg }}>
         <div aria-live="polite" role="status" data-testid="live-status"
           style={{ position: "absolute", left: -9999 }}>{status.text}</div>
-        <div role="alert" data-testid="load-error" style={{ color: THEME.danger, marginBottom: 8 }}>
+        <div role="alert" data-testid="load-error"
+          style={{ color: THEME.danger, marginBottom: 8 }}>
           Load failed: {loadError}
         </div>
         <button onClick={load}>Retry</button>
       </div>
     );
   }
-  if (!state) return <div style={{ padding: 12, color: THEME.fg }} role="status">Loading model switcher…</div>;
+  if (!state) return (
+    <div className="hms-root" style={{ padding: 12, color: THEME.fg }} role="status">
+      Loading model switcher…
+    </div>
+  );
 
   return (
     <div className="hms-root" style={{ color: THEME.fg, padding: 12, fontFamily: "inherit" }}>
@@ -558,9 +566,11 @@ function App() {
         <PreviewPanel preview={preview} />
 
         {previewFor.startsWith("custom:") && preview && (
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
             <input aria-label="Save as preset name" placeholder="Preset name" value={saveName}
-              onChange={(e) => setSaveName(e.target.value)} />
+              onChange={(e) => setSaveName(e.target.value)}
+              style={{ minWidth: 0 }} />
+
             <button className="hms-save-preset" data-testid="save-preset"
               disabled={!saveName.trim() || busy} onClick={saveAsPreset}>Save as preset</button>
             <button className="hms-apply" data-testid="apply-from-drawer"
