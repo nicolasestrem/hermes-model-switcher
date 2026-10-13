@@ -111,15 +111,14 @@ function opaqueProbe(cssText) {
 export function resolveOpaqueSurface() {
   if (typeof document === "undefined" || !document.body) return FALLBACK_BG;
 
-  const surface = tokenValue("--surface-color")
-    ? opaqueProbe("background:var(--surface-color)")
-    : "";
-  if (surface) return surface; // opaque legacy token passthrough
-
-  // Fallback layer 1: the host's opaque background token.
-  if (tokenValue("--background")) {
-    const bg = opaqueProbe("background:var(--background, transparent)");
+  // Match all other surfaces: modern host token wins over stale legacy values.
+  const modern = tokenValue("--background");
+  if (modern) {
+    const bg = opaqueProbe("background:var(--background)");
     if (bg) return bg;
+  } else if (tokenValue("--surface-color")) {
+    const surface = opaqueProbe("background:var(--surface-color)");
+    if (surface) return surface;
   }
   // Fallback layer 2: the page's own background.
   const bodyBg = getComputedStyle(document.body).backgroundColor || "";

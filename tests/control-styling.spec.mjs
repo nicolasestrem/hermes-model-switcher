@@ -47,7 +47,11 @@ test("manifest stylesheet is built and every rule is plugin-scoped", () => {
   expect(manifest.css).toBe("dist/style.css");
   const css = fs.readFileSync(`dashboard/${manifest.css}`, "utf8");
   expect(css).toBe(fs.readFileSync("ui/src/styles.css", "utf8"));
-  expect(css).toContain(".hms-root");
+  const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  const selectors = [...withoutComments.matchAll(/([^{}]+)\{/g)]
+    .flatMap(match => match[1].trim().split(",").map(selector => selector.trim()));
+  expect(selectors.length).toBeGreaterThan(0);
+  for (const selector of selectors) expect(selector.startsWith(".hms-root")).toBe(true);
 });
 
 test("transparent host overlay never becomes invisible plugin text", async ({ page }) => {
@@ -60,6 +64,17 @@ test("transparent host overlay never becomes invisible plugin text", async ({ pa
   await expect(page.getByLabel("New provider")).toHaveCSS("color", "rgb(255, 230, 203)");
   await expect(page.getByLabel("New provider")).toHaveCSS("background-color", "rgb(4, 28, 28)");
   await expect(page.locator("thead th").first()).toHaveCSS("background-color", "rgb(4, 28, 28)");
+});
+
+test("modern theme overrides a stale opaque legacy surface", async ({ page }) => {
+  await page.route("**/fixture-sdk.html", async route => {
+    const response = await route.fetch();
+    const html = (await response.text()).replace("</head>", `<style>:root{--background:#fafafa;--midground:#151515;--surface-color:#16181d;--color-border:#777;--color-ring:#0055aa}</style></head>`);
+    await route.fulfill({ response, body: html });
+  });
+  await page.goto("/fixture-sdk.html");
+  await expect(page.locator("thead th").first()).toHaveCSS("background-color", "rgb(250, 250, 250)");
+  await expect(page.getByLabel("New provider")).toHaveCSS("border-top-color", "rgb(119, 119, 119)");
 });
 
 for (const token of ["oklch(60% 0.1 200 / 0.5)", "rgba(240,240,240,0.5)"]) {

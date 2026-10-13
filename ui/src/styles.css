@@ -14,9 +14,9 @@
  */
 
 .hms-root {
-  --hms-accent: var(--accent-color, #6f9bff);
+  --hms-accent: var(--color-ring, var(--accent-color, #6f9bff));
   --hms-surface: var(--background, var(--surface-color, #1b1e24));
-  --hms-border: var(--border-color, #3a3f48);
+  --hms-border: var(--color-border, var(--border-color, #3a3f48));
   --hms-radius: 6px;
 
   color: var(--midground, var(--text-color, #e6e8ee));
