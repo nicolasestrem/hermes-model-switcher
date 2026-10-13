@@ -275,6 +275,70 @@ test("the table caption stays screen-reader-only without a host CSS class", asyn
   expect(r.width).toBeLessThanOrEqual(1);
 });
 
+// The host token must be in the HTML, not injected by an init script: an init
+// script can run before <html> exists (setProperty then silently does nothing)
+// and the plugin resolves the colour while the entry module loads.
+async function serveWithSurfaceToken(page, token) {
+  await page.route("**/fixture.html", async (route) => {
+    const res = await route.fetch();
+    const html = (await res.text()).replace("</head>", `<style>:root{--surface-color:${token}}</style></head>`);
+    await route.fulfill({ response: res, body: html });
+  });
+}
+
+test("a PARTIALLY transparent surface token is rejected too, not just a fully transparent one", async ({ page }) => {
+  // Codex review: only "transparent"/"rgba(0,0,0,0)" were rejected, so a 50%
+  // token was accepted and rows stayed visible under the sticky header.
+  await serveWithSurfaceToken(page, "rgba(255, 0, 0, 0.5)");
+  await page.goto(URL);
+  await expect(page.getByRole("button", { name: /Fast lane/ })).toBeVisible();
+
+  // confirm the token really reached the page, so the assertion below is not vacuous
+  const resolvedToken = await page.evaluate(() => {
+    const probe = document.createElement("div");
+    probe.style.cssText = "position:absolute;visibility:hidden;background:var(--surface-color, #16181d)";
+    document.body.appendChild(probe);
+    const v = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return v;
+  });
+  expect(resolvedToken).toBe("rgba(255, 0, 0, 0.5)");
+
+  const bg = await page.locator('[data-testid="matrix-scroll"] thead th').first()
+    .evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(bg).toBe("rgb(22, 24, 29)"); // solid fallback, not a 50%-alpha red
+});
+
+test("a fully opaque host surface token is still honoured", async ({ page }) => {
+  await serveWithSurfaceToken(page, "#223040");
+  await page.goto(URL);
+  await expect(page.getByRole("button", { name: /Fast lane/ })).toBeVisible();
+  const bg = await page.locator('[data-testid="matrix-scroll"] thead th').first()
+    .evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(bg).toBe("rgb(34, 48, 64)"); // the host's colour, not our fallback
+});
+
+test("the sticky header follows a host theme change without a reload", async ({ page }) => {
+  // Codex review: the surface colour was a module-scope snapshot, so a live
+  // light/dark switch left the header on the old colour (mismatched contrast).
+  await open(page);
+  const th = page.locator('[data-testid="matrix-scroll"] thead th').first();
+  expect(await th.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe("rgb(22, 24, 29)");
+
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty("--surface-color", "#223040");
+  });
+  await expect.poll(() => th.evaluate((el) => getComputedStyle(el).backgroundColor))
+    .toBe("rgb(34, 48, 64)"); // the new host colour, applied live
+
+  // ...and back to the solid fallback when the host makes it translucent again
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty("--surface-color", "rgba(34, 48, 64, 0.25)");
+  });
+  await expect.poll(() => th.evaluate((el) => getComputedStyle(el).backgroundColor))
+    .toBe("rgb(22, 24, 29)");
+});
+
 test("the sticky matrix header stays opaque when the host surface token is transparent", async ({ page }) => {
   // `var(--surface-color, fallback)` only falls back when the variable is
   // UNDEFINED. A host theme defining it as a transparent value would leave the

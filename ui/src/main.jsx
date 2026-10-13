@@ -4,6 +4,7 @@
 import React, { useEffect, useMemo, useState } from "shims/react.js";
 import { createRoot } from "shims/react-dom-client.js";
 import { api, ApiError } from "./api.js";
+import { resolveOpaqueSurface } from "./theme.js";
 
 const t = (v, fb) => `var(--${v}, ${fb})`;
 
@@ -18,28 +19,26 @@ const THEME = {
   warn: t("warning-color", "#d29922"),
 };
 
-// The sticky matrix header must be OPAQUE or rows scroll visibly underneath it.
-// `var(--surface-color, #16181d)` does not guarantee that: a var() fallback only
-// applies when the variable is *undefined*, so a host theme that defines the
-// surface token as a transparent value would leave the header see-through. Resolve
-// the token once and keep a solid colour when the host's value is not opaque.
-const FALLBACK_BG = "#16181d";
-function resolveOpaqueSurface() {
-  if (typeof document === "undefined" || !document.body) return FALLBACK_BG;
-  const probe = document.createElement("div");
-  probe.style.cssText = `position:absolute;visibility:hidden;pointer-events:none;background:var(--surface-color, ${FALLBACK_BG})`;
-  document.body.appendChild(probe);
-  let resolved = "";
-  try {
-    resolved = getComputedStyle(probe).backgroundColor || "";
-  } finally {
-    probe.remove();
-  }
-  return resolved && resolved !== "transparent" && resolved !== "rgba(0, 0, 0, 0)"
-    ? resolved
-    : FALLBACK_BG;
+// Theme-reactive opaque colour for the sticky matrix header. Never a
+// module-scope snapshot: the host can switch theme (class/profile/light-dark)
+// without reloading the plugin, which would leave the header on the previous
+// surface colour while its text and borders follow the live variables.
+function useOpaqueSurface() {
+  const [bg, setBg] = useState(() => resolveOpaqueSurface());
+  useEffect(() => {
+    if (typeof MutationObserver === "undefined") return undefined;
+    const sync = () => setBg(resolveOpaqueSurface());
+    const obs = new MutationObserver(sync);
+    const opts = {
+      attributes: true,
+      attributeFilter: ["class", "style", "data-theme", "data-color-mode"],
+    };
+    obs.observe(document.documentElement, opts);
+    if (document.body) obs.observe(document.body, opts);
+    return () => obs.disconnect();
+  }, []);
+  return bg;
 }
-const STICKY_BG = resolveOpaqueSurface();
 
 const FAMILIES = [
   { id: "main", label: "Main" },
@@ -96,6 +95,9 @@ function PresetsBar({ presets, onReview, busy }) {
 }
 
 function Matrix({ profiles, slots, selection, onToggle, onExpand, expanded, filters, setFilters }) {
+  // Resolved per render-source and refreshed on host theme changes, never a
+  // module-scope snapshot (see useOpaqueSurface).
+  const stickyBg = useOpaqueSurface();
   const filtered = useMemo(() => {
     const profIds = new Set(filters.profileIds.length ? filters.profileIds : profiles.map((p) => p.id));
     return slots.filter((s) => {
@@ -146,7 +148,7 @@ function Matrix({ profiles, slots, selection, onToggle, onExpand, expanded, filt
             {["", "Profile", "Slot", "Family", "Configured route", "Last observed"].map((h) => (
               <th key={h} scope="col" style={{
                 textAlign: "left", borderBottom: `1px solid ${THEME.border}`, padding: 4,
-                position: "sticky", top: 0, background: STICKY_BG, zIndex: 1,
+                position: "sticky", top: 0, background: stickyBg, zIndex: 1,
               }}>{h}</th>
             ))}
           </tr>
