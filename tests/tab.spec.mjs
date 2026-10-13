@@ -31,6 +31,15 @@ test("select → preview → save → apply → readback → undo", async ({ pag
   await expect(page.getByTestId("result-research")).toContainText("Applied + read back");
   await expect(page.getByTestId("live-status")).toContainText("finished");
 
+  // the preset apply pairs the reviewed preset with exactly this preview
+  const opBodies = await page.evaluate(() =>
+    window.__mockApi.requests
+      .filter((r) => r.method === "POST" && r.path.endsWith("/operations"))
+      .map((r) => r.body));
+  expect(opBodies.length).toBe(1);
+  expect(opBodies[0].presetId).toBe("p-fast");
+  expect(typeof opBodies[0].previewId).toBe("string");
+
   // --- readback: applied statuses verified via readback.ok === true ---
   await expect(page.getByTestId("result-default").locator("[data-status='applied']")).toBeVisible();
 
@@ -44,7 +53,7 @@ test("select → preview → save → apply → readback → undo", async ({ pag
   await expect(page.getByTestId("live-status")).toContainText("Undo finished");
 });
 
-test("custom edit requires preview before apply; changing selection invalidates preview", async ({ page }) => {
+test("select → preview → editor Apply → guarded undo; changing selection invalidates preview", async ({ page }) => {
   await open(page);
   const apply = page.getByTestId("apply-custom");
   await expect(apply).toBeDisabled();
@@ -63,10 +72,76 @@ test("custom edit requires preview before apply; changing selection invalidates 
   await expect(page.getByTestId("preview-panel")).toContainText("2 changes");
   await expect(page.getByTestId("live-status")).toContainText("Preview ready");
 
+  // a preview alone is not enough: apply stays disabled until the
+  // unknown-cost acknowledgment is checked
+  await expect(apply).toBeDisabled();
+  await page.getByRole("checkbox", { name: /acknowledge unknown-cost/ }).check();
+  await expect(apply).toBeEnabled();
+
+  // the editor's primary Apply button runs the same apply action and shows
+  // operation feedback (regression: data-testid=apply-custom must not be inert)
+  await page.evaluate(() => { window.__mockApi.requests.length = 0; });
+  await apply.click();
+  await expect(page.getByTestId("operation-drawer")).toBeVisible();
+  await expect(page.getByTestId("result-default")).toContainText("Applied + read back");
+  await expect(page.getByTestId("result-research")).toContainText("Applied + read back");
+  await expect(page.getByTestId("live-status")).toContainText("finished");
+  const bodies = await page.evaluate(() =>
+    window.__mockApi.requests
+      .filter((r) => r.method === "POST" && r.path.endsWith("/operations"))
+      .map((r) => r.body));
+  expect(bodies.length).toBe(1);
+  expect(bodies[0].presetId).toBeUndefined(); // no preset was reviewed
+  expect(typeof bodies[0].previewId).toBe("string");
+
+  // --- guarded undo ---
+  const undo = page.getByTestId("undo-button");
+  await expect(undo).toBeDisabled();
+  await page.getByTestId("undo-guard").check();
+  await undo.click();
+  await expect(page.getByTestId("result-default")).toContainText("Restored (undo verified)");
+  await expect(page.getByTestId("result-research")).toContainText("Restored (undo verified)");
+  await expect(page.getByTestId("live-status")).toContainText("Undo finished");
+
   // changing selection invalidates the preview
   await page.getByLabel("Select default main").uncheck();
   await expect(page.getByTestId("preview-panel")).toHaveCount(0);
   await expect(apply).toBeDisabled();
+});
+
+test("applying a custom preview after reviewing a preset sends no stale presetId", async ({ page }) => {
+  await open(page);
+
+  // review the preset first; its apply legitimately carries presetId
+  await page.getByRole("button", { name: /Fast lane/ }).click();
+  await expect(page.getByTestId("preview-panel")).toBeVisible();
+  await page.getByTestId("apply-preset").click();
+  await expect(page.getByTestId("operation-drawer")).toBeVisible();
+  await expect(page.getByTestId("live-status")).toContainText("finished");
+
+  // now build a custom preview in the editor on top of that context
+  await page.getByLabel("Select default main").check();
+  await page.getByLabel("Select research main").check();
+  await page.getByLabel("New provider").fill("zhipu");
+  await page.getByLabel("New model").fill("glm-5.3-flash");
+  await page.getByRole("checkbox", { name: /acknowledge unknown-cost/ }).check();
+  await page.getByRole("button", { name: "Preview changes" }).click();
+  await expect(page.getByTestId("preview-panel")).toContainText("2 changes");
+  await expect(page.getByTestId("live-status")).toContainText("Preview ready");
+
+  // the working apply path for custom previews: "Apply reviewed changes"
+  await page.getByTestId("apply-from-drawer").click(); // must not carry the old presetId
+  await expect(page.locator('[data-testid="operation-drawer"] h3')).toContainText("op-2");
+  await expect(page.getByTestId("result-default")).toContainText("Applied + read back");
+
+  const bodies = await page.evaluate(() =>
+    window.__mockApi.requests
+      .filter((r) => r.method === "POST" && r.path.endsWith("/operations"))
+      .map((r) => r.body));
+  expect(bodies.length).toBe(2);
+  expect(bodies[0].presetId).toBe("p-fast"); // preset apply keeps its pairing
+  expect(bodies[1].previewId).not.toBe(bodies[0].previewId); // the custom preview, not the preset's
+  expect(bodies[1].presetId).toBeUndefined(); // custom apply: no stale presetId
 });
 
 test("exact-model removal only matches exact identity", async ({ page }) => {

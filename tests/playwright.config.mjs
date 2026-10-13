@@ -1,11 +1,12 @@
 export default {
   testDir: ".",
   timeout: 30000,
-  use: { baseURL: "http://localhost:8931" },
+  use: { baseURL: `http://localhost:${process.env.HMS_FXT_PORT || 8931}` },
   webServer: [
     {
       command: "node server.mjs",
-      url: "http://localhost:8931/fixture.html",
+      url: `http://localhost:${process.env.HMS_FXT_PORT || 8931}/fixture.html`,
+      env: { ...process.env },
       reuseExistingServer: true,
       timeout: 10000,
     },

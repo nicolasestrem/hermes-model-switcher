@@ -169,7 +169,7 @@ function RoutingDetail({ slot }) {
   );
 }
 
-function ChangeEditor({ selection, slots, onPreview, preview, previewInvalid, busy }) {
+function ChangeEditor({ selection, slots, onPreview, onApply, preview, previewInvalid, busy }) {
   const [targetProvider, setTargetProvider] = useState("");
   const [targetModel, setTargetModel] = useState("");
   const [removeExact, setRemoveExact] = useState("");
@@ -227,6 +227,7 @@ function ChangeEditor({ selection, slots, onPreview, preview, previewInvalid, bu
             </button>
             <button className="hms-apply" data-testid="apply-custom"
               disabled={!preview || previewInvalid || busy || !ackUnknownCost}
+              onClick={onApply}
               title={preview ? undefined : "Preview is required before apply"}>
               Apply
             </button>
@@ -363,6 +364,9 @@ function App() {
       const p = await api.preview(changes);
       setPreview(p.preview);
       setPreviewFor(fingerprint);
+      // a non-preset preview means the change-set no longer belongs to the
+      // reviewed preset — drop its context so apply never pairs them
+      if (!fingerprint.startsWith("preset:")) setReviewPreset(null);
       announce(`Preview ready: ${p.preview.changes.length} change(s)`);
     } catch (e) {
       setPreview(null);
@@ -395,7 +399,7 @@ function App() {
     if (!preview) return;
     setBusy(true);
     try {
-      const payload = reviewedPreset
+      const payload = reviewedPreset && previewFor.startsWith("preset:" + reviewedPreset.id + ":")
         ? { presetId: reviewedPreset.id, previewId: preview.id }
         : { previewId: preview.id };
       const op = await api.apply(payload);
@@ -490,6 +494,7 @@ function App() {
       <ChangeEditor
         selection={selection} slots={slots}
         onPreview={(changes) => runPreview(changes, "custom:" + selectionKey + ":" + JSON.stringify(changes))}
+        onApply={applyPreview}
         preview={preview && previewFor.startsWith("custom:") ? preview : null}
         previewInvalid={false}
         busy={busy}

@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 
 const ROOT = new URL("../", import.meta.url).pathname;
+const PORT = Number(process.env.HMS_FXT_PORT || 8931);
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css" };
 
 createServer(async (req, res) => {
@@ -17,4 +18,4 @@ createServer(async (req, res) => {
   } catch {
     res.writeHead(404); res.end("not found");
   }
-}).listen(8931, () => console.log("fixture server on http://localhost:8931"));
+}).listen(PORT, () => console.log(`fixture server on http://localhost:${PORT}`));

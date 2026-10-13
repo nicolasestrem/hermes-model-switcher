@@ -7,6 +7,8 @@
     { failState: false, failReadback: false, failUndo: false, failSavePreset: false, failStateHttp: false },
     JSON.parse(sessionStorage.getItem("hms-mock-flags") || "{}"),
   );
+  // Recorded API calls: [{ path, method, body }] — lets specs assert exact request bodies.
+  window.__mockApi.requests = [];
 
   const profiles = [
     { id: "default", name: "Default", writable: true },
@@ -122,6 +124,7 @@
       const method = (opts && opts.method) || "GET";
       let body = {};
       try { body = opts && opts.body ? JSON.parse(opts.body) : {}; } catch (e) {}
+      window.__mockApi.requests.push({ path: u.pathname, method, body });
       const res = await handle(u.pathname, method, body);
       return new Response(JSON.stringify(res.body), {
         status: res.status, headers: { "Content-Type": "application/json" },
