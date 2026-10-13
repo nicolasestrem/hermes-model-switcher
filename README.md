@@ -24,6 +24,15 @@ outside the supported in-process Dashboard path.
 
 4. Enable `hermes-model-switcher` in the Dashboard plugin settings and reload.
    The backend mounts under `/api/plugins/hermes-model-switcher/`.
+4b. Local (never-live) install of the assembled package into a LAB Hermes
+   home for isolated verification:
+
+   ```
+   npm run build && python scripts/build_package.py   # assemble dist-package/
+   bash scripts/install-local.sh /tmp/your-lab-home   # refuses the live home
+   bash scripts/uninstall-local.sh /tmp/your-lab-home
+   ```
+
 5. Python-side tests (no Hermes writes; the registry scans a Hermes checkout
    read-only):
 
@@ -32,7 +41,8 @@ outside the supported in-process Dashboard path.
    ```
 
 Environment: `HERMES_MODEL_SWITCHER_HERMES_REPO` overrides the Hermes checkout
-used for registry scans (default `/home/hermes/.hermes/hermes-agent`).
+used for registry scans (default `~/.hermes/hermes-agent`, resolved relative
+to the running user's home — never a baked-in path).
 
 ## Limitations
 
@@ -100,6 +110,35 @@ used for registry scans (default `/home/hermes/.hermes/hermes-agent`).
   `*.db`, `*.sqlite*`, `journals/`, `snapshots/`, `backups/`, `.env`,
   credentials dumps and session transcripts — but the hooks, not ignore
   rules, are the actual enforcement.
+
+## Verified scope & known gaps
+
+Verified locally (no CI/CD exists in this repo; the local privacy gate and
+this suite are the enforcement):
+
+- Full backend pytest suite (64 tests) incl. real dashboard-plugin discovery
+  and module load of the INSTALLED package in a throwaway Hermes home, and an
+  install → uninstall round-trip that refuses the live home (fail-closed).
+- Playwright suite (7 tests) drives the real FastAPI backend (uvicorn) over a
+  throwaway lab home: real preview/apply with on-disk config verification and
+  guarded undo restoring the exact original files; fake credentials only,
+  real file saves, no inference calls; every plugin-api response is asserted
+  free of keys, host paths, snapshots and payloads.
+
+Known gaps (not yet verified — do not assume them):
+
+- **No live Hermes runtime probe.** All evidence comes from lab homes; a real
+  `session_model_usage` probe (PLAN T7) has never been executed.
+- **No CI.** PLAN T8's "CI passes" criterion is satisfied locally only.
+- **Family coverage.** The reviewed registry covers main, delegation,
+  auxiliary, judge/reviewer, fallback, MoA, cron/automation, specialist
+  (STT/TTS/embedding) and two reviewed plugin selectors (jev-judge,
+  jev-skill-router) for the baseline Hermes checkout. Slots from OTHER
+  installed plugins (e.g. hermes-adaptive-effort's config-schema model
+  fields) are NOT reviewed and appear as coverage gaps by design — point
+  `HERMES_MODEL_SWITCHER_PLUGINS_DIR` at them to surface the gap.
+- **Hosted-isolation mode remains read-only**; coordinated-writer feasibility
+  is unproven.
 
 ## License
 

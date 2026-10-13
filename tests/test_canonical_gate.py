@@ -15,11 +15,12 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import pytest
 import yaml
 
-sys.path.insert(0, "/home/hermes/.hermes/profiles/brian/cache/scratch/repo-cleanup/verified/src")
+REPO = Path(__file__).resolve().parent.parent
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient

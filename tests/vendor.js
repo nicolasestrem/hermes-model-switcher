@@ -1,4 +1,4 @@
-var Vendor = (() => {
+(() => {
   var __create = Object.create;
   var __defProp = Object.defineProperty;
   var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -23554,11 +23554,43 @@ var Vendor = (() => {
     }
   });
 
-  // tests/vendor-entry.js
-  var import_react = __toESM(require_react(), 1);
-  var import_react_dom = __toESM(require_react_dom(), 1);
-  window.React = import_react.default;
-  window.ReactDOM = import_react_dom.default;
+  // node_modules/react-dom/client.js
+  var require_client = __commonJS({
+    "node_modules/react-dom/client.js"(exports) {
+      "use strict";
+      var m = require_react_dom();
+      if (false) {
+        exports.createRoot = m.createRoot;
+        exports.hydrateRoot = m.hydrateRoot;
+      } else {
+        i = m.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED;
+        exports.createRoot = function(c, o) {
+          i.usingClientEntryPoint = true;
+          try {
+            return m.createRoot(c, o);
+          } finally {
+            i.usingClientEntryPoint = false;
+          }
+        };
+        exports.hydrateRoot = function(c, h, o) {
+          i.usingClientEntryPoint = true;
+          try {
+            return m.hydrateRoot(c, h, o);
+          } finally {
+            i.usingClientEntryPoint = false;
+          }
+        };
+      }
+      var i;
+    }
+  });
+
+  // <stdin>
+  var React = __toESM(require_react());
+  var ReactDOM = __toESM(require_react_dom());
+  var ReactDOMClient = __toESM(require_client());
+  globalThis.React = React;
+  globalThis.ReactDOM = Object.assign({}, ReactDOM, ReactDOMClient);
 })();
 /*! Bundled license information:
 

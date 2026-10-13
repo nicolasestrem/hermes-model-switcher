@@ -24,7 +24,12 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO))  # hermes_adapter.py / route_inventory.py live at repo root
 
-HERMES_REPO = "/home/hermes/.hermes/hermes-agent"
+# Read-only reference checkout, resolved from the environment (never a tracked
+# host literal). Override with HERMES_MODEL_SWITCHER_HERMES_REPO; the default
+# is derived from the running user's home directory.
+HERMES_REPO = str(Path(
+    os.environ.get("HERMES_MODEL_SWITCHER_HERMES_REPO",
+                   Path.home() / ".hermes" / "hermes-agent")))
 if HERMES_REPO not in sys.path:
     sys.path.insert(0, HERMES_REPO)
 

@@ -261,7 +261,7 @@ def test_t7_api_end_to_end_state_preview_apply_undo(fleet):
     assert r.status_code == 200 and r.json()["ok"] is True, r.text
     pv = r.json()["preview"]
     assert pv["changes"], pv
-    paths = {c["path"] for c in pv["changes"][0]["changes"]}
+    paths = {d["path"] for c in pv["changes"] for d in c["diff"]}
     assert paths == {"model.provider", "model.default"}, paths
     preview_id = r.json()["previewId"]
 
