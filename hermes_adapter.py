@@ -158,7 +158,9 @@ def _assert_identity(name: str, expected: ProfileIdentity) -> None:
     current = discover_profiles().get(name)
     if current is None or current.fingerprint != expected.fingerprint:
         raise ProfileIdentityChanged(
-            f"profile {name!r} identity changed or vanished after preview")
+            f"profile {name!r} identity changed or vanished after review "
+            "(the profile directory was recreated, moved, or restored from a "
+            "backup); re-review the change before applying or undoing")
 
 
 class HermesAdapter:

@@ -254,10 +254,14 @@ def test_apply_rejects_preview_that_does_not_match_preset_scope(hermes_home):
     r = tc.post("/presets", json={"name": "fleet", "changes": preset_changes})
     pid = r.json()["preset"]["id"]
 
-    # preview a DIFFERENT scope (single profile, different model)
-    other = [{"profileId": "default", "slotId": "main", "action": "set",
-              "to": {"provider": "openai", "model": "gpt-4o"}}]
+    # preview a DIFFERENT scope (different profile + slot) that is itself clean,
+    # so the refusal under test is the SCOPE mismatch — not a blocked preview.
+    other = [{"profileId": "alpha", "slotId": "auxiliary.compression",
+              "action": "set",
+              "to": {"provider": "lablocal", "model": "lab-7b-instruct"}}]
     r = tc.post("/preview", json={"changes": other})
+    assert r.status_code == 200, r.text
+    assert not r.json()["preview"]["blocked"], r.text
     preview_id = r.json()["previewId"]
 
     r = tc.post("/operations", json={"presetId": pid, "previewId": preview_id})

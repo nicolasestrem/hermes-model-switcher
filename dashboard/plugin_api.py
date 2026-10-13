@@ -903,6 +903,10 @@ def _referenced_providers(stored: Dict[str, Any]) -> List[str]:
 
     Route/route-dict slots contribute their paired provider value
     (``model.provider`` / ``cron.model_provider`` / ``auxiliary.<x>.provider``);
+    a route-dict VALUE carries its provider INSIDE the slot object
+    (``{"auxiliary.compression": {"provider": "somecloud", "model": "x"}}``), so
+    it is inspected too — otherwise such routes would vacuously pass
+    credential checks and classify as metered;
     chain slots contribute EVERY entry's provider (a dict route's ``provider``
     or a bare ``provider/model`` string). A chain is never collapsed onto one
     provider — each hop is checked on its own.
@@ -920,6 +924,8 @@ def _referenced_providers(stored: Dict[str, Any]) -> List[str]:
         if dotted.endswith(".provider") or dotted.endswith("_provider"):
             if isinstance(value, str):
                 add(value)
+        elif isinstance(value, dict) and isinstance(value.get("provider"), str):
+            add(value.get("provider"))
         elif dotted in _CHAIN_STORAGE_PATHS or dotted.endswith(".chain"):
             if isinstance(value, list):
                 for entry in value:
@@ -1174,8 +1180,13 @@ def _step_revision(step: Dict[str, Any], *keys: str) -> Optional[str]:
 
 
 # -- endpoints --------------------------------------------------------------
+# Route handlers are deliberately PLAIN DEFS, not ``async def``: every handler
+# here performs blocking work (strict config reads, canonical saves inside
+# Hermes' lock, and — on refresh — live provider probes). A sync handler runs
+# in FastAPI's threadpool, so a slow provider or lock never blocks the
+# dashboard's event loop for every other request.
 @router.get("/state")
-async def state():
+def state():
     try:
         with _LOCK:
             profiles = _profile_inventory()
@@ -1228,7 +1239,7 @@ async def state():
 
 
 @router.get("/models")
-async def models(response: Response, provider: str = "",
+def models(response: Response, provider: str = "",
                  profileId: Optional[str] = None, refresh: bool = False):
     """Provider-aware model catalog — a thin, truthful passthrough.
 
@@ -1266,7 +1277,7 @@ async def models(response: Response, provider: str = "",
 
 
 @router.post("/preview")
-async def preview(body: Dict[str, Any]):
+def preview(body: Dict[str, Any]):
     try:
         profiles = _profile_inventory()
         changes = body.get("changes") or []
@@ -1303,7 +1314,7 @@ async def preview(body: Dict[str, Any]):
                                     "diff": diff})
         preview_id = "pv-" + uuid.uuid4().hex[:12]
         with _LOCK:
-            _PREVIEW_CACHE[preview_id] = _bind_preview(prepared, profiles)
+            _PREVIEW_CACHE[preview_id] = _bind_preview(prepared, profiles, blocked)
             _evict_previews()
         return {"ok": True, "previewId": preview_id,
                 "preview": {"id": preview_id, "changes": out_changes,
@@ -1357,7 +1368,8 @@ def _diff_for_targets(targets, cfg: Dict[str, Any],
 
 
 def _bind_preview(prepared: List[Dict[str, Any]],
-                  profiles: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+                  profiles: Dict[str, Dict[str, Any]],
+                  blocked: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Bind a prepared mutation to the store revision + profile identity it
     was prepared from, with an expiry."""
     now = time.time()
@@ -1387,7 +1399,12 @@ def _bind_preview(prepared: List[Dict[str, Any]],
                 bound["expected_revision"] = rev
         bound_targets.append(bound)
     return {"targets": bound_targets, "revisions": revisions,
-            "fingerprints": fingerprints, "created_at": now,
+            "fingerprints": fingerprints,
+            # A preview that contained blocked changes is remembered as such:
+            # applying only its valid subset would silently drop the blocked
+            # entries, so the apply path refuses it (all-or-nothing review).
+            "blocked": list(blocked or []),
+            "created_at": now,
             "expires_at": now + _PREVIEW_TTL_SECONDS}
 
 
@@ -1449,7 +1466,7 @@ def _verify_preview_fresh(entry: Dict[str, Any]) -> None:
 
 
 @router.post("/presets")
-async def save_preset(body: PresetIn):
+def save_preset(body: PresetIn):
     try:
         with _LOCK:
             profiles = _profile_inventory()
@@ -1594,6 +1611,32 @@ def _same_prepared_scope(a: List[Dict[str, Any]],
     return norm(a) == norm(b)
 
 
+def _ensure_prepared_credentials(prepared: List[Dict[str, Any]]) -> None:
+    """Provider-scoped credential gate for prepared write targets.
+
+    Every provider a target routes through (chain hops and route-dict values
+    included) must be explicable for that target's profile — never a blanket
+    "profile has some .env". Raises the 409 apply-block contract when any
+    profile cannot authenticate a referenced provider.
+    """
+    known = discover_profiles()
+    missing: List[str] = []
+    for t in prepared:
+        needed = _referenced_providers(t.get("changes") or {})
+        if not needed:
+            continue
+        profile = t.get("profile")
+        ident = known.get(profile)
+        if ident is None or not _profile_has_credentials(profile, ident, needed):
+            missing.append(str(profile))
+    if missing:
+        raise HTTPException(status_code=409, detail={
+            "ok": False, "blocked": True,
+            "error": "apply blocked: missing provider credentials",
+            "reasons": [f"profile {p!r} is missing provider credentials"
+                        for p in sorted(set(missing))]})
+
+
 def _resolve_apply(body: ApplyIn, profiles: Dict[str, Dict[str, Any]]
                    ) -> List[Dict[str, Any]]:
     """Resolve the EXACT prepared write targets for an apply.
@@ -1611,6 +1654,15 @@ def _resolve_apply(body: ApplyIn, profiles: Dict[str, Dict[str, Any]]
     if body.previewId:
         entry = _get_preview_entry(body.previewId)
         _verify_preview_fresh(entry)
+        if entry.get("blocked"):
+            # All-or-nothing review: the preview refused part of the requested
+            # change-set; replaying only its valid subset would silently drop
+            # the blocked entries, so the apply is refused with the reviewed
+            # reasons until the user fixes them and re-previews.
+            raise HTTPException(status_code=409, detail={
+                "ok": False, "blocked": True,
+                "error": "apply blocked: the preview contained blocked changes",
+                "reasons": [str(b.get("reason") or b) for b in entry["blocked"]]})
         prepared = copy.deepcopy(entry["targets"])
     if body.presetId:
         store = _preset_store()
@@ -1660,34 +1712,20 @@ def _resolve_apply(body: ApplyIn, profiles: Dict[str, Dict[str, Any]]
                 "blocked": blocked})
         prepared = [{"profile": t.profile, "store_kind": t.store_kind,
                      "path": t.path, "changes": t.changes} for t in targets]
-        # Direct (non-preset) sets write a route's provider into the config, so
-        # the target profile must actually hold credentials for EVERY provider
-        # the route references (chain hops included) — provider-scoped, never a
-        # blanket "profile has some .env". Removals/unset carry no provider and
-        # are not gated.
-        known = discover_profiles()
-        cred_missing: List[str] = []
-        for t in targets:
-            needed = _referenced_providers(t.changes)
-            if not needed:
-                continue
-            ident = known.get(t.profile)
-            if ident is None or not _profile_has_credentials(t.profile, ident, needed):
-                cred_missing.append(t.profile)
-        if cred_missing:
-            raise HTTPException(status_code=409, detail={
-                "ok": False, "blocked": True,
-                "error": "apply blocked: missing provider credentials",
-                "reasons": [f"profile {p!r} is missing provider credentials"
-                            for p in sorted(set(cred_missing))]})
     if not prepared:
         raise HTTPException(status_code=422, detail={
             "ok": False, "error": "no valid write targets"})
+    # Provider-scoped credential gate for EVERY resolution path. A cached
+    # preview can outlive the credential it was prepared under (or be replayed
+    # by a client that never held one), so preview-based applies are gated
+    # exactly like direct ones. Removals/unset carry no provider and are not
+    # gated.
+    _ensure_prepared_credentials(prepared)
     return prepared
 
 
 @router.post("/operations")
-async def apply(body: ApplyIn):
+def apply(body: ApplyIn):
     if not _runtime_writable():
         raise HTTPException(status_code=409, detail={
             "ok": False, "error": "runtime is read-only; writes refused",
@@ -1715,7 +1753,7 @@ async def apply(body: ApplyIn):
 
 
 @router.get("/operations/{op_id}")
-async def get_operation(op_id: str):
+def get_operation(op_id: str):
     try:
         journal = _journal()
         try:
@@ -1740,7 +1778,7 @@ async def get_operation(op_id: str):
 
 
 @router.post("/operations/{op_id}/recover")
-async def recover_operation(op_id: str):
+def recover_operation(op_id: str):
     """Explicit restart path: reconcile one operation's persisted intent
     against the actual files (committed/compensated/recovery_required)."""
     try:
@@ -1762,7 +1800,7 @@ async def recover_operation(op_id: str):
 
 
 @router.post("/operations/{op_id}/undo")
-async def undo(op_id: str):
+def undo(op_id: str):
     if not _runtime_writable():
         raise HTTPException(status_code=409, detail={
             "ok": False, "error": "runtime is read-only; writes refused"})
@@ -1784,7 +1822,7 @@ async def undo(op_id: str):
 
 
 @router.post("/probe")
-async def probe(body: ProbeIn):
+def probe(body: ProbeIn):
     """New-session probe — EXPLICIT AUTHORIZATION REQUIRED.
 
     A probe starts a NEW session against the selected provider/model and

@@ -115,10 +115,16 @@ def _model_ids(row: dict) -> List[str]:
 
 
 def _freshness(provider_slug: str, refresh: bool, now: datetime) -> tuple:
-    """Return ``(fetchedAt: datetime, stale: bool)`` from the model-id disk cache.
+    """Return ``(fetchedAt | None, stale: bool)`` from the model-id disk cache.
+
+    Freshness is evidence-based: WITHOUT a same-provider cache row there is no
+    fetch to report, so ``fetchedAt`` is None (never a fabricated "now" that
+    reads like a fresh fetch) and ``stale`` is True. ``refresh`` requests live
+    discovery upstream, but a failed probe can still return a curated/stale
+    fallback — so it never by itself makes the result proveably fresh.
 
     Best effort and read-only: a missing/unreadable cache degrades to
-    ``(now, stale=True)`` rather than failing the catalog.
+    ``(None, stale=True)`` rather than failing the catalog.
     """
     try:
         from hermes_cli.models import _load_provider_models_cache
@@ -143,7 +149,7 @@ def _freshness(provider_slug: str, refresh: bool, now: datetime) -> tuple:
                 return fetched, bool(entry.get("fallback")) or (now - fetched).total_seconds() > ttl
     except Exception:
         pass
-    return now, True
+    return None, True
 
 
 def get_model_catalog(
@@ -165,7 +171,7 @@ def get_model_catalog(
         "ok": False,
         "provider": requested,
         "models": [],
-        "fetchedAt": now.isoformat(),
+        "fetchedAt": None,
         "source": "unknown",
         "stale": True,
         "error": None,
@@ -201,7 +207,7 @@ def get_model_catalog(
             result["models"] = [{"id": m, "name": m} for m in ids]
             source = row.get("source")
             result["source"] = str(source) if source else "unknown"
-            result["fetchedAt"] = fetched_at.isoformat()
+            result["fetchedAt"] = fetched_at.isoformat() if fetched_at else None
             result["stale"] = bool(stale)
             result["ok"] = True
             if ids:

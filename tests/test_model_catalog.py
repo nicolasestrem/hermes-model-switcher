@@ -92,7 +92,7 @@ def _parse(iso: str) -> datetime:
 # -- shape / happy path ----------------------------------------------------
 
 
-def test_result_has_required_keys_and_types(use_payload):
+def test_result_has_required_keys_and_types(hermes_home, use_payload):
     setter, _ = use_payload
     setter(make_payload(make_row(
         "nous", "Nous", models=["deepseek/deepseek-v4.1-flash", "nous/hermes-4-405b"])))
@@ -107,7 +107,9 @@ def test_result_has_required_keys_and_types(use_payload):
     assert isinstance(res["stale"], bool)
     assert isinstance(res["source"], str) and res["source"]
     assert res["error"] is None
-    _parse(res["fetchedAt"])  # ISO-8601 parseable
+    # No fetch evidence exists in this throwaway home: the catalog must say so
+    # (None), never fabricate a "now" that reads like a fresh fetch.
+    assert res["fetchedAt"] is None
 
 
 def test_exact_native_ids_preserved_no_prefix_rewrite(use_payload):
@@ -247,11 +249,9 @@ def test_refresh_forwarded_to_builder(use_payload):
 def test_refresh_without_cache_evidence_is_unproven(hermes_home, use_payload):
     setter, _ = use_payload
     setter(make_payload(make_row("nous", models=["m1"])))
-    before = datetime.now(timezone.utc)
     res = get_model_catalog(FakeAdapter(), None, "nous", refresh=True)
-    after = datetime.now(timezone.utc)
     assert res["stale"] is True
-    assert before <= _parse(res["fetchedAt"]) <= after
+    assert res["fetchedAt"] is None
 
 
 def test_no_cache_entry_uncached_read_is_stale(hermes_home, use_payload):
@@ -295,3 +295,21 @@ def test_refresh_fallback_preserves_old_cache_timestamp(hermes_home, use_payload
     res = get_model_catalog(FakeAdapter(), None, "nous", refresh=True)
     assert res["stale"] is True
     assert abs(_parse(res["fetchedAt"]).timestamp() - old) < 5
+
+
+def test_runtime_cache_seam_matches_supported_baseline():
+    """Pin the private Hermes seam this module reads.
+
+    ``_load_provider_models_cache`` / ``_PROVIDER_MODELS_CACHE_TTL`` are
+    underscore-private today; a rename in a Hermes upgrade must fail loudly
+    HERE instead of silently degrading freshness reporting to "unproven".
+    """
+    from hermes_cli.models import (  # noqa: PLC0415
+        _load_provider_models_cache,
+        _PROVIDER_MODELS_CACHE_TTL,
+    )
+
+    assert callable(_load_provider_models_cache)
+    assert isinstance(_PROVIDER_MODELS_CACHE_TTL, (int, float))
+    assert _PROVIDER_MODELS_CACHE_TTL > 0
+    assert isinstance(_load_provider_models_cache() or {}, dict)

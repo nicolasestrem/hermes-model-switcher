@@ -1,10 +1,106 @@
 """Final independent-review regressions, isolated data only."""
+import inspect
 import json
 import pytest
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
 from dashboard import plugin_api as api
 from model_switcher.presets import ReviewedPreset, RouteTarget, BillingPolicy
 from hermes_adapter import discover_profiles
 import route_inventory as ri
+
+ROUTE_CONFIG = "model:\n  provider: openai\n  default: gpt-4o-mini\nproviders:\n  lablocal:\n    base_url: http://127.0.0.1:8080/v1\n"
+
+
+def _client():
+    app = FastAPI()
+    app.include_router(api.router, prefix="")
+    return TestClient(app)
+
+
+def _profile(cp, name, config=ROUTE_CONFIG, env=False):
+    home = cp.path
+    pdir = home if name == "default" else home / "profiles" / name
+    pdir.mkdir(parents=True, exist_ok=True)
+    (pdir / "config.yaml").write_text(config)
+    if env:
+        (pdir / ".env").write_text("FAKE_LAB_PROVIDER_KEY=lab-only\n")
+    return pdir / "config.yaml"
+
+
+def test_referenced_providers_reads_route_dict_values():
+    """Route-dict slot values carry their provider INSIDE the slot object."""
+    assert api._referenced_providers(
+        {"auxiliary.compression": {"provider": "somecloud", "model": "x"}}) == ["somecloud"]
+    # Provider-suffixed paired paths and chain hops keep working.
+    assert api._referenced_providers(
+        {"cron.model": "m", "cron.model_provider": "dispatch"}) == ["dispatch"]
+    assert api._referenced_providers(
+        {"delegation.fallback_providers": [
+            {"provider": "nous", "model": "m1"}, "opencode-go/m2"]}) == ["nous", "opencode-go"]
+
+
+def test_preview_based_apply_runs_the_provider_credential_gate(hermes_home):
+    """A cached preview is gated exactly like a direct apply: no credential,
+    no write — never a preview that outlives its credential."""
+    home = hermes_home.path
+    cfg = _profile(hermes_home, "default")
+    tc = _client()
+    change = {"profileId": "default", "slotId": "auxiliary.compression",
+              "action": "set", "to": {"provider": "somecloud", "model": "x"}}
+    r = tc.post("/preview", json={"changes": [change]})
+    assert r.status_code == 200, r.text
+    preview_id = r.json()["previewId"]
+    before = cfg.read_text()
+
+    for payload in ({"previewId": preview_id}, {"changes": [change]}):
+        r = tc.post("/operations", json=payload)
+        assert r.status_code == 409, (payload, r.text)
+        detail = r.json()["detail"]
+        assert detail["blocked"] is True
+        assert "missing provider credentials" in detail["error"]
+    assert cfg.read_text() == before
+
+
+def test_blocked_preview_cannot_be_partially_applied(hermes_home):
+    """All-or-nothing: a preview that contained blocked changes is refused on
+    apply — its valid subset is never written silently."""
+    home = hermes_home.path
+    cfg = _profile(hermes_home, "default")
+    tc = _client()
+    changes = [
+        {"profileId": "default", "slotId": "auxiliary.compression", "action": "set",
+         "to": {"provider": "lablocal", "model": "lab-7b-instruct"}},
+        {"profileId": "default", "slotId": "specialist.embedding", "action": "set",
+         "to": {"provider": "openai", "model": "text-embedding-3-small"}},
+    ]
+    r = tc.post("/preview", json={"changes": changes})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["preview"]["blocked"], body
+    assert body["preview"]["changes"], "the valid subset still previews"
+    before = cfg.read_text()
+
+    r = tc.post("/operations", json={"previewId": body["previewId"]})
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert detail["blocked"] is True
+    assert "contained blocked changes" in detail["error"]
+    assert any("read-only" in reason for reason in detail["reasons"]), detail
+    assert cfg.read_text() == before
+
+
+def test_route_handlers_are_sync_so_blocking_work_leaves_the_event_loop():
+    """Every route handler does blocking work (config I/O, canonical saves,
+    live provider probes). They must be plain defs — FastAPI then runs them in
+    its threadpool instead of stalling the dashboard event loop."""
+    for route in api.router.routes:
+        endpoint = getattr(route, "endpoint", None)
+        if endpoint is not None:
+            assert not inspect.iscoroutinefunction(endpoint), \
+                f"{getattr(route, 'path', '?')} handler is async"
 
 
 def test_speech_observation_uses_selected_runtime_backend():

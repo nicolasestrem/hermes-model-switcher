@@ -444,7 +444,7 @@ function ChangeEditor({
             <div data-testid="model-picker" style={{ marginTop: 6 }}>
               <div data-testid="picker-freshness" style={{ color: THEME.muted, fontSize: "0.85em" }}>
                 provider <code>{picker.data.provider}</code> · source {picker.data.source || "unknown"} ·
-                {" "}fetched {picker.data.fetchedAt || "?"}
+                {" "}fetched {picker.data.fetchedAt || "unverified"}
                 {picker.data.stale ? <> · <strong style={{ color: THEME.warn }}>stale</strong></> : null}
               </div>
               {picker.data.error && (

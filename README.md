@@ -96,6 +96,10 @@ to the running user's home — never a baked-in path).
    Editing the route, selection or filters invalidates the review; a late preview
    response cannot revive it. The server also binds reviews to profile identities
    and store revisions, with explicit expiration/stale errors.
+   A preview that contained blocked changes is **all-or-nothing**: it cannot be
+   applied partially — fix the blocked entries and re-preview. Apply (direct or
+   from a cached preview) re-checks every referenced provider's credentials for
+   the target profile before any write.
 3. Click **Apply** to apply the reviewed change, or enter a preset name and click
    **Save as preset** for reuse. Favorite presets appear above the editor; an empty
    list shows guidance rather than an unexplained blank section.
@@ -141,6 +145,11 @@ problem: the tab must use the host SDK transport even if the bundle renders.
 - **Configured ≠ observed.** The plugin reports what was persisted and read
   back. Existing chat sessions keep their old route until they start anew;
   live switching of in-flight sessions is out of scope.
+- **Identity-guarded writes.** Apply and Undo refuse when a target profile
+  directory was recreated, moved, or restored from a backup after the review:
+  its directory identity changed, so the reviewed write is no longer provably
+  the same target. The refusal names the profile; re-review the change. This is
+  deliberate fail-closed behaviour, not a cached-state error.
 - **Unknown slots block completeness.** Selectors not in the versioned
   registry appear as visible coverage gaps and never gain write access
   automatically. Plugin authors may register typed descriptors.
