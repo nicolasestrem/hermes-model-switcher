@@ -1,0 +1,8 @@
+name: hermes-model-switcher
+display_name: Model Switcher
+version: 0.1.0
+description: Reviewed provider/model preset application across profiles. In-process Dashboard writes only; hosted-isolation mode is read-only.
+entrypoint: ui/dist/plugin.js
+backend: api/router.py
+api_prefix: /api/plugins/hermes-model-switcher
+permissions: [profiles.read, models.read, models.write, operations.journal]
