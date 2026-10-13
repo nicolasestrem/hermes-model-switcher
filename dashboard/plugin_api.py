@@ -32,11 +32,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Import bootstrap so the packaged layout (<plugin>/python/…) and the repo
-# checkout both resolve. In the packaged plugin, plugin_api.py lives at
-# <plugin>/dashboard/plugin_api.py and the Python modules under <plugin>/python/.
+# Import bootstrap for BOTH supported install layouts, because the modules the
+# backend imports live in different places in each:
+#   packaged: <plugin>/python/model_switcher  + <plugin>/{hermes_adapter,route_inventory}.py
+#   checkout: <plugin>/src/model_switcher    + the same root modules
+# A checkout is a src/ layout (pyproject packages.find where=["src"]), so
+# omitting src/ left every API-backed action dead with
+# ModuleNotFoundError: No module named 'model_switcher'.
 _PKG_ROOT = Path(__file__).resolve().parent.parent
-for _p in (_PKG_ROOT / "python", _PKG_ROOT):
+for _p in (_PKG_ROOT / "python", _PKG_ROOT / "src", _PKG_ROOT):
     if _p.is_dir() and str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 

@@ -104,6 +104,46 @@ def test_installed_backend_module_serves_state(installed_plugin, monkeypatch):
     assert '"providers"' not in blob and '"base_url"' not in blob  # sanitized DTO
 
 
+def test_checkout_layout_loads_the_backend(tmp_path, monkeypatch):
+    """The documented clone/plain-copy install must load its backend too.
+
+    A checkout is a src/ layout — ``model_switcher`` lives under ``src/``, and
+    the backend resolves its own modules through its import bootstrap. Copy out
+    exactly what ``git clone`` produces (``git ls-files``: no ``python/``, no
+    ``node_modules``) and import the backend the way the Dashboard does. This
+    gap survived the suite because conftest.py puts ``src/`` on sys.path itself,
+    masking a bootstrap that only handled the packaged layout.
+    """
+    checkout = tmp_path / "checkout"
+    listing = subprocess.run(["git", "ls-files", "-z"], cwd=REPO,
+                             capture_output=True, text=True, check=True).stdout
+    for rel in (p for p in listing.split("\0") if p):
+        dst = checkout / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO / rel, dst)
+    assert not (checkout / "python").exists(), "a checkout is not the package"
+    assert (checkout / "src" / "model_switcher").is_dir()
+    assert (checkout / "dashboard" / "dist" / "index.js").is_file()
+
+    # Import in isolation: the bootstrap has to work on its own, not because a
+    # previous test (or conftest) already put src/ and the repo root on sys.path.
+    monkeypatch.setattr(sys, "path", [p for p in sys.path
+                                      if p not in (str(REPO / "src"), str(REPO))])
+    for name in [n for n in sys.modules
+                 if n.split(".")[0] in ("model_switcher", "hermes_adapter",
+                                        "route_inventory")]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "lab-home"))
+
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "checkout_plugin_api", checkout / "dashboard" / "plugin_api.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert getattr(mod, "router", None) is not None
+    assert mod.__file__.startswith(str(checkout))
+
+
 def test_install_uninstall_roundtrip(hermes_home, package):
     home = hermes_home.path
     subprocess.run(["bash", str(REPO / "scripts" / "install-local.sh"),
