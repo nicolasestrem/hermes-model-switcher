@@ -141,7 +141,7 @@ def test_public_dto_exposes_only_allowlisted_fields(client):
     op = r.json()["operation"]
     assert set(op) <= {"id", "state", "results", "undoable"}
     for res in op["results"]:
-        assert set(res) == {"profileId", "status", "store"}
+        assert set(res) == {"profileId", "status", "store", "revisionBefore", "revisionAfter"}
     blob = json.dumps(r.json())
     for forbidden in ("snapshot", "providers", "path", "changes",
                       "base_url", "api_key", "OPENAI_API_KEY",

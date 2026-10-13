@@ -127,6 +127,10 @@ class OperationJournal:
             );
             """
         )
+        # Additive migration; existing private recovery snapshots stay intact.
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(steps)")}
+        if "identity" not in columns:
+            self._conn.execute("ALTER TABLE steps ADD COLUMN identity TEXT")
 
     def begin(self, payload: Dict[str, Any],
               op_id: Optional[str] = None) -> Dict[str, Any]:
@@ -148,14 +152,14 @@ class OperationJournal:
     def add_step(self, op_id: str, seq: int, profile: str, store_kind: str,
                  path: str, changes: Dict[str, Any],
                  snapshot: Optional[Dict[str, Any]],
-                 pre_revision: str) -> None:
+                 pre_revision: str, identity: Optional[Dict[str, str]] = None) -> None:
         self._conn.execute(
             "INSERT INTO steps (op_id, seq, profile, store_kind, path, state,"
-            " changes, snapshot, pre_revision) VALUES (?,?,?,?,?,?,?,?,?)",
+            " changes, snapshot, pre_revision, identity) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (op_id, seq, profile, store_kind, path, STEP_PENDING,
              json.dumps(changes, sort_keys=True),
              json.dumps(snapshot, sort_keys=True) if snapshot is not None else None,
-             pre_revision),
+             pre_revision, json.dumps(identity) if identity is not None else None),
         )
         self._touch(op_id, OP_APPLYING)
 
@@ -193,6 +197,7 @@ class OperationJournal:
         op = dict(row)
         op["payload"] = json.loads(op["payload"])
         for s in steps:
+            s["identity"] = json.loads(s["identity"]) if s.get("identity") else None
             s["changes"] = json.loads(s["changes"])
             s["snapshot"] = (json.loads(s["snapshot"])
                              if s["snapshot"] is not None else None)

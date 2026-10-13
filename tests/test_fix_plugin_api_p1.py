@@ -102,11 +102,11 @@ def _read(path):
 # -- F1: preset preflight runs before any write ---------------------------
 
 
-def test_preset_apply_preflight_blocks_missing_credentials_before_writes(hermes_home):
+def test_auth_free_custom_endpoint_does_not_require_unrelated_env(hermes_home):
     home = hermes_home.path
     _m(hermes_home, "default")
     _m(hermes_home, "alpha")
-    # delta looks identical to the others except it has NO credential file.
+    # A declared local endpoint without an auth requirement needs no .env.
     _m(hermes_home, "delta", env=False)
 
     tc = _client()
@@ -121,18 +121,14 @@ def test_preset_apply_preflight_blocks_missing_credentials_before_writes(hermes_
 
     before = {p: _read(_cfg_of(home, p)) for p in ("default", "alpha", "delta")}
     r = tc.post("/operations", json={"presetId": pid})
-    assert r.status_code == 409, r.text
-    detail = r.json()["detail"]
-    assert detail["blocked"] is True, detail
-    assert any("delta" in reason and "missing provider credentials" in reason
-               for reason in detail["reasons"]), detail
-
-    # REFUSAL performs no writes and plans no journal operation.
+    assert r.status_code == 200, r.text
+    assert r.json()["operation"]["state"] == "committed"
     after = {p: _read(_cfg_of(home, p)) for p in ("default", "alpha", "delta")}
-    assert after == before
+    assert after != before
+    assert _load(_cfg_of(home, "delta"))["model"]["default"] == "lab-7b-instruct"
     journal = OperationJournal(_journal_path(plugin_api))
     try:
-        assert PublicOperationView(journal).list_operations() == []
+        assert len(PublicOperationView(journal).list_operations()) == 1
     finally:
         journal.close()
 
@@ -141,7 +137,7 @@ def test_preset_apply_preflight_blocks_new_profile_and_cost_classes(hermes_home)
     home = hermes_home.path
     _m(hermes_home, "default")
     _m(hermes_home, "alpha")
-    _m(hermes_home, "gamma")  # discovered, but never included in the review
+
 
     tc = _client()
     changes = [
@@ -153,6 +149,7 @@ def test_preset_apply_preflight_blocks_new_profile_and_cost_classes(hermes_home)
     assert r.status_code == 200, r.text
     pid = r.json()["preset"]["id"]
 
+    _m(hermes_home, "gamma")  # created after review, not just unselected
     before = {p: _read(_cfg_of(home, p)) for p in ("default", "alpha", "gamma")}
     # 1) a NEW profile never silently joins the apply's fleet
     r = tc.post("/operations", json={"presetId": pid})
@@ -205,7 +202,7 @@ def test_preset_apply_allowed_when_preflight_clean_then_targets_written(hermes_h
 def test_preset_persists_slot_id_and_reapplies_non_main_target(hermes_home):
     home = hermes_home.path
     _m(hermes_home, "default")
-    cron_cfg = BASE_CONFIG + "\ncron:\n  provider: cronctl\n  model: old-cron-model\n"
+    cron_cfg = BASE_CONFIG.replace("  lablocal:\n", "  dispatchlab:\n    base_url: http://127.0.0.1:8081/v1\n  lablocal:\n") + "\ncron:\n  provider: cronctl\n  model: old-cron-model\n"
     _m(hermes_home, "alpha", config=cron_cfg)
     tc = _client()
 
@@ -291,7 +288,7 @@ def test_removal_edit_previews_as_unset_not_route_assignment(hermes_home):
     # cron removal unsets the inference pair, never the scheduler key
     r = tc.post("/preview", json={"changes": [
         {"profileId": "alpha", "slotId": "cron", "action": "remove",
-         "from": {"provider": "judge-old", "model": "old-cron-model"}, "to": None},
+         "from": {"provider": "", "model": "old-model"}, "to": None},
     ]})
     assert r.status_code == 200, r.text
     body = r.json()

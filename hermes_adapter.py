@@ -22,10 +22,30 @@ Contract (from the accepted plan, evidence lines referenced):
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import re
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, Optional
+
+
+# The expected (pre-write) config revision is carried into the canonical lock
+# guard WITHOUT changing the seam's call signature: the config adapter sets it
+# for the duration of the unmodified apply_canonical_save() call, so a
+# monkeypatched seam that keeps the historical (profile, updated, identity)
+# signature still receives the guard. Callers may equally pass
+# expected_revision= explicitly; an explicit value wins.
+_EXPECTED_REVISION: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "hermes_adapter_expected_revision", default=None)
+
+
+@contextlib.contextmanager
+def expected_revision_scope(revision: Optional[str]) -> Iterator[None]:
+    token = _EXPECTED_REVISION.set(revision)
+    try:
+        yield
+    finally:
+        _EXPECTED_REVISION.reset(token)
 
 # The inspected, tested baseline (PLAN.md "Evidence"): Hermes v0.21.7,
 # commit 590af66a58c2b3eb3c5edd1dcfefa09c625ae18a.
@@ -100,7 +120,7 @@ class ProfileIdentity:
     """Cheap but spoof-resistant identity of a discovered profile directory."""
     name: str
     path: str
-    fingerprint: str  # realpath + identity-marker content hash
+    fingerprint: str  # realpath + directory identity + marker presence
 
 
 def discover_profiles() -> Dict[str, ProfileIdentity]:
@@ -124,6 +144,8 @@ def _identity_fingerprint(name: str, pdir) -> str:
     from hermes_cli.profiles import named_profile_has_identity
     h = hashlib.sha256()
     h.update(str(Path(pdir).resolve()).encode())
+    stat = Path(pdir).stat()
+    h.update(f"{stat.st_dev}:{stat.st_ino}".encode())
     try:
         marker_present = bool(named_profile_has_identity(pdir))
     except Exception:
@@ -136,7 +158,9 @@ def _assert_identity(name: str, expected: ProfileIdentity) -> None:
     current = discover_profiles().get(name)
     if current is None or current.fingerprint != expected.fingerprint:
         raise ProfileIdentityChanged(
-            f"profile {name!r} identity changed or vanished after preview")
+            f"profile {name!r} identity changed or vanished after review "
+            "(the profile directory was recreated, moved, or restored from a "
+            "backup); re-review the change before applying or undoing")
 
 
 class HermesAdapter:
@@ -187,6 +211,13 @@ class HermesAdapter:
             import copy
             return copy.deepcopy(dict(cfg))
 
+    def config_revision(self, profile: Optional[str] = None) -> str:
+        """The canonical-config revision fingerprint: ``_rev`` of the strictly
+        re-read config document. This is the EXACT domain the save guard in
+        ``apply_canonical_save`` compares under the lock, so callers can carry
+        a revision across the lock boundary and have it match."""
+        return _rev(self.load_raw_config(profile))
+
     # -- canonical route preparation/validation (no writes) ----------
     def prepare_main_assignment(
             self, cfg: Dict[str, Any], provider: str, model: str,
@@ -225,11 +256,18 @@ class HermesAdapter:
         self._assert_writable()
         if not profile:
             raise ValueError("explicit profile required for writes")
+        if expected_revision is None:
+            expected_revision = _EXPECTED_REVISION.get()
         if identity is not None:
             _assert_identity(profile, identity)
         config_mod = _hermes()
         with self.scoped(profile):
             with self._write_lock, config_mod._CONFIG_LOCK:
+                # Re-assert the discovered identity INSIDE the lock: the
+                # pre-lock check is only a fast fail; the guard that matters
+                # must run under the same lock as the save.
+                if identity is not None:
+                    _assert_identity(profile, identity)
                 fresh = config_mod.require_readable_config_before_write()
                 if expected_revision is not None and _rev(fresh) != expected_revision:
                     raise StoreConflict(
