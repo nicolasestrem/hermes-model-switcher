@@ -33,11 +33,12 @@ jobs:
       matrix:
         # The Hermes checkout the suite imports requires Python >=3.11.
         python-version: ["3.11", "3.13"]
-    env:
-      HERMES_MODEL_SWITCHER_HERMES_REPO: ${{ runner.temp }}/hermes-agent
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Set isolated test paths
+        run: printf 'HERMES_MODEL_SWITCHER_HERMES_REPO=%s/hermes-agent\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -69,13 +70,12 @@ jobs:
       matrix:
         # Node >=18 is the effective floor (esbuild); package.json declares no engines.
         node-version: ["22", "24"]
-    env:
-      HERMES_MODEL_SWITCHER_HERMES_REPO: ${{ runner.temp }}/hermes-agent
-      # tests/visual-evidence.spec.mjs writes under TMPDIR.
-      TMPDIR: ${{ runner.temp }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Set isolated test paths
+        run: printf 'HERMES_MODEL_SWITCHER_HERMES_REPO=%s/hermes-agent\nTMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
