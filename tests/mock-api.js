@@ -1,5 +1,7 @@
 // In-page mock of the plugin backend. Injected before the bundle loads.
-// Test hooks: window.__mockApi = { failState, failReadback, failUndo, okFalse }
+// Test hooks: window.__mockApi = { failState, failReadback, failUndo, okFalse,
+// rollbackMode: "compensated"|"partial"|"recovery_required", noWrite,
+// statusOverride, overrideState }
 (function () {
   const BASE = "/api/plugins/hermes-model-switcher";
 
@@ -83,35 +85,72 @@
       if (!preview || (body.previewId && body.previewId !== preview.id))
         return { status: 200, body: { ok: false, error: "unknown or stale preview" } };
       const failed = Boolean(M.failReadback);
+      const rollback = M.rollbackMode || null; // "compensated" | "partial" | "recovery_required"
+      const noWrite = Boolean(M.noWrite); // F1 known no-write conflict
       const id = "op-" + (++opSeq);
       // Mirror the REAL POST /operations DTO (_op_dto): id / state / results /
       // undoable, and — on a failed apply — a SAFE failure category plus
       // final_state. The real backend never sends a per-step ``readback`` object
       // nor raw exception text, so neither does this mock: the UI must render
       // failures from ``results[].status`` / ``operation.failure`` alone.
-      const results = preview.changes.length
-        ? dedupeProfiles(preview.changes).map((pid) => ({
-            profileId: pid, status: failed ? "failed" : "applied",
-            revisionBefore: "rev" + pid + "-a",
-            revisionAfter: failed ? "rev" + pid + "-a" : "rev" + pid + "-b",
-          }))
-        : [];
+      //
+      // ``rollbackMode`` covers an apply that fails MID-operation and then
+      // compensates: the per-step status is the same ``compensated`` the undo
+      // path uses, so the drawer must not read it as a verified undo.
+      // ``noWrite`` covers the F1 revision-conflict case where nothing is
+      // written at all (status ``not_written``, state ``pending``).
+      const pids = preview.changes.length ? dedupeProfiles(preview.changes) : [];
+      let state = "committed", failure = null, statusFor = () => "applied";
+      if (M.statusOverride) {
+        // Unknown/extra per-step status the backend may add later: the drawer
+        // must render it NEUTRAL (never green) instead of guessing success.
+        state = M.overrideState || "recovery_required";
+        statusFor = () => M.statusOverride;
+      } else if (noWrite) {
+        state = "pending"; failure = "revision_conflict";
+        statusFor = () => "not_written";
+      } else if (rollback === "compensated") {
+        // Every step rolled back, no failure category — the rollback is the
+        // whole outcome (this is the case that used to read "0 · 0").
+        state = "compensated";
+        statusFor = () => "compensated";
+      } else if (rollback === "partial") {
+        // Mixed: some steps rolled back, some never verified.
+        state = "partial";
+        statusFor = (i) => (i % 2 === 0 ? "compensated" : "failed");
+      } else if (rollback === "recovery_required") {
+        state = "recovery_required"; failure = "write_verification_failed";
+        statusFor = () => "failed";
+      } else if (failed) {
+        state = "recovery_required"; failure = "write_verification_failed";
+        statusFor = () => "failed";
+      }
+      const committed = state === "committed";
+      const results = pids.map((pid, i) => {
+        const status = statusFor(i);
+        const changed = status === "applied";
+        return {
+          profileId: pid, status,
+          revisionBefore: "rev" + pid + "-a",
+          revisionAfter: changed ? "rev" + pid + "-b" : "rev" + pid + "-a",
+        };
+      });
       const operation = {
         id,
-        state: failed ? "recovery_required" : "committed",
+        state,
         results,
         // A non-committed operation is not undoable through the drawer; the
         // backend exposes that as ``undoable: false``.
         undoable: results.some((r) => r.status === "applied"),
         // Terminal classification + a FIXED failure category (never raw text).
-        final_state: failed ? "recovery_required" : "committed",
-        failure: failed ? "write_verification_failed" : null,
+        final_state: state,
+        failure,
       };
       operations[id] = operation;
       // Envelope semantics: top-level ``ok`` is true only for committed/undone,
       // so a failed apply is HTTP 200 with ok:false AND the operation DTO — the
       // exact shape the UI must NOT discard.
-      return { status: 200, body: { ok: !failed, operation } };
+      return { status: 200, body: { ok: committed, operation } };
     }
     const opUndo = path.match(new RegExp("^" + BASE + "/operations/([^/]+)/undo$"));
     if (opUndo && method === "POST") {

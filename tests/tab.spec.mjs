@@ -196,8 +196,10 @@ test("failed read and ok:false are not success", async ({ page }) => {
   await expect(drawer).toBeVisible();
   await expect(page.getByTestId("result-default")).toContainText("FAILED — not verified");
   await expect(page.getByTestId("result-research")).toContainText("FAILED — not verified");
-  // the safe failure category and final state come from the operation DTO
-  await expect(page.getByTestId("operation-failure")).toContainText("write_verification_failed");
+  // the safe failure category (rendered as descriptive copy, the enum kept on
+  // data-failure-category) and final state come from the operation DTO
+  await expect(page.getByTestId("operation-failure")).toContainText("Write verification failed");
+  await expect(page.getByTestId("operation-failure")).toHaveAttribute("data-failure-category", "write_verification_failed");
   await expect(page.getByTestId("operation-failure")).toContainText("final state: recovery_required");
   await expect(page.getByTestId("operation-summary")).toContainText("0 profiles applied · 2 need attention");
   await expect(page.locator("[data-status='applied']")).toHaveCount(0);

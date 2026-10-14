@@ -716,10 +716,40 @@ function PreviewPanel({ preview }) {
 
 const RESULT_LABEL = {
   applied: { text: "Applied + read back", color: THEME.ok },
+  // ``restored``/``compensated`` mean "the previous revision is back". That is a
+  // SUCCESS only when the user asked for an undo (operation state ``undone``);
+  // after a FAILED APPLY the identical status is a rollback the user never
+  // requested, so it is relabelled below and never painted green.
   restored: { text: "Restored (undo verified)", color: THEME.ok },
   compensated: { text: "Restored (undo verified)", color: THEME.ok },
   failed: { text: "FAILED — not verified", color: THEME.danger },
   conflict: { text: "Conflict — recovery required", color: THEME.warn },
+  // A known no-write conflict (F1): the step was deliberately left untouched.
+  not_written: { text: "Not changed — review again", color: THEME.warn },
+};
+
+// Same status, opposite meaning: an apply that rolled back mid-operation.
+const ROLLBACK_LABEL = { text: "Rolled back after failed apply", color: THEME.warn };
+const COMPENSATED_STATUSES = ["restored", "compensated"];
+
+// The backend sends a SAFE failure category, never an exception string. Render
+// descriptive copy where there is a clean mapping; the enum stays on
+// ``data-failure-category`` for traceability but is not the user-facing text.
+const FAILURE_COPY = {
+  write_verification_failed: "Write verification failed — the change did not stick",
+  revision_conflict: "Revision conflict — a profile changed after review",
+  store_unreadable: "Stored configuration could not be read",
+  blocked: "Apply blocked before any write",
+  io_error: "Storage error while writing the change",
+  step_failed: "A step failed before it could be verified",
+};
+const STATE_COPY = {
+  compensated: "rolled back after a failed apply",
+  partial: "partially rolled back after a failed apply",
+  recovery_required: "recovery required",
+  pending: "pending — not written",
+  undone: "undone",
+  committed: "committed",
 };
 
 // Only a scalar is displayable: an object would render as "[object Object]" and
@@ -772,31 +802,62 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
   // longer depends on a per-result ``readback`` field, which only ever existed
   // in the test mock and never in a real response.
   const results = Array.isArray(operation.results) ? operation.results : [];
-  const appliedCount = results.filter((r) => r.status === "applied").length;
-  const attentionCount = results.filter((r) => ["failed", "conflict"].includes(r.status)).length;
-  const failure = scalarText(operation.failure) || results.map((r) => scalarText(r.failure)).find(Boolean) || null;
   const finalState = scalarText(operation.final_state) || scalarText(operation.state) || null;
+  // ``undone`` is the ONLY state in which a compensated/restored step is a
+  // verified user-requested undo. Every other non-committed state is a failed
+  // apply whose rollback must NOT be dressed as success.
+  const undoVerified = finalState === "undone";
+  const appliedCount = results.filter((r) => r.status === "applied").length;
+  // Any step that is not a verified ``applied`` needs attention — UNLESS it is a
+  // compensated/restored step of a user-requested undo (state ``undone``). A
+  // fully-compensated failed apply therefore reads "0 applied · N need
+  // attention" instead of the old, dangerously clean "0 · 0"; an unrecognised
+  // future status is counted too rather than silently ignored.
+  const attentionCount = results.filter((r) =>
+    r.status !== "applied" &&
+    !(COMPENSATED_STATUSES.includes(r.status) && undoVerified)
+  ).length;
+  const failure = scalarText(operation.failure) || results.map((r) => scalarText(r.failure)).find(Boolean) || null;
+  const failureCopy = failure ? FAILURE_COPY[failure] || failure : null;
+  // A failed apply may carry NO failure category (the rollback itself is the
+  // outcome); the terminal state still has to be on screen, so the state line
+  // is driven by the state, not by the presence of ``failure``.
+  const showStateLine = !failure && !undoVerified && Boolean(finalState) && finalState !== "committed";
   return (
     <aside ref={ref} tabIndex={-1} role="dialog" aria-modal="true"
       aria-label="Operation drawer" data-testid="operation-drawer"
       style={{ position: "fixed", right: 0, top: 0, bottom: 0, width: "min(380px, 100vw)", boxSizing: "border-box", overflow: "auto",
         background: THEME.bg, borderLeft: `1px solid ${THEME.border}`, padding: 12, zIndex: 50, outline: "none" }}>
       <h3>Operation results</h3>
-      <p data-testid="operation-summary">{appliedCount} profiles applied · {attentionCount} need attention</p>
+      <p data-testid="operation-summary" data-attention={attentionCount > 0 ? "true" : "false"}
+        style={{ color: attentionCount > 0 ? THEME.warn : THEME.muted }}>
+        {appliedCount} profiles applied · {attentionCount} need attention
+      </p>
       <p className="hms-note">Reference: {operation.id}</p>
       <button type="button" onClick={onClose} aria-label="Close operation drawer">Close</button>
       <p style={{ color: THEME.muted }}>Configured ≠ live: existing sessions may keep their old route.</p>
       {failure && (
-        <p data-testid="operation-failure" role="alert" style={{ color: THEME.danger }}>
-          {failure}{finalState ? ` · final state: ${finalState}` : ""}
+        <p data-testid="operation-failure" role="alert" data-failure-category={failure}
+          style={{ color: THEME.danger }}>
+          {failureCopy}{finalState ? ` · final state: ${finalState}` : ""}
         </p>
       )}
-      {!failure && finalState && finalState !== "committed" && (
-        <p data-testid="operation-state" style={{ color: THEME.warn }}>Final state: {finalState}</p>
+      {showStateLine && (
+        <p data-testid="operation-state" data-state={finalState} style={{ color: THEME.warn }}>
+          Apply did not commit — {STATE_COPY[finalState] || finalState}
+        </p>
+      )}
+      {undoVerified && (
+        <p data-testid="operation-state" data-state="undone" style={{ color: THEME.ok }}>
+          Undo verified — previous revisions restored
+        </p>
       )}
       <ul style={{ listStyle: "none", padding: 0 }}>
         {results.map((r) => {
-          const label = RESULT_LABEL[r.status] || { text: r.status, color: THEME.fg };
+          const isCompensated = COMPENSATED_STATUSES.includes(r.status);
+          const label = isCompensated && !undoVerified
+            ? ROLLBACK_LABEL
+            : RESULT_LABEL[r.status] || { text: r.status, color: THEME.fg };
           return (
             <li key={r.profileId} data-testid={`result-${r.profileId}`}
               style={{ borderBottom: `1px solid ${THEME.border}`, padding: "6px 0" }}>
