@@ -145,7 +145,7 @@ and exact-model removal; see [advanced routing](docs/technical-reference.md).
 - **Scale.** Large profile sets increase first-request (cold discovery) time; 50
   synthetic profiles took about seven seconds in the lab. See
   [release readiness](docs/release-readiness.md) and
-  [backlog](https://github.com/nicolasestrem/hermes-model-switcher/blob/main/docs/backlog.md).
+  [backlog](docs/backlog.md).
 - **Platform scope.** Linux is verified; macOS and native Windows are unverified.
 - **Private Hermes APIs.** Integration uses private Hermes seams and may need updates
   for future Hermes releases.
@@ -177,7 +177,7 @@ plugin does not reverse changes already applied.
 ## Develop and contribute
 
 See
-[CONTRIBUTING.md](https://github.com/nicolasestrem/hermes-model-switcher/blob/main/CONTRIBUTING.md)
+[CONTRIBUTING.md](CONTRIBUTING.md)
 for dependency setup, the portable vs real-runtime test split, and the CI workflow. In
 short:
 
@@ -190,7 +190,8 @@ python scripts/privacy_guard.py
 ```
 
 Read the [design contract](DESIGN.md), [usability notes](docs/usability-polish.md),
-[technical reference](docs/technical-reference.md), and
+[technical reference](docs/technical-reference.md),
+[verification scope](docs/verification.md), and
 [release findings](docs/release-readiness.md). Changes should preserve preview, apply,
 readback, and guarded Undo.
 

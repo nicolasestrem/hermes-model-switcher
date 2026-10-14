@@ -35,7 +35,7 @@ NAME = "hermes-model-switcher"
 # desktop/plugin.js or plugin.json beside it is rejected by
 # `hermes plugins validate`, and the agent loader records a load failure
 # ("No __init__.py in <dir>") for it at every startup.
-COPY_FILES = ["plugin.yaml", "__init__.py", "LICENSE", "README.md", "CHANGELOG.md", "DESIGN.md"]
+COPY_FILES = ["plugin.yaml", "__init__.py", "LICENSE", "README.md", "CHANGELOG.md", "DESIGN.md", "CONTRIBUTING.md"]
 PY_MODULES = ["hermes_adapter.py", "route_inventory.py"]
 PY_PACKAGE = "model_switcher"
 DASHBOARD = ["manifest.json", "plugin_api.py", "model_catalog.py"]
@@ -44,7 +44,7 @@ STYLES = "dist/style.css"
 # Explicit publication boundary: local/ignored documentation is never shipped.
 DOC_FILES = [
     "usability-polish.md", "technical-reference.md", "privacy-audit.md",
-    "release-readiness.md", "images/README.md",
+    "release-readiness.md", "verification.md", "backlog.md", "catalog-submission.md", "images/README.md",
     "images/model-switcher-dark-1440.png", "images/model-switcher-light-1440.png",
     "images/model-switcher-dark-375.png",
 ]
