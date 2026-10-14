@@ -58,8 +58,11 @@ The verified revision is Hermes **v0.22.0+canary.20261014T070054Z**, commit
 `0e427d788d253630d38a3a51cd76849e73cd6925`. Reproduce it from the public repository:
 
 ```sh
-git clone --depth 1 --branch 'v0.22.0+canary.20261014T070054Z' \
-  https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent
+# Pin the exact commit: it is immutable (the canary tag is annotated onto it).
+git init /tmp/hermes-agent
+git -C /tmp/hermes-agent remote add origin https://github.com/NousResearch/hermes-agent.git
+git -C /tmp/hermes-agent fetch --depth 1 origin 0e427d788d253630d38a3a51cd76849e73cd6925
+git -C /tmp/hermes-agent checkout -q FETCH_HEAD
 git -C /tmp/hermes-agent rev-parse HEAD   # 0e427d788d253630d38a3a51cd76849e73cd6925
 ```
 

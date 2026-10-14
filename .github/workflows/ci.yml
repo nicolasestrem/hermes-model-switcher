@@ -48,11 +48,13 @@ jobs:
       - name: Install plugin test dependencies
         run: python -m pip install -e '.[test]'
 
-      - name: Clone the pinned Hermes reference checkout
+      - name: Fetch the pinned Hermes reference checkout
         run: |
-          git clone --depth 1 --branch "$HERMES_TESTED_TAG" \
-            https://github.com/NousResearch/hermes-agent.git \
-            "$HERMES_MODEL_SWITCHER_HERMES_REPO"
+          git init "$HERMES_MODEL_SWITCHER_HERMES_REPO"
+          git -C "$HERMES_MODEL_SWITCHER_HERMES_REPO" remote add origin \
+            https://github.com/NousResearch/hermes-agent.git
+          git -C "$HERMES_MODEL_SWITCHER_HERMES_REPO" fetch --depth 1 origin "$HERMES_TESTED_SHA"
+          git -C "$HERMES_MODEL_SWITCHER_HERMES_REPO" checkout -q FETCH_HEAD
           test "$(git -C "$HERMES_MODEL_SWITCHER_HERMES_REPO" rev-parse HEAD)" = "$HERMES_TESTED_SHA"
 
       - name: Run the backend suite
@@ -90,11 +92,13 @@ jobs:
       - name: Install plugin test dependencies
         run: python -m pip install -e '.[test]'
 
-      - name: Clone the pinned Hermes reference checkout
+      - name: Fetch the pinned Hermes reference checkout
         run: |
-          git clone --depth 1 --branch "$HERMES_TESTED_TAG" \
-            https://github.com/NousResearch/hermes-agent.git \
-            "$HERMES_MODEL_SWITCHER_HERMES_REPO"
+          git init "$HERMES_MODEL_SWITCHER_HERMES_REPO"
+          git -C "$HERMES_MODEL_SWITCHER_HERMES_REPO" remote add origin \
+            https://github.com/NousResearch/hermes-agent.git
+          git -C "$HERMES_MODEL_SWITCHER_HERMES_REPO" fetch --depth 1 origin "$HERMES_TESTED_SHA"
+          git -C "$HERMES_MODEL_SWITCHER_HERMES_REPO" checkout -q FETCH_HEAD
           test "$(git -C "$HERMES_MODEL_SWITCHER_HERMES_REPO" rev-parse HEAD)" = "$HERMES_TESTED_SHA"
 
       - name: Install Node dependencies
