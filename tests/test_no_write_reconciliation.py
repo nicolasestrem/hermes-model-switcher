@@ -46,7 +46,7 @@ from model_switcher.journal import (  # noqa: E402
 @pytest.fixture()
 def lab():
     """Throwaway lab OUTSIDE any git worktree (journal refuses worktrees)."""
-    root = Path(tempfile.mkdtemp(prefix="nowrite-lab-", dir="/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="nowrite-lab-"))
     yield root
     import shutil
     shutil.rmtree(root, ignore_errors=True)
