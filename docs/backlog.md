@@ -27,6 +27,12 @@ Nothing here contains private host data.
 - **Slot coverage gaps.** Unknown model-like keys and unsupported plugin selectors stay
   read-only and never receive write access. Extend the versioned registry descriptors as
   Hermes adds surfaces.
+- **Retried pre-write failures overwrite their failure category.** Retrying an operation
+  that failed at the pre-write revision recheck through the engine's `apply_operation`
+  directly records `write_verification_failed` over the accurate `revision_conflict`
+  category (`src/model_switcher/engine.py`, the failure category is set from the last
+  attempt). Not reachable through the Dashboard API, which always plans a fresh operation;
+  relevant only to direct engine callers.
 
 ## Build and packaging
 
