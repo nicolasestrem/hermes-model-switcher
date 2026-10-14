@@ -2,6 +2,7 @@
 // globals exactly as the real Dashboard shell provides them. The plugin
 // bundle itself NEVER includes React — this file only equips the test fixture.
 import * as esbuild from "esbuild";
+import { fileURLToPath } from "node:url";
 
 await esbuild.build({
   stdin: {
@@ -12,7 +13,7 @@ await esbuild.build({
       globalThis.React = React;
       globalThis.ReactDOM = Object.assign({}, ReactDOM, ReactDOMClient);
     `,
-    resolveDir: new URL("..", import.meta.url).pathname,
+    resolveDir: fileURLToPath(new URL("..", import.meta.url)),
     loader: "js",
   },
   bundle: true,
@@ -91,7 +92,7 @@ await esbuild.build({
         ReactDOMClient.createRoot(el).render(React.createElement(Component));
       };
     `,
-    resolveDir: new URL("..", import.meta.url).pathname,
+    resolveDir: fileURLToPath(new URL("..", import.meta.url)),
     loader: "js",
   },
   bundle: true,

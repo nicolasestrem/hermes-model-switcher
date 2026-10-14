@@ -42,14 +42,21 @@ for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 844 
   });
 }
 
-test("manifest stylesheet is built and every rule is plugin-scoped", () => {
+test("manifest stylesheet is built and every rule is plugin-scoped", async ({ page }) => {
   const manifest = JSON.parse(fs.readFileSync("dashboard/manifest.json", "utf8"));
   expect(manifest.css).toBe("dist/style.css");
   const css = fs.readFileSync(`dashboard/${manifest.css}`, "utf8");
   expect(css).toBe(fs.readFileSync("ui/src/styles.css", "utf8"));
-  const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, "");
-  const selectors = [...withoutComments.matchAll(/([^{}]+)\{/g)]
-    .flatMap(match => match[1].trim().split(",").map(selector => selector.trim()));
+  // Parse grouping rules too: a media query is not itself a selector, but
+  // every nested style rule must still be confined to the plugin root.
+  const selectors = await page.evaluate(source => {
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(source);
+    const collect = rules => Array.from(rules).flatMap(rule =>
+      rule.selectorText ? rule.selectorText.split(",").map(selector => selector.trim())
+        : rule.cssRules ? collect(rule.cssRules) : []);
+    return collect(sheet.cssRules);
+  }, css);
   expect(selectors.length).toBeGreaterThan(0);
   for (const selector of selectors) expect(selector.startsWith(".hms-root")).toBe(true);
 });

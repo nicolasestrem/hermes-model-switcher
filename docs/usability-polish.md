@@ -4,6 +4,25 @@ Public guide to the Model Switcher usability polish. The design contract lives i
 [DESIGN.md](../DESIGN.md) (§4 layout, §5 components, §6 interaction) and usage
 stays in [README.md](../README.md).
 
+## Public release refinement
+
+The introduction leads with choosing models across profiles, reviewing changes,
+and reusing setups. The matrix is headed **Select your targets**, and the editor
+**Choose your routing**. A distinct refresh/recovery toolbar separates workspace
+tools from the configuration actions. These headings preserve the existing
+editor-first DOM order and wide-screen matrix/rail arrangement.
+
+Selection counts use a polite live announcement. Provider browsing explains
+both an empty catalog and a search with no matches, retaining manual exact-ID
+entry. Secondary inline text respects the 13 px minimum. Model identifiers wrap,
+preview entries have clearer separation, and narrow screens stack filter fields.
+All styles remain scoped to the plugin and use host tokens; no external fonts,
+decorative animation, or additional network requests were introduced.
+
+This refinement requires the release verification below against the final
+candidate. Earlier recorded results are historical evidence, not a test result
+for these source changes.
+
 ## Profile view filters vs. bulk selection
 
 - **Profiles shown** filters the matrix *view only*. It never adds or removes

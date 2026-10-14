@@ -36,8 +36,10 @@ HERMES_REPO = str(Path(os.environ.get(
 SEED_ISOLATION_MESSAGE = "seed target is not an isolated Hermes home"
 
 
-def boot(home: Path):
-    env = dict(os.environ, HERMES_HOME=str(home))
+def boot(home: Path, native_home: Path):
+    env = dict(os.environ, HERMES_HOME=str(home), HOME=str(native_home),
+               USERPROFILE=str(native_home),
+               HERMES_MODEL_SWITCHER_HERMES_REPO=HERMES_REPO)
     env.pop("PYTHONPATH", None)
     code = "import sys; sys.path.insert(0, 'tests'); import real_app; print('isolated app booted')"
     return subprocess.run([sys.executable, "-c", code], cwd=REPO,
@@ -45,17 +47,21 @@ def boot(home: Path):
 
 
 def test_real_harness_refuses_discovery_outside_declared_lab(tmp_path):
-    # TMPDIR is inside the real profile tree. Hermes resolves its DEFAULT root
-    # back to the machine home, so merely setting HERMES_HOME is insufficient.
-    (tmp_path / "config.yaml").write_text("{}\n")
-    result = boot(tmp_path)
+    # Explicitly reproduce a target nested in the native profile tree; the
+    # runner's TMPDIR may be anywhere. The real resolver must collapse this
+    # target to the sandbox native root and the harness must reject it.
+    native_home = _sandbox_home(tmp_path)
+    target = native_home / ".hermes" / "nested-lab"
+    target.mkdir(parents=True)
+    (target / "config.yaml").write_text("{}\n")
+    result = boot(target, native_home)
     assert result.returncode != 0
     assert "lab profile discovery escaped declared home" in result.stderr
 
 
-def test_real_harness_boots_with_actual_isolated_discovery(hermes_home):
+def test_real_harness_boots_with_actual_isolated_discovery(hermes_home, tmp_path):
     hermes_home.make_profile("research")
-    result = boot(hermes_home.path)
+    result = boot(hermes_home.path, _sandbox_home(tmp_path))
     assert result.returncode == 0, result.stderr
     assert "isolated app booted" in result.stdout
 

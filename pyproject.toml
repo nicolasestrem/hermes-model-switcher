@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hermes-model-switcher"
 version = "0.1.0"
-description = "Dashboard plugin: journalled model-preset application with compensation/undo"
+description = "Choose models across Hermes profiles, preview changes, and reuse your setup with presets."
 license = { text = "MIT" }
 requires-python = ">=3.10"
 
