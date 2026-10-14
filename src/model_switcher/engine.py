@@ -416,11 +416,14 @@ def reconcile(journal: OperationJournal, op_id: str) -> Dict[str, Any]:
             state = _compensate_applied(journal, op_id, applied,
                                         all_failed=len(applied) == 0)
             if state == OP_PENDING:
-                # Nothing was written and nothing is ambiguous: this operation
-                # never touched a store. Keep it OP_PENDING so it stays
-                # retryable. OP_PARTIAL ("some applied, compensation done")
-                # would mislabel zero-applied AND make the op un-retryable,
-                # since apply_operation only resumes pending/applying.
+                # Nothing was written and nothing is ambiguous: no store was
+                # touched, so the record is kept OP_PENDING rather than
+                # OP_PARTIAL (zero-applied is not "some applied, compensation
+                # done"). This does NOT make the op resumable under the same
+                # op_id: the step that failed is STEP_FAILED, not pending, and
+                # apply_operation refuses any non-pending step, so a same-id
+                # retry re-fails immediately. A fresh review and a new
+                # operation are required to proceed.
                 journal.finish(op_id, OP_PENDING)
     return journal.get(op_id)  # type: ignore[return-value]
 

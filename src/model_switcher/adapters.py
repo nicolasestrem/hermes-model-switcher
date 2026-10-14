@@ -42,6 +42,22 @@ class StoreWriteAmbiguous(StoreConflict):
     post_revision = None
 
 
+class StorePreWriteConflict(StoreConflict):
+    """A guarded revision recheck refused BEFORE any write was attempted.
+
+    The base ``apply_changes_guarded`` rechecks the revision and only then
+    delegates to ``apply_changes`` — so a refusal there provably never touched
+    the store (a concurrent writer landed in the check-then-save window between
+    the engine's recheck and ours). The ``write_phase`` tag tells the engine and
+    reconcile this is a known no-write step, NOT a written-but-
+    ambiguous one. Deliberately bounded: it does NOT cover post-write ambiguity
+    (:class:`StoreWriteAmbiguous`), which must keep failing closed to
+    ``recovery_required``.
+    """
+
+    write_phase = "pre_write"
+
+
 class _DeleteSentinel:
     """Explicit ``remove this key`` marker. Distinct from a literal ``None``
     value: ``DELETE`` means the key must be ABSENT after apply/readback, while
@@ -154,7 +170,10 @@ class StoreAdapter:
         write lock (the canonical config store) overrides this so the guard
         runs INSIDE that lock (closing the check-then-save race)."""
         if expected_revision is not None and self.revision() != expected_revision:
-            raise StoreConflict(
+            # The recheck runs BEFORE apply_changes -> provably no write, so
+            # this refusal is tagged pre-write (known no-write), never the
+            # post-write ambiguity that must fail closed to recovery_required.
+            raise StorePreWriteConflict(
                 f"{self.path}: revision changed before write "
                 f"({self.revision()} != {expected_revision})")
         return self.apply_changes(changes)

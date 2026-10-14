@@ -40,6 +40,6 @@ Request flow: `dashboard/plugin_api.py` (FastAPI routes: `/state`, `/preview`, `
 - Writes only in-process via the Dashboard path; hosted-isolation mode stays read-only. Never write config outside adapters; never textually replace YAML.
 - Every write target must be a discovered profile's config; refuse anything else before writing.
 - Public DTOs (`to_public_operation`/`PublicOperationView`) are allowlists: never expose raw configs, paths, snapshots, payloads, secrets or exception strings.
-- The journal DB refuses to live inside any git worktree, symlinked paths, and is created 0600 in a 0700 dir. Snapshots never leave the journal.
+- The journal DB refuses to live inside any git worktree, symlinked paths, and is created 0600 in a 0700 private parent directory; the SQLite `-wal` and `-shm` sidecars share that same 0600-in-0700 invariant. Snapshots never leave the journal.
 - Tests use lab homes and fake credentials only; never touch the live Hermes home or make inference calls, and never fabricate usage rows. There is no inference-probe route to call.
 - `scripts/privacy_guard.py` rejects staged/tracked files containing Hermes configs, snapshots or credentials.
