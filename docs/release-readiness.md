@@ -86,3 +86,15 @@ privacy guard: clean (110 files scanned)
 ```
 
 Linux suite covers the symlink and permission checks skipped locally. Browser behavior was unchanged by this follow-up; previous 69-browser-test evidence remains scoped to the original candidate.
+
+## PR #10 documentation publication boundary
+
+The package builder now copies only DOC_FILES, an explicit manifest of public documentation and sanitized screenshots. Every approved file is validated before existing output can be replaced. Adding a local or ignored file below docs does not grant publication permission. Update the manifest deliberately when adding release documentation. Regression coverage adds synthetic private notes, nested configuration exports and raw images to a disposable checkout and checks the exact packaged file set and absence of their contents.
+
+Raw focused verification on Windows:
+
+```text
+......sss.                                                               [100%]
+```
+
+Exit code 0. Three existing symlink tests skip on Windows; the new publication-boundary regression passes. No runtime/UI changes were made.

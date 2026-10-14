@@ -41,6 +41,13 @@ PY_PACKAGE = "model_switcher"
 DASHBOARD = ["manifest.json", "plugin_api.py", "model_catalog.py"]
 BUNDLE = "dist/index.js"  # built by `npm run build`
 STYLES = "dist/style.css"
+# Explicit publication boundary: local/ignored documentation is never shipped.
+DOC_FILES = [
+    "usability-polish.md", "technical-reference.md", "privacy-audit.md",
+    "release-readiness.md", "images/README.md",
+    "images/model-switcher-dark-1440.png", "images/model-switcher-light-1440.png",
+    "images/model-switcher-dark-375.png",
+]
 
 
 def fail(msg: str) -> None:
@@ -70,6 +77,7 @@ def main() -> None:
         fail("output already exists; use --replace to replace it explicitly")
     inputs = [REPO / f for f in COPY_FILES + PY_MODULES + ["scripts/privacy_guard.py"]]
     inputs += [REPO / "dashboard" / f for f in DASHBOARD + [BUNDLE, STYLES]]
+    inputs += [REPO / "docs" / f for f in DOC_FILES]
     for source in inputs:
         if not source.is_file():
             fail(f"missing {source.name}")
@@ -109,8 +117,10 @@ def main() -> None:
         if not (REPO / f).is_file():
             fail(f"missing {f}")
         shutil.copy2(REPO / f, out / f)
-    shutil.copytree(REPO / "docs", out / "docs",
-                    ignore=shutil.ignore_patterns("__pycache__"))
+    for f in DOC_FILES:
+        destination = out / "docs" / f
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO / "docs" / f, destination)
     # The README links to this contributor tool; ship it with the docs.
     (out / "scripts").mkdir()
     shutil.copy2(REPO / "scripts" / "privacy_guard.py", out / "scripts" / "privacy_guard.py")

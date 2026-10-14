@@ -83,6 +83,7 @@ def test_parent_symlink_input_preserves_output(tmp_path, monkeypatch):
     (repo / "docs").mkdir()
     (repo / "src" / builder.PY_PACKAGE).mkdir(parents=True)
     monkeypatch.setattr(builder, "REPO", repo)
+    monkeypatch.setattr(builder, "DOC_FILES", [])
     monkeypatch.setattr(builder, "COPY_FILES", ["linked/required.txt"])
     monkeypatch.setattr(builder, "PY_MODULES", [])
     monkeypatch.setattr(builder, "DASHBOARD", [])
@@ -117,3 +118,26 @@ def test_output_parent_alias_uses_canonical_containment(tmp_path, monkeypatch, u
     else:
         builder.main()
         assert (target / builder.NAME / "README.md").is_file()
+
+
+def test_unapproved_docs_are_never_packaged(tmp_path, monkeypatch):
+    import shutil
+    builder = load_builder()
+    repo = tmp_path / "checkout"
+    shutil.copytree(builder.REPO / "docs", repo / "docs")
+    for relative in builder.COPY_FILES + builder.PY_MODULES + ["scripts/privacy_guard.py"]:
+        destination = repo / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(builder.REPO / relative, destination)
+    shutil.copytree(builder.REPO / "dashboard", repo / "dashboard")
+    shutil.copytree(builder.REPO / "src", repo / "src")
+    for relative in ["local-notes.md", "exports/config.yaml", "images/raw-private.png"]:
+        path = repo / "docs" / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"PRIVATE-SYNTHETIC-SENTINEL")
+    monkeypatch.setattr(builder, "REPO", repo)
+    monkeypatch.setattr("sys.argv", ["build_package.py", "--out", str(tmp_path / "output")])
+    builder.main()
+    docs = tmp_path / "output" / builder.NAME / "docs"
+    assert sorted(str(p.relative_to(docs)).replace(chr(92), "/") for p in docs.rglob("*") if p.is_file()) == sorted(builder.DOC_FILES)
+    assert not any(b"PRIVATE-SYNTHETIC-SENTINEL" in p.read_bytes() for p in docs.rglob("*") if p.is_file())
