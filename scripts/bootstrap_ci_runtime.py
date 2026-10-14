@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -73,9 +75,9 @@ def derive_base_version(tag: str, *, update_channel=None) -> str:
     carry their base version as the SemVer core. The core is validated against
     the runtime's own ``STABLE_TAG_RE`` before it is returned.
     """
-    if not isinstance(tag, str) or not tag.startswith("v"):
+    if not isinstance(tag, str) or not tag.startswith("v") or tag != tag.strip():
         raise ValueError(f"not a release tag: {tag!r}")
-    value = tag.strip()
+    value = tag
     channel = update_channel or _update_channel()
     if channel.is_canary_tag(value):
         core = value[1:].split("+canary.", 1)[0]
@@ -103,6 +105,8 @@ def verify_identity(checkout: Path, sha: str, tag: str) -> str:
     Returns the peeled tag commit. An annotated tag is peeled with ``^{commit}``;
     the tag object's own id is never accepted as a commit.
     """
+    if not isinstance(sha, str) or re.fullmatch(r"[0-9a-fA-F]{40}", sha) is None:
+        raise SystemExit("bootstrap: SHA must be exactly 40 hexadecimal characters")
     if not checkout.is_dir():
         raise SystemExit(f"bootstrap: checkout {checkout} does not exist")
     head = _git(checkout, "rev-parse", "HEAD")
@@ -139,8 +143,14 @@ def write_stamp(checkout: Path, sha: str, base_version: str, *,
         "--source", source,
         "--update-mechanism", update_mechanism,
     ]
+    # This workflow belongs to the plugin, not the fetched Hermes checkout.
+    # Its GitHub branch/SHA must not masquerade as core provenance in the stamp.
+    writer_env = dict(os.environ)
+    for key in ("GITHUB_SHA", "GITHUB_REF_NAME", "GITHUB_HEAD_REF"):
+        writer_env.pop(key, None)
     result = subprocess.run(cmd, cwd=str(checkout), capture_output=True, text=True,
-                            encoding="utf-8", errors="replace", check=False)
+                            encoding="utf-8", errors="replace", check=False,
+                            env=writer_env)
     if result.returncode != 0:
         raise SystemExit(
             f"bootstrap: write_install_stamp.py failed ({result.returncode}):\n"

@@ -8,9 +8,9 @@ suites. The bootstrap writes the stamp the supported way (Hermes' own
 ``scripts/write_install_stamp.py``) with a base version derived from the
 verified release tag.
 
-Unit tests are hermetic. The end-to-end test writes a stamp into the resolved
-Hermes checkout and is enabled only when ``HMS_CI_BOOTSTRAP_E2E=1`` -- the CI
-checkout is a throwaway clone; the live runtime source must never be mutated.
+Unit tests are hermetic. The end-to-end test creates its own fresh clone and
+never removes or replaces the configured source checkout's stamp. Enable it
+with ``HMS_CI_BOOTSTRAP_E2E=1`` and a pinned source checkout/SHA/tag.
 """
 from __future__ import annotations
 
@@ -64,6 +64,8 @@ def test_derive_base_version_accepts_release_tags(tag, expected):
         "v9.9.9+foo",      # build metadata that is not a canary identity
         "v2026.7.20",      # CalVer label (4-digit major) must not pass as SemVer
         "v0.22.0+canary.20261014",  # truncated canary timestamp
+        "v0.22.0 ",
+        CANARY_TAG + " ",
         "",
     ],
 )
@@ -132,38 +134,65 @@ def test_verify_stamp_rejects_commit_or_base_mismatch():
         B.verify_stamp({**good, "updateMechanism": None}, "a" * 40, "0.22.0")
 
 
-# --- end to end (CI checkout only) -----------------------------------------
+# --- end to end (isolated clone only) ---------------------------------------
 
 _E2E = os.environ.get("HMS_CI_BOOTSTRAP_E2E") == "1"
-_E2E_REASON = "set HMS_CI_BOOTSTRAP_E2E=1 with a throwaway pinned checkout to run"
+_E2E_REASON = "set HMS_CI_BOOTSTRAP_E2E=1 with a pinned checkout to run"
+
+
+@pytest.mark.parametrize("sha", ["main", "a" * 39, "g" * 40, "a" * 40 + " "])
+def test_malformed_sha_is_rejected_before_lookup(tmp_path, monkeypatch, sha):
+    def forbidden_lookup(*args):
+        raise AssertionError("malformed identifier reached Git lookup")
+    monkeypatch.setattr(B, "_git", forbidden_lookup)
+    with pytest.raises(SystemExit, match="40 hexadecimal"):
+        B.verify_identity(tmp_path, sha, CANARY_TAG)
 
 
 @pytest.mark.skipif(not _E2E, reason=_E2E_REASON)
-def test_clean_checkout_becomes_supported_after_bootstrap():
-    """Reproduce the 0.0.0 read-only gap, then prove the bootstrap closes it."""
-    repo = Path(os.environ.get("HERMES_MODEL_SWITCHER_HERMES_REPO", ""))
+def test_clean_checkout_becomes_supported_after_bootstrap(tmp_path, monkeypatch):
+    """Never delete a caller's stamp: initialize only an owned fresh clone."""
+    configured = os.environ.get("HERMES_MODEL_SWITCHER_HERMES_REPO", "")
     sha = os.environ.get("HERMES_TESTED_SHA", "")
     tag = os.environ.get("HERMES_TESTED_TAG", "")
-    if not repo.is_dir() or not sha or not tag:
-        pytest.skip("HERMES_MODEL_SWITCHER_HERMES_REPO / HERMES_TESTED_SHA / HERMES_TESTED_TAG unset")
+    if not configured or not Path(configured).is_dir() or not sha or not tag:
+        pytest.fail("enabled bootstrap E2E requires the pinned checkout, SHA and tag")
+    source = Path(configured).resolve()
+    source_stamp = source / "install-stamp.json"
+    before_source = source_stamp.read_bytes() if source_stamp.exists() else None
+    repo = tmp_path / "owned-hermes-checkout"
+    _git(source, "clone", "--shared", "--no-checkout", str(source), str(repo))
+    _git(repo, "checkout", "-q", sha)
+    assert not (repo / "install-stamp.json").exists()
 
-    import hermes_adapter
+    def probe():
+        code = (
+            "import json, hermes_cli, hermes_adapter; from pathlib import Path; "
+            f"assert Path(hermes_cli.__file__).resolve().is_relative_to(Path({str(repo)!r})); "
+            "r=hermes_adapter.probe_runtime(); "
+            "print(json.dumps(dict(version=r.version_label, importable=r.importable, "
+            "supported=r.supported, read_only=r.read_only)))"
+        )
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(repo), str(REPO)]))
+        result = subprocess.run([sys.executable, "-c", code], env=env,
+                                capture_output=True, text=True, check=True)
+        return json.loads(result.stdout)
 
-    stamp = repo / "install-stamp.json"
-    stamp.unlink(missing_ok=True)
-    # Before: a bare checkout reports the pre-stamp placeholder and is read-only.
-    before = hermes_adapter.probe_runtime()
-    assert before.version_label == "0.0.0", before
-    assert not before.supported and before.read_only, before
-
+    before = probe()
+    assert before["version"] == "0.0.0", before
+    assert not before["supported"] and before["read_only"], before
+    # Deliberately emulate the plugin workflow's unrelated GitHub identity.
+    monkeypatch.setenv("GITHUB_REF_NAME", "11/merge")
+    monkeypatch.setenv("GITHUB_HEAD_REF", "feat/catalog-polish")
+    monkeypatch.setenv("GITHUB_SHA", "b" * 40)
     written = B.initialize(repo, sha, tag)
-    assert written["commit"] == sha
-    assert written["baseVersion"] == "0.22.0"
-
-    # After: the same checkout is supported and writable, on genuine metadata.
-    after = hermes_adapter.probe_runtime()
-    assert after.importable and after.supported and not after.read_only, after
-    assert after.version_label == "0.22.0", after
-    # The stamp on disk names the pinned commit and a real updateMechanism.
-    on_disk = json.loads(stamp.read_text(encoding="utf-8-sig"))
+    expected = B.derive_base_version(tag)
+    assert written["commit"] == sha and written["baseVersion"] == expected
+    assert written.get("branch") is None, written
+    after = probe()
+    assert after["importable"] and after["supported"] and not after["read_only"], after
+    assert after["version"] == expected, after
+    on_disk = json.loads((repo / "install-stamp.json").read_text(encoding="utf-8-sig"))
     assert on_disk["commit"] == sha and on_disk["updateMechanism"]
+    after_source = source_stamp.read_bytes() if source_stamp.exists() else None
+    assert after_source == before_source, "bootstrap test mutated its source checkout"
