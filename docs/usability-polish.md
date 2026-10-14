@@ -142,9 +142,9 @@ Local verification for this change completed with exit code 0:
 
 - `npm run build`
 - `env -u PYTHONPATH HMS_PYTHON="$PWD/.venv/bin/python" npm run test -- --workers=1` →
-  `65 passed`
+  `69 passed`
 - `env -u PYTHONPATH .venv/bin/python -m pytest -o addopts='' -q` →
-  `334 passed, 5 warnings`
+  `379 passed, 1 warning`
 
 ## Tests
 
@@ -184,3 +184,11 @@ Local verification for this change completed with exit code 0:
 - `tests/test_pr9_speech_api_refusals.py` — both HTTP Preview and direct Apply
   refuse malformed assignments and model-less reset/remove/chain attempts,
   without changing the profile's configuration bytes.
+- `tests/test_pr9_aux_review_regressions.py` — scalar model-string validation,
+  declared inheritance, pinned defaults, missing bases and bounded cycles.
+- `tests/test_pr9_aux_api_regressions.py` — refused scalar mutations preserve
+  config bytes; valid assignment/removal and guarded Undo work through the real
+  HTTP API; inherited DTOs keep configured and effective values separate.
+- `tests/aux-inheritance-ui.spec.mjs` — inherited and known default routes are
+  readable after expanding details at desktop/mobile widths, without labeling
+  configuration resolution as recorded usage.

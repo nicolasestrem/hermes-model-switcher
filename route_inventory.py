@@ -395,13 +395,98 @@ def _entries_by_key_map(entries: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str
 _AUX_OPENROUTER_FALLBACK_SLOT = "auxiliary.openrouter_model"
 
 
+def _aux_route_is_pinned(block: Any) -> bool:
+    """Runtime pin test (agent.auxiliary_task_config._layer_over_inherited):
+    a non-``auto`` provider, a non-empty ``model``, or a non-empty ``base_url``
+    pins the route so it stops following its inherit base. ``""``/``auto`` and
+    whitespace-only placeholders mean "follow the base"."""
+    if not isinstance(block, dict):
+        return False
+    provider = str(block.get("provider") or "").strip().lower()
+    return (provider not in ("", "auto")
+            or bool(str(block.get("model") or "").strip())
+            or bool(str(block.get("base_url") or "").strip()))
+
+
+def _aux_user_block(cfg: Dict[str, Any], task: str) -> Dict[str, Any]:
+    """The raw ``auxiliary.<task>`` block as a dict (``{}`` when absent)."""
+    aux = cfg.get("auxiliary") if isinstance(cfg, dict) else None
+    aux = aux if isinstance(aux, dict) else {}
+    raw = aux.get(task)
+    return raw if isinstance(raw, dict) else {}
+
+
+def _aux_base_exists(base: str, entries_by_key: Mapping[str, Dict[str, Any]]) -> bool:
+    if base in entries_by_key:
+        return True
+    defaults = _installed_aux_defaults().get(base)
+    return (isinstance(defaults, dict) and base not in _AUX_POLICY_KEYS
+            and base not in _OBSOLETE_AUX_BLOCKS
+            and any(key in defaults for key in ("provider", "model", "base_url")))
+
+
+def _aux_inherit_cycle(task: str, inherit: str,
+                       entries_by_key: Mapping[str, Dict[str, Any]]) -> bool:
+    """True when following ``inherit``'s own ``inherit_from`` chain reaches
+    ``task`` (or repeats) — a cycle that must never read as inheritance."""
+    seen = {task}
+    current: Optional[str] = inherit
+    while isinstance(current, str) and current:
+        if current in seen:
+            return True
+        seen.add(current)
+        nxt = entries_by_key.get(current)
+        current = nxt.get("inherit_from") if isinstance(nxt, dict) else None
+    return False
+
+
+def _aux_observation_source(cfg: Dict[str, Any], task: str,
+                            entries_by_key: Mapping[str, Dict[str, Any]],
+                            obs_source: str) -> Optional[str]:
+    """Return ``"inherited"`` when an UNPINNED plugin task resolves through its
+    declared ``inherit_from`` base; else ``None`` (keep the stored source).
+
+    Mirrors the runtime: an unpinned task route (absent block, timeout-only, or
+    the ``auto``/empty placeholders the picker persists) follows its declared
+    base, so the row must report the base's provider/model as inherited — a
+    ``default``/``configured`` source makes ``/state`` label it Unset and the UI
+    hide the route the runtime actually uses. A pinned own route — whether the
+    user block or the plugin's OWN declared defaults pin provider/model/base_url
+    — stays configured/default. A missing base or a cycle never fabricates
+    inheritance (a genuinely unresolved base
+    warns; a cycle already warned in ``_aux_effective_route``)."""
+    entry = entries_by_key.get(task)
+    if not isinstance(entry, dict):
+        return None  # built-in selectors carry no declared inheritance
+    inherit = entry.get("inherit_from")
+    if not (isinstance(inherit, str) and inherit and inherit != task):
+        return None
+    defaults = entry.get("defaults")
+    defaults = defaults if isinstance(defaults, dict) else {}
+    if _aux_route_is_pinned(_aux_user_block(cfg, task)) or _aux_route_is_pinned(defaults):
+        return None  # own route (or own declared default) is pinned
+    if _aux_inherit_cycle(task, inherit, entries_by_key):
+        return None  # cycle: never claimed as inheritance
+    if not _aux_base_exists(inherit, entries_by_key):
+        _record_inventory_warning(
+            f"plugin auxiliary task {task!r} declares inherit_from {inherit!r} "
+            "which resolves no auxiliary task; its effective route stays "
+            "unpinned (inheritance not claimed)")
+        return None
+    # A real base's automatic routing is still inherited. Report its auto
+    # placeholders truthfully; do not invent a concrete provider/model.
+    return "inherited"
+
+
 def _aux_observation(cfg: Dict[str, Any], desc: SlotDescriptor,
                      selector_keys: frozenset, entries_by_key: Mapping[str, Dict[str, Any]]
                      ) -> SlotObservation:
     """Aux rows carry the read-time EFFECTIVE route (runtime defaults layered
     under the user block) so an unset task reports the real resolution —
     provider 'auto' with no model, matching `hermes model` / the web picker.
-    Plugin-registered tasks resolve their declared defaults and inheritance."""
+    Plugin-registered tasks resolve their declared defaults and inheritance; an
+    unpinned task following a declared base reports source 'inherited' so the UI
+    shows the provider/model the runtime uses."""
     obs = _obs(cfg, desc)
     # Only auxiliary SELECTOR rows (built-in or plugin-registered) reach here;
     # the openrouter scalar row is added directly by build_inventory, so no
@@ -409,7 +494,11 @@ def _aux_observation(cfg: Dict[str, Any], desc: SlotDescriptor,
     task = desc.slot_id.split(".", 1)[1]
     if task not in selector_keys and task not in entries_by_key:
         return obs  # rows without selector semantics
-    return replace(obs, effective=_aux_effective_route(cfg, task, entries_by_key))
+    effective = _aux_effective_route(cfg, task, entries_by_key)
+    source = _aux_observation_source(cfg, task, entries_by_key, obs.source)
+    if source is None:
+        return replace(obs, effective=effective)
+    return replace(obs, effective=effective, source=source)
 
 # Runtime-consumed, backend-specific specialist paths (tools/transcription_tools.py
 # resolves stt.<provider>.model; tts_tool*.py resolves tts.<provider>.model).
@@ -514,6 +603,27 @@ def _speech_descriptor(cfg: Dict[str, Any], slot_id: str, provider: Optional[str
         f"invented {section}.{backend}.model store key")
 
 
+def _model_identifier_refusal(slot_id: str, model: Any, what: str) -> Optional[str]:
+    """Shared guard for a LITERAL model id that will be stored byte-exact.
+
+    A model identifier must be a non-empty string with no leading/trailing
+    whitespace: it is persisted verbatim (never trimmed or repaired), so a
+    malformed value would store an id the runtime cannot route — e.g.
+    ``str(None)`` becomes the literal model id ``"None"``. Backs BOTH the speech
+    assignment guard and the cross-cutting ``auxiliary.openrouter_model`` scalar
+    so the model-string class cannot drift between them.
+    """
+    if not isinstance(model, str):
+        return (f"{slot_id}: {what} requires a string 'model', not "
+                f"{type(model).__name__}")
+    if not model.strip():
+        return f"{slot_id}: {what} requires a non-empty 'model'"
+    if model != model.strip():
+        return (f"{slot_id}: model has leading/trailing whitespace; "
+                "refusing to store an untrimmed model id")
+    return None
+
+
 def _speech_assignment_refusal(slot_id: str, value: Dict[str, Any]) -> Optional[str]:
     """Refuse a speech SET that would persist an unusable model id.
 
@@ -542,15 +652,7 @@ def _speech_assignment_refusal(slot_id: str, value: Dict[str, Any]) -> Optional[
             return (f"{slot_id}: provider has leading/trailing "
                     "whitespace; refusing to store an untrimmed backend id")
     model = value.get("model")
-    if not isinstance(model, str):
-        return (f"{slot_id}: model-bearing speech route requires a string "
-                f"'model', not {type(model).__name__}")
-    if not model.strip():
-        return f"{slot_id}: model-bearing speech route requires a non-empty 'model'"
-    if model != model.strip():
-        return (f"{slot_id}: model has leading/trailing whitespace; "
-                "refusing to store an untrimmed model id")
-    return None
+    return _model_identifier_refusal(slot_id, model, "model-bearing speech route")
 
 
 # Explicitly unsupported: there is no runtime-consumed embedding-model config key
@@ -878,6 +980,16 @@ def preview_changes(cfg: Dict[str, Any], edits: List[RouteEdit],
                 rejected.append(
                     f"{edit.slot_id}: the OpenRouter fallback override accepts only a "
                     "'model' id — it is a shared auto-chain setting, not a task route")
+                continue
+            # The single stored value IS the model id: reject a malformed model
+            # (None / number / list / dict / empty / untrimmed) BEFORE
+            # ``_stored_value_for`` stringifies it — otherwise ``model: null``
+            # persists the literal id "None" and clobbers a valid fallback.
+            model_refusal = _model_identifier_refusal(
+                edit.slot_id, edit.value.get("model"),
+                "the OpenRouter fallback override")
+            if model_refusal is not None:
+                rejected.append(model_refusal)
                 continue
         if desc.storage_path == "moa.default_preset" and isinstance(edit.value, dict):
             try:

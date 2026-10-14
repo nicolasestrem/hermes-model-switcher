@@ -530,8 +530,9 @@ def _slot_configured_view(obs, cfg: Dict[str, Any],
     ids …) carry a bare model string; their provider comes from the paired
     companion path (model.provider / delegation.provider / cron.model_provider)
     when one exists. Route-dict slots read provider and model out of the stored
-    dict. Nothing is inferred: an absent provider reports as "" — never a guess
-    and never an inherited value (the resolved route lives in effectiveRoute).
+    dict. The OpenRouter auxiliary scalar has a fixed implicit provider, not
+    a companion to write. Otherwise an absent provider reports as "" — never
+    a guess or an inherited value (the resolved route lives in effectiveRoute).
     """
     stored = obs.configured
     if stored is _STORE_MISSING:
@@ -543,6 +544,8 @@ def _slot_configured_view(obs, cfg: Dict[str, Any],
         model = stored.get("model")
     elif isinstance(stored, str):
         model = stored
+        if d.storage_path == "auxiliary.openrouter_model" and stored.strip():
+            provider = "openrouter"
     if provider is None:
         for comp in d.companion_paths:
             # Only PROVIDER companions qualify: a route dict's neighbours can
@@ -829,9 +832,11 @@ def _removal_changes_for(desc, cfg: Dict[str, Any],
     # run the same check above; scalar slots previously skipped it.)
     if isinstance(current, str):
         observed = {
-            "provider": _provider_from_changes(
-                {c: _get_dotted(cfg, c) for c in desc.companion_paths
-                 if _get_dotted(cfg, c) is not _STORE_MISSING}),
+            "provider": (
+                "openrouter" if desc.storage_path == "auxiliary.openrouter_model"
+                else _provider_from_changes(
+                    {c: _get_dotted(cfg, c) for c in desc.companion_paths
+                     if _get_dotted(cfg, c) is not _STORE_MISSING})),
             "model": current,
         }
         _assert_removal_identity(desc, observed, from_payload)
