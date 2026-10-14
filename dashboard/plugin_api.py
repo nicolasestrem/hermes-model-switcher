@@ -48,6 +48,7 @@ import copy
 import json
 import os
 
+from contextlib import contextmanager
 import threading
 import time
 import uuid
@@ -60,8 +61,7 @@ from pydantic import BaseModel
 from hermes_adapter import HermesAdapter
 from hermes_adapter import discover_profiles
 from route_inventory import (RouteEdit, SlotFamily, build_inventory,
-                             pop_inventory_warnings, preview_changes,
-                             _JUDGE_TYPED_KEYS)
+                             preview_changes, _JUDGE_TYPED_KEYS)
 
 from model_switcher.adapters import adapter_for
 from model_switcher.adapters import _get_dotted
@@ -618,6 +618,30 @@ def _ui_family_for_slot(slot_raw: Any) -> str:
     return _INVENTORY_FAMILY_TO_UI.get(prefix, prefix)
 
 
+@contextmanager
+def _plugin_home_scope(home: Any):
+    """Scope plugin-registry / resolver lookups to a specific Hermes home for
+    the block, via Hermes' own context-local override (never ``os.environ``).
+
+    ``hermes_cli.plugins.get_plugin_manager`` keys its manager on the
+    context-local home (``_plugin_home_key`` -> ``get_hermes_home()``), so
+    plugin auxiliary-task discovery must run under the home of the profile being
+    inventoried — otherwise every profile's DTO would report the process-active
+    profile's plugin rows. No config is written and no ``os.environ`` is mutated.
+    """
+    try:
+        from hermes_constants import (set_hermes_home_override,
+                                      reset_hermes_home_override)
+    except Exception:
+        yield
+        return
+    token = set_hermes_home_override(str(home))
+    try:
+        yield
+    finally:
+        reset_hermes_home_override(token)
+
+
 def _profile_inventory() -> Dict[str, Dict[str, Any]]:
     """Per discovered profile: sanitized route inventory. Never returns raw
     config documents."""
@@ -630,7 +654,12 @@ def _profile_inventory() -> Dict[str, Dict[str, Any]]:
                               "error": "config unreadable", "slots": []}
             continue
         slots = []
-        for obs in build_inventory(cfg):
+        # Scope THIS profile's home so plugin-aux discovery keys on the right
+        # registry (Claude 2) and read the per-build warnings off the result
+        # (no process-global pending sink).
+        with _plugin_home_scope(getattr(ident, "path", None)):
+            result = build_inventory(cfg)
+        for obs in result:
             d = obs.descriptor
             # UI contract: the main route presents as slotId "main"; the raw
             # inventory slot is "main.default" (model) with provider as a
@@ -650,6 +679,17 @@ def _profile_inventory() -> Dict[str, Dict[str, Any]]:
                 # inventory's source names onto it exactly.
                 "state": _UI_STATE_NAMES.get(obs.source, obs.source),
                 "writable": _runtime_writable() and d.writable and not d.protected,
+                # Additive capability contract: a row may be SELECTABLE (an
+                # explicit assignment/backend switch is permitted) even when its
+                # CURRENT stored path is read-only — e.g. an unset TTS row that
+                # resolves to the model-less edge backend. The UI selects on
+                # ``selectable ?? writable``. ``requiresModelBackend`` marks such
+                # a row as only accepting a set with an explicit supported
+                # provider+model (never an unset/disable/chain/remove of the
+                # model-less current section).
+                "selectable": (_runtime_writable() and not d.protected
+                               and (d.writable if d.selectable is None else d.selectable)),
+                "requiresModelBackend": bool(getattr(d, "requires_model_backend", False)),
                 "storagePath": d.storage_path,
                 # No runtime usage evidence here: last-observed is genuinely
                 # UNOBSERVED (never a copy of the configured value).
@@ -678,11 +718,12 @@ def _profile_inventory() -> Dict[str, Dict[str, Any]]:
             slots.append(entry)
         profiles[name] = {"id": name, "name": name,
                           "writable": _runtime_writable(), "slots": slots}
-        warnings = pop_inventory_warnings()
+        warnings = list(getattr(result, "warnings", ()) or ())
         if warnings:
             # Truthful fail-closed discovery status: a failed runtime
             # discovery is REPORTED, never silently rendered as an empty
-            # selector set.
+            # selector set. These are THIS build's warnings — a failed build
+            # for another profile can never leak into this DTO.
             profiles[name]["inventoryWarnings"] = warnings
     return profiles
 
@@ -883,8 +924,9 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
         except Exception:
             blocked.append({"profileId": pid, "reason": "config unreadable"})
             continue
-        desc = next((o.descriptor for o in build_inventory(cfg)
-                     if o.descriptor.slot_id == slot_raw), None)
+        with _plugin_home_scope(ident.path):
+            desc = next((o.descriptor for o in build_inventory(cfg)
+                         if o.descriptor.slot_id == slot_raw), None)
         if desc is None:
             blocked.append({"profileId": pid,
                             "reason": f"unknown slot {c.get('slotId')!r}"})
@@ -923,7 +965,8 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
                 continue
         else:
             try:
-                cp = preview_changes(cfg, [RouteEdit(slot_raw, _typed_payload(to or {}))])
+                with _plugin_home_scope(ident.path):
+                    cp = preview_changes(cfg, [RouteEdit(slot_raw, _typed_payload(to or {}))])
             except HTTPException as exc:
                 blocked.append({"profileId": pid, "slotId": c.get("slotId"),
                                 "reason": _clean_detail(exc)})
@@ -1856,7 +1899,11 @@ def _unchanged_provider_hops(profile: str,
         return []
     try:
         cfg = _ADAPTER.load_raw_config(profile)
-        inventory = build_inventory(cfg)
+        ident = discover_profiles().get(profile)
+        if ident is None:
+            return []
+        with _plugin_home_scope(ident.path):
+            inventory = build_inventory(cfg)
     except Exception:
         return []
     out: List[str] = []

@@ -128,13 +128,20 @@ Speech routes bind the selected backend and its native model field together;
 MoA preset rows address their aggregator, preserving reference models and policy.
 
 Auxiliary tasks are derived from the installed Hermes defaults and registered
-plugin tasks. Vision is an auxiliary task, not a specialist speech backend.
+plugin tasks. Plugin task registration is resolved against **each profile's own
+Hermes home** (a context-local Hermes instance, not one machine-global
+registry), so two profiles can legitimately show different plugin task rows.
+Vision is an auxiliary task, not a specialist speech backend.
 Pinning its backend while `agent.image_input_mode` is `auto` makes the main agent
 receive a text interpretation even if its main model supports images. Explicit
 native/text image modes are unchanged. The separate OpenRouter fallback override
 affects auxiliary auto-routing across tasks; it is not a per-task route.
 Unset speech backends follow the runtime defaults (local STT / Edge TTS in the
-tested runtime). Backends without configurable model fields remain read-only.
+tested runtime). The current Edge TTS backend carries **no configurable model
+field**, so its model slot shows no editable key — but the row still supports an
+**explicit switch to a supported model-bearing backend**, which then binds that
+backend's native model field. "No model key today" is scoped to that model slot;
+it is not a claim that every writable field on the row is uneditable.
 
 Apply and Undo refresh configured state automatically; **Refresh state** reloads
 external edits. **Last observed** shows **No recorded usage** until actual runtime usage
@@ -167,9 +174,11 @@ problem: the tab must use the host SDK transport even if the bundle renders.
   the same target. The refusal names the profile; re-review the change. This is
   deliberate fail-closed behaviour, not a cached-state error.
 - **Unknown slots block completeness.** Auxiliary task discovery uses the
-  installed runtime defaults and registered task declarations. Other selectors
-  still require reviewed registry coverage or typed descriptors; arbitrary
-  model-looking config keys never gain write access merely by existing.
+  installed runtime defaults and registered task declarations, resolved against
+  the profile being inventoried (its own context-local Hermes home), not one
+  machine-global registry. Other selectors still require reviewed registry
+  coverage or typed descriptors; arbitrary model-looking config keys never gain
+  write access merely by existing.
 - **Protected by default:** identity, skills, memories, transcripts, auth
   stores, schedules/delivery, judge thresholds, compression thresholds and
   any slot not explicitly selected. Code constants (e.g. OMH shipped model
@@ -230,10 +239,10 @@ CI/CD or deployment workflow was added:
 
 - `npm run build` — shipped Dashboard JS/CSS regenerated successfully.
 - `env -u PYTHONPATH .venv/bin/python -m pytest -o addopts='' -q` —
-  **260 passed**. Includes runtime-derived auxiliary coverage, speech backend
+  **285 passed**. Includes runtime-derived auxiliary coverage, speech backend
   defaults, provider gates, package discovery and canonical save/undo tests.
 - `env -u PYTHONPATH HMS_PYTHON="$PWD/.venv/bin/python" npm run test -- --workers=1`
-  — **61 passed**. Includes bulk selection, hidden-selection counts, preview
+  — **65 passed**. Includes bulk selection, hidden-selection counts, preview
   invalidation, model ID preservation, operation-drawer focus/Escape, and the
   real FastAPI backend over isolated profiles with byte-exact guarded undo.
 - Compiled SDK/host-reset fixture captures at **1440, 768 and 375px**, in dark
@@ -243,7 +252,19 @@ CI/CD or deployment workflow was added:
   comprehensive WCAG audit or every possible custom host theme.
 - The browser harness checks Hermes' actual profile resolver before mounting
   the API and refuses a lab whose default profile resolves outside its declared
-  root. No discovery shim substitutes for the real resolver.
+  root. The `--seed` CLI is fail-closed too: it resolves the **requested
+  target** with that same resolver and refuses any target that is not its own
+  isolated root — anything nested under the native home, and the native home
+  itself — before the first write, instead of trusting the inherited
+  `HERMES_HOME`. `--print-profiles` is a pure data dump that constructs no
+  router and needs no lab home. No discovery shim substitutes for the real
+  resolver.
+- Seeding also refuses existing profile data in custom/external homes; an
+  external path being its own runtime root is not permission to overwrite it.
+- Discovery warnings belong to one inventory build, and plugin registry scope
+  is consistent across State, Preview, Apply and removal preparation. Default
+  model-less speech rows expose backend-assignment capability separately from
+  current-field writability.
 - Local pre-commit/pre-push privacy checks exclude real configs, auth data,
   recovery snapshots, journals and transcripts from publication.
 

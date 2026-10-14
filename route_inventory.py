@@ -27,6 +27,7 @@ read-only (``writable=False``), never as a fake editable route.
 """
 from __future__ import annotations
 
+import contextvars
 import copy
 import enum
 from dataclasses import dataclass, field, replace
@@ -83,10 +84,25 @@ class SlotDescriptor:
     inherit_when_null: bool = False         # a literal null means "inherit" (chain slots)
     inherit_when_empty: bool = False         # empty/None means "inherit" (delegation.model)
     runtime_consumed: bool = True            # path read by the runtime; False => read-only
+    # Additive capability contract (dashboard DTO):
+    #   selectable            — the row may issue an explicit assignment/backend
+    #                           switch even when the CURRENT stored path is
+    #                           read-only (e.g. an unset TTS row that resolves to
+    #                           the model-less ``edge`` backend). Independent of
+    #                           ``writable``, which stays False for the current
+    #                           no-model section. The UI uses
+    #                           ``selectable ?? writable`` for selection.
+    #   requires_model_backend — a switch is only valid when it names an explicit,
+    #                           supported provider+model; an unset/disable/chain/
+    #                           remove of the model-less current section is refused.
     notes: str = ""
     # Optional additive metadata (e.g. plugin-registered aux tasks: label/
     # description/plugin/inheritFrom). Empty for core slots.
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # None preserves legacy descriptors: selection follows current writability.
+    # Explicit True is reserved for assignments such as a speech backend switch.
+    selectable: Optional[bool] = None
+    requires_model_backend: bool = False
 
 
 @dataclass(frozen=True)
@@ -201,15 +217,34 @@ _BUILTIN_AUX_NOTES = {
 # Truthful record of runtime discovery that FAILED (not "empty"): consumers
 # must be able to distinguish "no plugin tasks registered" from "discovery
 # exploded and plugin rows silently vanished" (fail closed, never silent).
-_inventory_warnings: List[str] = []
+#
+# Warnings are PER-BUILD, not a process-global pending sink: the collector is a
+# contextvar set for the duration of one ``build_inventory`` call, so a warning
+# raised while inventorying profile A can never contaminate the next build (or
+# a concurrent build in another thread/task for profile B). Consumers read the
+# returned ``InventoryResult.warnings``.
+_BUILD_WARNINGS: "contextvars.ContextVar[Optional[List[str]]]" = contextvars.ContextVar(
+    "route_inventory_build_warnings", default=None)
 
 
-def pop_inventory_warnings() -> List[str]:
-    """Warnings recorded during inventory construction (failed discovery).
-    Consumed by the public DTO so a failed discovery is reported truthfully."""
-    out = list(_inventory_warnings)
-    _inventory_warnings.clear()
-    return out
+def _record_inventory_warning(message: str) -> None:
+    """Append a warning to the ACTIVE build's collector (no-op outside a build).
+
+    Deduplicated within one build so a repeated failure path cannot spam the
+    same warning; callers pass sanitized text (never a raw exception string)."""
+    collector = _BUILD_WARNINGS.get()
+    if collector is not None and message not in collector:
+        collector.append(message)
+
+
+class InventoryResult(list):
+    """List-compatible inventory result (existing ``for x in build_inventory``
+    callers, ``len``, ``next`` and set-comprehensions all keep working) that also
+    carries the per-build ``warnings`` recorded while it was constructed."""
+
+    def __init__(self, observations: Iterable[SlotObservation], warnings: List[str]):
+        super().__init__(observations)
+        self.warnings: List[str] = list(warnings)
 
 
 def _installed_aux_defaults() -> Dict[str, Any]:
@@ -218,9 +253,10 @@ def _installed_aux_defaults() -> Dict[str, Any]:
     try:
         from hermes_cli.config_defaults import DEFAULT_CONFIG as _installed
         aux = _installed.get("auxiliary", {})
-    except Exception as exc:
-        _inventory_warnings.append(
-            "installed auxiliary task defaults unavailable: %s" % exc)
+    except Exception:
+        _record_inventory_warning(
+            "installed auxiliary task defaults unavailable; built-in auxiliary "
+            "slots are hidden until the runtime defaults import succeeds")
         return {}
     return aux if isinstance(aux, dict) else {}
 
@@ -263,31 +299,55 @@ def _layer_route_over_inherited(inherited: Dict[str, Any],
     try:
         from agent.auxiliary_task_config import _layer_over_inherited as resolved
     except Exception:
+        _record_inventory_warning(
+            "agent.auxiliary_task_config is unavailable; auxiliary "
+            "inheritance layering uses the exact-shape local mirror")
         resolved = _mirror_layer_route_over_inherited
     try:
         return resolved(inherited, user)
     except Exception:
+        _record_inventory_warning(
+            "runtime auxiliary inheritance layering failed; the exact-shape "
+            "local mirror was used for this task")
         return _mirror_layer_route_over_inherited(inherited, user)
 
 
 def _aux_effective_route(cfg: Dict[str, Any], task_key: str,
-                         entries_by_key: Mapping[str, Dict[str, Any]]) -> Dict[str, Any]:
+                         entries_by_key: Mapping[str, Dict[str, Any]],
+                         _visited: Optional[frozenset] = None) -> Dict[str, Any]:
     """Read-time effective route of auxiliary.<task_key>, mirroring
     agent/auxiliary_task_config.py:_get_auxiliary_task_config over the raw cfg
     document: defaults (installed or plugin-declared) layered under the user
     block; a registered ``inherit_from`` resolves over the base task's
-    effective route. Returns defaults + user block for built-ins."""
+    effective route. Returns defaults + user block for built-ins.
+
+    A ``inherit_from`` CYCLE (A -> B -> A) is broken fail-closed: the row falls
+    back to its own defaults with a per-build warning, never an infinite
+    recursion / RecursionError."""
+    visited = _visited or frozenset()
     aux = cfg.get("auxiliary") if isinstance(cfg, dict) else None
     aux = aux if isinstance(aux, dict) else {}
     raw = aux.get(task_key)
     user_block = dict(raw) if isinstance(raw, dict) else {}
     entry = entries_by_key.get(task_key)
+    if task_key in visited:
+        _record_inventory_warning(
+            f"plugin auxiliary task {task_key!r} participates in a circular "
+            "inherit_from chain; its effective route stops inheriting here")
+        if entry is not None and isinstance(entry, dict):
+            rd = entry.get("defaults")
+            own = copy.deepcopy(rd) if isinstance(rd, dict) else {}
+        else:
+            own = {}
+        return _layer_route_over_inherited({**_aux_placeholder_route(), **own},
+                                           copy.deepcopy(user_block))
     if entry is not None and isinstance(entry, dict):
         raw_defaults = entry.get("defaults")
         own_defaults = copy.deepcopy(raw_defaults) if isinstance(raw_defaults, dict) else {}
         inherit = entry.get("inherit_from")
         if inherit and isinstance(inherit, str) and inherit != task_key:
-            base = _aux_effective_route(cfg, inherit, entries_by_key)
+            base = _aux_effective_route(cfg, inherit, entries_by_key,
+                                        visited | {task_key})
             merged = {**base, **own_defaults}
         else:
             merged = {**_aux_placeholder_route(), **own_defaults}
@@ -298,16 +358,21 @@ def _aux_effective_route(cfg: Dict[str, Any], task_key: str,
 
 
 def _plugin_aux_entries_from_runtime() -> Dict[str, Dict[str, Any]]:
-    """Plugin-registered auxiliary task entries for the active Hermes home
-    (hermes_cli.plugins.get_plugin_auxiliary_tasks). Fail-closed on unreadable
-    state: the failure is RECORDED (pop_inventory_warnings); the DTO reports
-    it rather than rendering a false "no plugins registered"."""
+    """Plugin-registered auxiliary task entries for the Hermes home active in
+    the current context (hermes_cli.plugins.get_plugin_auxiliary_tasks, whose
+    manager keys on the context-local home). Callers that inventory a specific
+    profile MUST scope that profile's home so profile B's rows come from B's
+    plugins, never the process-active profile's. Fail-closed on unreadable
+    state: the failure is RECORDED as a per-build warning (sanitized — no raw
+    exception text); the DTO reports it rather than rendering a false
+    'no plugins registered'."""
     try:
         from hermes_cli.plugins import get_plugin_auxiliary_tasks
         entries = list(get_plugin_auxiliary_tasks())
-    except Exception as exc:
-        _inventory_warnings.append(
-            "plugin auxiliary task discovery failed: %s" % exc)
+    except Exception:
+        _record_inventory_warning(
+            "plugin auxiliary task discovery failed; plugin-registered "
+            "auxiliary rows are hidden until discovery succeeds")
         return {}
     return {e.get("key"): dict(e) for e in entries
             if isinstance(e, dict) and isinstance(e.get("key"), str) and e.get("key")
@@ -398,10 +463,12 @@ def _speech_default_backend(cfg: Dict[str, Any], section: str) -> str:
     return str(resolved or fallback)
 
 
-# Truthful no-model-backend notes: these voice backends carry NO model key at
-# all, so their inventory row is read-only with the backend SECTION as the
-# storage path — never an invented model key the runtime would ignore.
-_SPEECH_UNSUPPORTED_NOTES = {
+# Truthful no-model-backend notes (NOT "unsupported"): these voice backends
+# carry NO model key at all, so the CURRENT section is presented read-only with
+# the backend SECTION as the storage path — never an invented model key the
+# runtime would ignore. The row stays SELECTABLE so an explicit supported
+# provider+model can switch it to a model-bearing backend.
+_SPEECH_NO_MODEL_NOTES = {
     "stt": {
         "local": ("unset stt.provider = autodetect, local-first "
                   "(tools/transcription_tools._get_provider) — stt.local.model "
@@ -410,12 +477,16 @@ _SPEECH_UNSUPPORTED_NOTES = {
     "tts": {
         "edge": ("unset/default TTS backend is 'edge' (tts_tool.DEFAULT_PROVIDER / "
                  "config_defaults tts.provider) — free Edge voices carry no model "
-                 "config key: read-only, no invented tts.edge.model store key"),
-        "xai": ("x.ai TTS voices are voice_id-only (no model config key) — "
-                "read-only, no invented tts.xai.model store key"),
+                 "config key: the current section is read-only, no invented "
+                 "tts.edge.model store key; the row is still selectable to switch "
+                 "to a model-bearing backend"),
+        "xai": ("x.ai TTS voices are voice_id-only (no model config key) — current "
+                "tts.xai section read-only, no invented tts.xai.model store key; "
+                "still selectable to switch to a model-bearing backend"),
         "piper": ("Piper selects voice files, not model ids (voices_dir) — no "
-                  "model config key: read-only, no invented tts.piper.model "
-                  "store key"),
+                  "model config key: current tts.piper section read-only, no "
+                  "invented tts.piper.model store key; still selectable to switch "
+                  "to a model-bearing backend"),
     },
 }
 
@@ -425,17 +496,20 @@ def _speech_descriptor(cfg: Dict[str, Any], slot_id: str, provider: Optional[str
     backend = str(provider or _speech_default_backend(cfg, section)).strip()
     field_kind = _SPEECH_BACKENDS.get(section, {}).get(backend)
     if field_kind is not None:
-        notes = _SPEECH_UNSUPPORTED_NOTES.get(section, {}).get(backend) or (
+        notes = _SPEECH_NO_MODEL_NOTES.get(section, {}).get(backend) or (
             "Backend-specific speech model; voice and language settings are preserved")
         return SlotDescriptor(slot_id, SlotFamily.SPECIALIST, PROTOCOL_SPEECH,
             f"{section}.{backend}.{field_kind}", companion_paths=(f"{section}.provider",),
-            writable=True, runtime_consumed=True, notes=notes)
-    # No model config key for this backend: an explicitly read-only row without
-    # an invented storage key, named truthfully (e.g. edge / xai / piper TTS).
+            writable=True, runtime_consumed=True, selectable=True,
+            requires_model_backend=False, notes=notes)
+    # No model config key for this backend: the CURRENT section is read-only with
+    # an honest backend path (no invented key), but the row stays SELECTABLE so
+    # an explicit supported provider+model can switch to a model-bearing backend.
     return SlotDescriptor(slot_id, SlotFamily.SPECIALIST, PROTOCOL_SPEECH,
         f"{section}.{backend}", companion_paths=(f"{section}.provider",),
-        writable=False, runtime_consumed=False,
-        notes=_SPEECH_UNSUPPORTED_NOTES.get(section, {}).get(backend) or
+        writable=False, runtime_consumed=False, selectable=True,
+        requires_model_backend=True,
+        notes=_SPEECH_NO_MODEL_NOTES.get(section, {}).get(backend) or
         f"backend {backend!r} declares no model config key — read-only, no "
         f"invented {section}.{backend}.model store key")
 
@@ -448,9 +522,9 @@ _UNSUPPORTED_SPECIALIST_SLOTS = (
 )
 
 
-def build_inventory(cfg: Dict[str, Any],
-                    plugin_aux_entries: Optional[Iterable[Dict[str, Any]]] = None
-                    ) -> List[SlotObservation]:
+def _build_inventory_impl(cfg: Dict[str, Any],
+                          plugin_aux_entries: Optional[Iterable[Dict[str, Any]]] = None
+                          ) -> List[SlotObservation]:
     """Typed inventory of every supported slot family, including unset slots.
 
     ``plugin_aux_entries`` overrides plugin auxiliary-task discovery; None
@@ -582,9 +656,31 @@ def build_inventory(cfg: Dict[str, Any],
     for slot_id, path, protocol, note in _UNSUPPORTED_SPECIALIST_SLOTS:
         add(_obs(cfg, SlotDescriptor(
             slot_id, SlotFamily.SPECIALIST, protocol, path,
-            writable=False, runtime_consumed=False, notes=note)))
+            writable=False, runtime_consumed=False, selectable=False, notes=note)))
 
     return out
+
+
+def build_inventory(cfg: Dict[str, Any],
+                    plugin_aux_entries: Optional[Iterable[Dict[str, Any]]] = None
+                    ) -> InventoryResult:
+    """Typed inventory of every supported slot family, including unset slots.
+
+    ``plugin_aux_entries`` overrides plugin auxiliary-task discovery; None
+    discovers through hermes_cli.plugins.get_plugin_auxiliary_tasks() for the
+    Hermes home active in the current context (scope the home to inventory a
+    specific profile).
+
+    Returns an ``InventoryResult`` — a ``list`` subclass, so existing
+    ``build_inventory`` callers are unchanged — whose ``warnings`` carry the
+    per-build discovery warnings (never a process-global pending sink).
+    """
+    warnings: List[str] = []
+    token = _BUILD_WARNINGS.set(warnings)
+    try:
+        return InventoryResult(_build_inventory_impl(cfg, plugin_aux_entries), warnings)
+    finally:
+        _BUILD_WARNINGS.reset(token)
 
 
 def _obs(cfg: Dict[str, Any], desc: SlotDescriptor) -> SlotObservation:

@@ -45,6 +45,9 @@ Distinct, individually labelled actions — no silent equivalences:
   built-in tasks come from the installed Hermes auxiliary defaults and
   additional tasks come from plugins registered through the plugin auxiliary
   API.
+- Plugin task registration is resolved against **the profile being inventoried**
+  — its own context-local Hermes home, not one machine-global registry — so two
+  profiles can legitimately show different plugin task rows.
 - A **failed discovery is reported, not hidden**: an unconsumable discovery
   surfaces as an inventory warning on the profile so a broken scan can never be
   mistaken for an empty selector set (fail-closed).
@@ -82,8 +85,12 @@ still applies.
   TTS in the tested runtime); the selector does not invent an explicit backend.
 - Speech edits bind the selected backend and its **native model field** together
   and write the matching provider companion.
-- Backends that have **no configurable model field remain read-only** (their
-  reason is shown on the row) — no invented keys are written.
+- A backend that carries **no configurable model field** (the current **Edge
+  TTS** default) exposes **no editable model key**; the row states that reason
+  instead of inventing a key. The row still supports an **explicit switch to a
+  supported model-bearing backend**, which then binds that backend's **native
+  model field**. This is scoped to the model slot — it is **not** a claim that
+  every writable field on the row is uneditable.
 
 ## Responsive rail / layout and drawer keyboard
 
@@ -128,16 +135,16 @@ than it is:
   files; fake credentials only, no inference calls, and every plugin-API
   response asserted free of keys, host paths, snapshots and payloads.
 - **Not verified here**: an authenticated live Hermes Dashboard was **not**
-  exercised, and there is **no deployment or merge**. Hosted-isolation mode
-  remains read-only.
+  exercised, and fixture checks do not establish deployment or merge status.
+  Hosted-isolation mode remains read-only.
 
 Local verification for this change completed with exit code 0:
 
 - `npm run build`
 - `env -u PYTHONPATH HMS_PYTHON="$PWD/.venv/bin/python" npm run test -- --workers=1` →
-  `61 passed`
+  `65 passed`
 - `env -u PYTHONPATH .venv/bin/python -m pytest -o addopts='' -q` →
-  `260 passed, 5 warnings`
+  `285 passed, 5 warnings`
 
 ## Tests
 
@@ -158,4 +165,16 @@ Local verification for this change completed with exit code 0:
 - `tests/test_review_batch_regressions.py` — vision auto-mode note, OpenRouter
   scalar credential reference/gating, discovery-failure warnings.
 - `tests/test_browser_harness_isolation.py` — the real browser harness refuses
-  discovery outside its declared lab.
+  discovery outside its declared lab; the `--seed` CLI refuses a target nested
+  under (or equal to) the native home **before any write** and seeds only a
+  provably isolated root without overwriting existing custom-home profile data;
+  `--print-profiles` constructs no router and writes nothing.
+- `tests/test_pr9_backend_reviews.py` — speech assignment capabilities, scoped
+  warnings, concurrent inventory isolation, sanitized fallback warnings,
+  profile-specific task registries and inheritance cycles.
+- `tests/test_pr9_profile_route_scope.py` — profile task scope agrees across
+  State, Preview, Apply and exact removal, with real isolated save/undo; legacy
+  read-only descriptors cannot acquire assignment capability accidentally.
+- `tests/tts-assignment.spec.mjs` — Edge TTS selection, explicit backend/model
+  intent, refusal of imaginary-field resets, and rendered desktop/mobile switch
+  guidance.

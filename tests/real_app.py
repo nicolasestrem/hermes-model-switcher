@@ -8,8 +8,15 @@ file saves and real journal writes.
 
 Run with uvicorn:  HERMES_HOME=<lab> python -m uvicorn real_app:app --port 8932
 Seed a lab home:   python real_app.py --seed /tmp/some-dir
+Print seed data:   python real_app.py --print-profiles
 No inference is ever called: /probe is blocked by design and no provider
 network client is constructed.
+
+The seed CLI is fail-closed: ``--seed`` refuses any target that the real Hermes
+runtime resolver does not treat as its own root (a target nested under the
+native ``~/.hermes`` resolves back to the live home), and refuses the native
+home itself — checked BEFORE the first write. ``--print-profiles`` is a pure
+data dump that never imports the router or needs a lab home.
 """
 from __future__ import annotations
 
@@ -43,8 +50,13 @@ PROFILES = {
 # 'sk-' prefix so leak assertions can look for real key shapes safely).
 FAKE_CREDENTIAL = "LAB-LOCAL-FAKE-CREDENTIAL-0000000001"
 
+# Stable refusal message for a seed target outside an isolated Hermes root.
+# Tests assert on it; do not change it without updating them.
+SEED_ISOLATION_MESSAGE = "seed target is not an isolated Hermes home"
+
 
 def seed_home(home: Path) -> Path:
+    home = assert_seed_target_isolated(home)
     home.mkdir(parents=True, exist_ok=True)
     (home / "config.yaml").write_text(PROFILES["default"])
     # the "default" profile's credential marker lives at the home root
@@ -91,11 +103,76 @@ def seed_home(home: Path) -> Path:
     return home
 
 
+def assert_seed_target_isolated(target: Path) -> Path:
+    """Fail closed unless *target* is provably its own Hermes root.
+
+    Evaluated with the REAL runtime resolver against the REQUESTED target, never
+    against the inherited ``HERMES_HOME``: on a live host that env var points at
+    the live profile, so trusting it would let ``--seed <native-home>/sub``
+    write into the live tree. ``get_default_hermes_root`` resolves any home
+    nested under the native ``~/.hermes`` back to that native root, so a target
+    "under" ~/.hermes is not isolated; the native root itself is the live store
+    and is refused outright. No caller writes anything until this returns.
+    """
+    from hermes_constants import get_default_hermes_root
+    resolved = Path(target).expanduser().resolve(strict=False)
+    native = get_default_hermes_root(home="").resolve(strict=False)
+    root = get_default_hermes_root(home=str(resolved)).resolve(strict=False)
+    if root != resolved:
+        raise RuntimeError(
+            f"{SEED_ISOLATION_MESSAGE}: {resolved} resolves to {root}")
+    if resolved == native or native.is_relative_to(resolved):
+        raise RuntimeError(
+            f"{SEED_ISOLATION_MESSAGE}: {resolved} is the native Hermes home")
+    # External/custom runtime roots can be live too. Never overwrite existing
+    # profile data just because the resolver treats the target as its own root.
+    for name in ("config.yaml", ".env", "profiles", "state"):
+        candidate = resolved / name
+        if candidate.exists() or candidate.is_symlink():
+            raise RuntimeError(
+                f"{SEED_ISOLATION_MESSAGE}: target contains existing profile data")
+    return resolved
+
+
 def create_lab_home() -> Path:
-    home = Path(tempfile.mkdtemp(prefix="msw-e2e-", dir="/tmp"))
+    home = assert_seed_target_isolated(
+        Path(tempfile.mkdtemp(prefix="msw-e2e-", dir="/tmp")))
     seed_home(home)
     return home
 
+
+# -- CLI (runs BEFORE any router import; see the ``__main__`` guard below) ---
+def _cli() -> None:
+    """Seed a lab home, or dump the synthetic PROFILES, then exit.
+
+    Defined and dispatched before the FastAPI/plugin_api import so that
+    ``--print-profiles`` is a pure data dump (no router construction, no lab
+    home required) and ``--seed`` clears the isolation boundary before its
+    first write.
+    """
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--seed", help="seed a lab home at this path (or 'auto')")
+    ap.add_argument("--home-file", default=str(REPO / "tests" / "real-home.json"))
+    ap.add_argument("--print-profiles", action="store_true",
+                    help="print the seed documents as JSON and exit")
+    args = ap.parse_args()
+    if args.print_profiles:
+        print(json.dumps(PROFILES))
+        raise SystemExit(0)
+    if args.seed:
+        if args.seed == "auto":
+            home = create_lab_home()
+        else:
+            home = seed_home(assert_seed_target_isolated(Path(args.seed)))
+        Path(args.home_file).write_text(json.dumps({"home": str(home)}))
+        print(home)
+        raise SystemExit(0)
+    ap.print_usage(sys.stderr)
+    raise SystemExit(2)
+
+
+if __name__ == "__main__":
+    _cli()
 
 # -- app (module-level; uvicorn imports it with HERMES_HOME in the env) ------
 # Check the real runtime resolver before importing/mounting the API. A lab
@@ -158,19 +235,3 @@ async def _bundle():
 @app.get("/dashboard/dist/style.css")
 async def _stylesheet():
     return _repo_file("dashboard/dist/style.css")
-
-
-if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--seed", help="seed a lab home at this path (or 'auto')")
-    ap.add_argument("--home-file", default=str(REPO / "tests" / "real-home.json"))
-    ap.add_argument("--print-profiles", action="store_true",
-                    help="print the seed documents as JSON and exit")
-    args = ap.parse_args()
-    if args.print_profiles:
-        print(json.dumps(PROFILES))
-        raise SystemExit(0)
-    if args.seed:
-        home = create_lab_home() if args.seed == "auto" else seed_home(Path(args.seed))
-        Path(args.home_file).write_text(json.dumps({"home": str(home)}))
-        print(home)
