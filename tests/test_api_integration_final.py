@@ -43,6 +43,16 @@ providers:
     base_url: http://127.0.0.1:8080/v1
 """
 
+# A hermetic, no-network synthetic credential for a hosted provider. Declared
+# explicitly in the lab config so per-provider cost classification exercises the
+# REAL credential-resolution path — never ambient host auth (absent on clean CI,
+# where 'anthropic' would otherwise correctly classify as "unknown") and never a
+# monkeypatched auth success. The value is an obvious fake that can never reach
+# a network.
+SYNTHETIC_HOSTED_CREDENTIAL = "synthetic-lab-no-network"
+LAB_CFG_WITH_HOSTED_CREDENTIAL = BASE_CONFIG + (
+    f"  anthropic:\n    api_key: {SYNTHETIC_HOSTED_CREDENTIAL}\n")
+
 
 def _client():
     app = FastAPI()
@@ -293,7 +303,9 @@ def test_route_cost_never_infers_subscription_from_slug(hermes_home):
 
 
 def test_chain_cost_classified_per_hop_not_all_fallback_providers(hermes_home):
-    _m(hermes_home, "default")            # has .env (lab-only marker)
+    # "default" declares a synthetic hosted credential for anthropic so the
+    # explicable-hop chain classifies as metered WITHOUT ambient host auth.
+    _m(hermes_home, "default", config=LAB_CFG_WITH_HOSTED_CREDENTIAL)
     _m(hermes_home, "bare", env=False, config="model:\n  provider: openai\n"
                                             "  default: gpt-4o-mini\n")
     ident_env = plugin_api.discover_profiles()["default"]
