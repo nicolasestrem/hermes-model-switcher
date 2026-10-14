@@ -71,6 +71,12 @@ function taskLabel(slot) {
   return labels[key] || key.replaceAll("_", " ").replace(/^./, c => c.toUpperCase());
 }
 
+function canSelectSlot(slot) {
+  // Assignment capability is separate from a currently writable model field:
+  // Edge TTS can switch backends without inventing tts.edge.model.
+  return Boolean(slot.selectable ?? slot.writable);
+}
+
 function scopeSummary(preset) {
   return `${preset.profileIds.length} profile${preset.profileIds.length === 1 ? "" : "s"} · ` +
     preset.families.map((f) => (FAMILIES.find((x) => x.id === f) || { label: f }).label).join(", ");
@@ -244,7 +250,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
   const setFilter = (patch) => setFilters({ ...filters, ...patch });
 
   const rowKey = (s) => s.profileId + "/" + s.slotId;
-  const writableInView = filtered.filter((s) => s.writable);
+  const writableInView = filtered.filter(canSelectSlot);
   const selectedInView = writableInView.filter((s) => selection.has(rowKey(s)));
   const masterChecked = writableInView.length > 0 && selectedInView.length === writableInView.length;
   const masterIndeterminate = !masterChecked && selectedInView.length > 0;
@@ -303,7 +309,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
         </select></label>
         <button type="button" onClick={() => setFilter({ profileIds: [], family: "all", subfamily: "all", provider: "", model: "", state: "all" })}>Reset filters</button>
       </div>
-      <p style={{ color: THEME.muted, fontSize: "0.85em", margin: "4px 0" }}>{filtered.length} matching slots · {filtered.filter(s => !s.writable).length} read-only. Scroll horizontally to inspect routes on narrow screens.</p>
+      <p style={{ color: THEME.muted, fontSize: "0.85em", margin: "4px 0" }}>{filtered.length} matching slots · {filtered.filter(s => !canSelectSlot(s)).length} read-only. Scroll horizontally to inspect routes on narrow screens.</p>
       <div data-testid="matrix-scroll" role="region" aria-label="Scrollable model slots" tabIndex={0} style={{ maxHeight: "70vh", overflow: "auto" }}>
       <table style={{ borderCollapse: "collapse", width: "100%" }}>
         {/* Screen-reader-only caption. The hidden styles are INLINE: the host
@@ -347,13 +353,16 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
                       type="checkbox"
                       aria-label={`Select ${s.profileId} ${s.slotId}`}
                       checked={checked}
-                      disabled={!s.writable}
+                      disabled={!canSelectSlot(s)}
                       onChange={() => onToggle(key, s)}
                     />
                   </td>
                   <td data-column="profile" data-profile-id={s.profileId} style={{ position: "sticky", left: 40, background: stickyBg, zIndex: 1 }}>
                     {profiles.find((p) => p.id === s.profileId)?.name || s.profileId}
-                    {!s.writable && (
+                    {s.requiresModelBackend && (
+                      <span className="hms-note" data-testid="backend-switch-note"> Current backend has no model field; choose a model-bearing backend to switch.</span>
+                    )}
+                    {!canSelectSlot(s) && (
                       <span className="hms-note" data-testid="readonly-reason">
                         {" "}{s.note ? s.note : "Profile is read-only — routing can not be changed on this profile."}
                       </span>
@@ -439,7 +448,7 @@ function ChangeEditor({
   const set = (patch) => setEditor({ ...editor, ...patch });
   const chainEntries = parseChain(editor.chainText);
   const chainBad = editor.changeType === "chain" && chainInvalid(chainEntries);
-  const writableSelected = selectedSlots.filter((s) => s.writable);
+  const writableSelected = selectedSlots.filter(canSelectSlot);
   // Applicability is stated in words: a change type that cannot reach every
   // selected target names the excluded ones instead of silently dropping them
   // from the review.
@@ -449,9 +458,14 @@ function ChangeEditor({
   const scalarOnly = writableSelected.length > 0 && scalarSelected.length === writableSelected.length;
   const mixedScalar = editor.changeType === "set" && scalarSelected.length > 0 && !scalarOnly && editor.provider.trim() !== "openrouter";
   const incompatibleChain = ["chain", "disable"].includes(editor.changeType) && disableExcluded > 0;
+  const assignmentOnly = writableSelected.filter(s => s.requiresModelBackend);
+  const assignmentMismatch = assignmentOnly.length > 0 && editor.changeType !== "set";
   const applicability = (() => {
     if (!writableSelected.length) {
       return "No writable slot selected — select rows in the matrix to build a change.";
+    }
+    if (assignmentOnly.length > 0) {
+      return `${assignmentOnly.length} selected speech slot(s) have no current model field. Choose a model and an explicit model-bearing backend to switch; resetting, removing or disabling an imaginary model field is not supported.`;
     }
     if (editor.changeType === "set") {
       if (scalarOnly) return "OpenRouter auxiliary fallback — enter the exact model ID only. OpenRouter is implicit; this setting affects the auxiliary auto-chain across tasks.";
@@ -593,7 +607,7 @@ function ChangeEditor({
           I acknowledge unknown-cost routes are never treated as free
         </label>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <button className="hms-preview" disabled={!writableSelected.length || busy || chainBad || incompatibleChain || mixedScalar || !buildCustomChanges(editor, selectedSlots).length}
+          <button className="hms-preview" disabled={!writableSelected.length || busy || chainBad || incompatibleChain || mixedScalar || assignmentMismatch || !buildCustomChanges(editor, selectedSlots).length}
             onClick={() => onPreview()}>
             Preview changes
           </button>
@@ -606,7 +620,7 @@ function ChangeEditor({
           <span style={{ color: THEME.muted, alignSelf: "center" }}>
             {busy ? "Request in progress…" : preview
               ? previewInvalid ? "Preview stale — re-run preview" : `${preview.changes.length} change(s) reviewed`
-              : !hasSelection ? "Select writable targets first" : incompatibleChain || mixedScalar ? "Resolve the selection mismatch first" : "Preview required"}
+              : !hasSelection ? "Select writable targets first" : incompatibleChain || mixedScalar || assignmentMismatch ? "Resolve the selection mismatch first" : "Preview required"}
           </span>
           {preview && !editor.ackUnknownCost && <span className="hms-note">Acknowledge the cost policy before applying.</span>}
         </div>
@@ -766,7 +780,7 @@ function mkChange(slot, to, action) {
 // Typed `to` payload: {provider,model} | {chain:[{provider,model}]} | null
 // (inherit) | [] (disabled). A malformed chain yields NO changes.
 export function buildCustomChanges(editor, selectedSlots) {
-  const writable = selectedSlots.filter((s) => s.writable);
+  const writable = selectedSlots.filter(canSelectSlot);
   const removal = editor.removeExact.trim();
   const removalTargets = selectedSlots.filter((s) =>
     s.writable && normalizeState(s.state) === "configured" &&
@@ -778,6 +792,7 @@ export function buildCustomChanges(editor, selectedSlots) {
   const removalKeys = new Set(removalTargets.map((s) => s.profileId + "/" + s.slotId));
   const settable = writable.filter((s) => !removalKeys.has(s.profileId + "/" + s.slotId));
   const type = editor.changeType;
+  if (type !== "set" && settable.some(s => s.requiresModelBackend)) return [];
   if (["chain", "disable"].includes(type) && settable.some(s => !isChainSlot(s))) return [];
   let setPart = [];
   if (type === "chain") {
@@ -820,7 +835,7 @@ export function buildPresetChanges(preset, slots) {
   for (const s of slots) {
     if (!profIds.includes(s.profileId) || !families.includes(s.family)) continue;
     const target = preset.assignments && preset.assignments[s.family];
-    if (!target || !s.writable) continue;
+    if (!target || !canSelectSlot(s)) continue;
     out.push(mkChange(s, { provider: target.provider, model: target.model }));
   }
   return out;
