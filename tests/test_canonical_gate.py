@@ -139,7 +139,11 @@ def test_public_dto_exposes_only_allowlisted_fields(client):
          "to": {"provider": NEW_PROVIDER, "model": NEW_MODEL}}]})
     assert r.status_code == 200, r.text
     op = r.json()["operation"]
-    assert set(op) <= {"id", "state", "results", "undoable"}
+    # The public DTO allowlist (catalog-promotion plan): the operation surface
+    # plus the outcome-derived final_state and a fixed failure category — never
+    # a raw exception message, snapshot, path or config document.
+    assert set(op) <= {"id", "state", "results", "undoable",
+                       "final_state", "failure"}
     for res in op["results"]:
         assert set(res) == {"profileId", "status", "store", "revisionBefore", "revisionAfter"}
     blob = json.dumps(r.json())

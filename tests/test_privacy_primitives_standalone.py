@@ -48,6 +48,16 @@ class PrimitiveTests(unittest.TestCase):
         for value in ('https://user:private@[invalid?token=private', 'https://user:private@example.invalid:bad', 'user:private@host?token=private'):
             self.assertNotIn('private', sanitize(value))
 
+    def test_malformed_port_is_unparseable_never_raw_passthrough(self):
+        # A bad or out-of-range port (parts.port raises ValueError) must map to
+        # the fixed sentinel, never a raw echo of the original input.
+        for value in ('https://user:private@example.invalid:bad',
+                      'https://host.example:99999/v1',
+                      'https://user:private@[invalid?token=private'):
+            out = sanitize(value)
+            self.assertEqual(out, '<unparseable URL>')
+            self.assertNotEqual(out, value)
+
     def test_permissions_failure_prevents_sqlite_open(self):
         with tempfile.TemporaryDirectory() as folder:
             with patch.object(journal.os, 'chmod', side_effect=PermissionError), patch.object(journal.sqlite3, 'connect') as connect:

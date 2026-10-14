@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolvePython } from "./real-server.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // Seeded by tests/real-server.mjs before the run; removed at teardown.
@@ -22,7 +23,7 @@ const cfg = (p) => readFileSync(profiles[p], "utf8");
 // from hardcoded copies that drift from the fixture (e.g. omit delegation
 // rows), and the pre-apply bytes are captured on disk before any apply.
 const seedProfiles = JSON.parse(execFileSync(
-  process.env.HMS_PYTHON || "python",
+  resolvePython(),
   [join(HERE, "real_app.py"), "--print-profiles"],
   { cwd: join(HERE, ".."), encoding: "utf8" }));
 
@@ -54,12 +55,33 @@ test("real router: preset select → preview → apply writes configs on disk �
   await expect(panel).toBeVisible();
   await expect(panel).toContainText("zhipu/glm-5.3-flash");
   await expect(page.getByTestId("apply-preset")).toBeEnabled();
+  // Capture the REAL POST /operations DTO the drawer renders from — assert the
+  // actual status contract rather than trusting the mock's shape.
+  const opsResponse = page.waitForResponse(
+    (r) => r.url().endsWith("/api/plugins/hermes-model-switcher/operations")
+      && r.request().method() === "POST");
   await page.getByTestId("apply-preset").click();
+  const opEnvelope = await (await opsResponse).json();
+  const opBody = opEnvelope.operation;
 
   const drawer = page.getByTestId("operation-drawer");
   await expect(drawer).toBeVisible();
   await expect(page.getByTestId("result-default")).toContainText("Applied + read back");
   await expect(page.getByTestId("result-research")).toContainText("Applied + read back");
+
+  // The drawer's counts and per-profile labels come from ``results[].status`` and
+  // the overall outcome from ``operation.state``. A real response carries NO
+  // per-step ``readback`` (nor raw error text) — the UI must render without them.
+  await expect(page.getByTestId("operation-summary")).toContainText("2 profiles applied · 0 need attention");
+  expect(opEnvelope.ok).toBe(true); // top-level ok: true iff committed/undone
+  expect(opBody.state).toBe("committed");
+  expect(opBody.final_state).toBe("committed");
+  expect(opBody.failure).toBeNull();
+  expect(Array.isArray(opBody.results)).toBe(true);
+  expect(opBody.results.length).toBeGreaterThan(0);
+  expect(opBody.results.every((r) => r.status === "applied")).toBe(true);
+  expect(opBody.results.every((r) => !("readback" in r))).toBe(true);
+  expect(opBody.results.every((r) => !("error" in r))).toBe(true);
 
   // REAL file saves: the configs on disk changed
   expect(cfg("default")).toContain("provider: zhipu");
@@ -70,10 +92,21 @@ test("real router: preset select → preview → apply writes configs on disk �
   const drawerText = await drawer.textContent();
   for (const m of LEAK_MARKERS) expect(drawerText, m).not.toContain(m);
 
-  // guarded undo → real restore on disk
+  // guarded undo → real restore on disk. The drawer's "Restored (undo verified)"
+  // label is driven by the undo DTO's per-step status ("compensated"), captured
+  // from the real response.
   await page.getByTestId("undo-guard").check();
+  const undoResponse = page.waitForResponse(
+    (r) => r.url().endsWith("/operations/" + opBody.id + "/undo")
+      && r.request().method() === "POST");
   await page.getByTestId("undo-button").click();
+  const undoEnvelope = await (await undoResponse).json();
+  const undoBody = undoEnvelope.operation;
   await expect(page.getByTestId("result-default")).toContainText("Restored (undo verified)");
+  expect(undoEnvelope.ok).toBe(true); // a clean undo is a success
+  expect(undoBody.state).toBe("undone");
+  expect(undoBody.final_state).toBe("undone");
+  expect(undoBody.results.every((r) => r.status === "compensated")).toBe(true);
   expect(cfg("default")).toBe(before.default);
   expect(cfg("research")).toBe(before.research);
 
@@ -90,7 +123,10 @@ test("real router: preset select → preview → apply writes configs on disk �
   }
 });
 
-test("real router: probe without explicit authorization is blocked (no inference)", async ({ page }) => {
+test("real router: the /probe route is GONE (no inference affordance survives)", async ({ page }) => {
+  // Deletion check, not a weakening: the backend removed the /probe route
+  // entirely, so an unauthenticated probe is a plain 404 — there is no route
+  // left that could start a paid session, and no UI affordance for one.
   await page.goto(URL);
   await expect(page.getByRole("button", { name: /Fast lane/ })).toBeVisible();
   const res = await page.evaluate(async () => {
@@ -101,6 +137,6 @@ test("real router: probe without explicit authorization is blocked (no inference
     });
     return { status: r.status, body: await r.json() };
   });
-  expect(res.status).toBe(403);
-  expect(res.body.detail.blocked).toBe(true);
+  expect(res.status).toBe(404);
+  expect(res.body.detail).toBe("Not Found");
 });

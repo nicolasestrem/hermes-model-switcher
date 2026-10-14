@@ -19,28 +19,30 @@ from model_switcher.registry import (
 REPO = Path(__file__).resolve().parent.parent
 HERMES_REPO = Path(os.environ.get(
     "HERMES_MODEL_SWITCHER_HERMES_REPO", Path.home() / ".hermes" / "hermes-agent"))
-# Read-only scan fixture; resolved from the environment, never a host literal.
-# The registry baseline was reviewed against a specific installed-plugin set
-# (jev-judge, jev-skill-router — see PLUGIN_ROLES). Scan the dir that actually
-# carries that baseline (env override wins), so a host with extra plugins
-# doesn't silently change the reviewed baseline; genuinely unknown plugin
-# selectors still surface as coverage gaps whenever HERMES_MODEL_SWITCHER_PLUGINS_DIR
-# points at them.
-def _default_plugins_dir() -> Path:
-    root = Path.home() / ".hermes"
-    candidates = [root / "plugins", *sorted((root / "profiles").glob("*/plugins"))]
-    baseline = [c for c in candidates
-                if c.is_dir() and (c / "jev-judge").is_dir()]
-    if baseline:
-        return baseline[0]
-    for cand in candidates:
-        if cand.is_dir() and any(cand.iterdir()):
-            return cand
-    return root / "plugins"
 
+# The three model-selection fields carried by the jev-judge plugin manifest,
+# plus the protected threshold metadata that must NEVER become model slots.
+JEV_JUDGE_MODEL_FIELDS = ("jev_model", "typesafe_model", "openrouter_model")
+PROTECTED_THRESHOLD_FIELDS = (
+    "destructive_threshold", "exfiltration_threshold",
+    "impact_threshold", "benign_threshold",
+)
 
-PLUGINS_DIR = Path(os.environ.get("HERMES_MODEL_SWITCHER_PLUGINS_DIR",
-                                  _default_plugins_dir()))
+# A DECLARED TEST FIXTURE manifest — NOT a claim about any natively installed
+# plugin and NOT read from the host's ~/.hermes. It reproduces the real
+# jev-judge config_schema shape (flat ``{type: string, default: ''}`` model
+# fields, exactly what scanner.scan_plugin_manifest matches) so the scanner is
+# exercised hermetically on a clean CI HOME that carries no installed plugins.
+_JEV_JUDGE_MANIFEST = (
+    "name: jev-judge\n"
+    "config_schema:\n"
+    + "".join(
+        f"  {name}:\n    type: string\n    default: ''\n"
+        for name in JEV_JUDGE_MODEL_FIELDS)
+    + "".join(
+        f"  {name}:\n    type: number\n    default: 0.5\n"
+        for name in PROTECTED_THRESHOLD_FIELDS)
+)
 
 
 @pytest.fixture(scope="module")
@@ -54,8 +56,25 @@ def core_candidates():
 
 
 @pytest.fixture(scope="module")
-def plugin_candidates():
-    return scan_plugins(PLUGINS_DIR)
+def plugins_dir(tmp_path_factory) -> Path:
+    """Synthetic plugin-manifest fixture (see ``_JEV_JUDGE_MANIFEST``).
+
+    Hermetic by construction: the default scan target is this declared fixture,
+    never the host's native ``~/.hermes`` plugin tree (empty on clean CI)."""
+    root = tmp_path_factory.mktemp("plugin-fixture")
+    judge = root / "jev-judge"
+    judge.mkdir()
+    (judge / "plugin.yaml").write_text(_JEV_JUDGE_MANIFEST, encoding="utf-8")
+    return root
+
+
+@pytest.fixture(scope="module")
+def plugin_candidates(plugins_dir):
+    # HERMES_MODEL_SWITCHER_PLUGINS_DIR is an explicit caller override (used by
+    # the unknown-coverage test below); with no override the default is the
+    # declared hermetic fixture above — never a native-home scan.
+    override = os.environ.get("HERMES_MODEL_SWITCHER_PLUGINS_DIR")
+    return scan_plugins(Path(override) if override else plugins_dir)
 
 
 def test_every_configurable_selector_has_descriptor(registry, core_candidates, plugin_candidates):
@@ -66,7 +85,7 @@ def test_every_configurable_selector_has_descriptor(registry, core_candidates, p
         plugin_gaps = coverage_gaps(cands, registry)
         assert plugin_gaps == [], f"{plugin_name} candidates without descriptors: {plugin_gaps}"
     assert len(core_candidates) >= 40, "scanner stopped finding core candidates"
-    assert "jev-judge" in plugin_candidates, "installed plugin jev-judge not scanned"
+    assert "jev-judge" in plugin_candidates, "synthetic jev-judge fixture not scanned"
 
 
 def test_unset_inactive_and_plugin_slots_discovered(registry):
@@ -121,6 +140,22 @@ def test_judge_protocols_and_jev_thresholds(registry, plugin_candidates):
     assert scanned == {"jev_model", "typesafe_model", "openrouter_model"}
     # Threshold keys are protected: no descriptor carries them as slot ids
     assert not any("threshold" in i for i in ids)
+
+
+def test_env_override_scans_caller_dir_and_surfaces_unknown_gap(tmp_path, monkeypatch):
+    """HERMES_MODEL_SWITCHER_PLUGINS_DIR is an explicit caller override: it scans
+    ONLY the named dir (never the native home), and an unknown plugin's model
+    field surfaces as a coverage gap rather than a silent allow."""
+    override = tmp_path / "caller-plugins"
+    (override / "mystery-plugin").mkdir(parents=True)
+    (override / "mystery-plugin" / "plugin.yaml").write_text(
+        "name: mystery-plugin\nconfig_schema:\n"
+        "  model:\n    type: string\n    default: ''\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_MODEL_SWITCHER_PLUGINS_DIR", str(override))
+    cands = scan_plugins(Path(os.environ["HERMES_MODEL_SWITCHER_PLUGINS_DIR"]))
+    assert "mystery-plugin" in cands
+    assert coverage_gaps(cands["mystery-plugin"], build_registry()) == [
+        "mystery-plugin:config_schema.model"]
 
 
 def test_omh_code_constants_immutable(registry):

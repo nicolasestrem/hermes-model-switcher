@@ -30,6 +30,24 @@ test("alphaOf reports unknown input instead of guessing", () => {
   expect(alphaOf("rgb(1, 2)")).toBeNull();
 });
 
+test("alphaOf reads the alpha channel of #RGBA / #RRGGBBAA hex", () => {
+  // Codex review: every "#…" value returned 1, so a translucent hex host token
+  // (e.g. #16181d80) was accepted and the sticky header stayed see-through.
+  expect(alphaOf("#abc")).toBe(1); // 3-digit, opaque
+  expect(alphaOf("#16181d")).toBe(1); // 6-digit, opaque
+  expect(alphaOf("#16181dff")).toBe(1); // fully opaque 8-digit
+  expect(alphaOf("#16181d00")).toBe(0); // fully transparent 8-digit
+  expect(alphaOf("#16181d80")).toBeCloseTo(128 / 255, 5);
+  expect(alphaOf("#16181d80")).toBeLessThan(1); // translucent, never treated as opaque
+  expect(alphaOf("#abcd")).toBeCloseTo(13 / 15, 5); // #RGBA, case-insensitive
+  expect(alphaOf("#ABCD")).toBeCloseTo(13 / 15, 5);
+  // malformed lengths are unknown, never assumed opaque
+  expect(alphaOf("#12345")).toBeNull();
+  expect(alphaOf("#12")).toBeNull();
+  expect(alphaOf("#gggggg")).toBeNull();
+  expect(alphaOf("#16 18 1d")).toBeNull();
+});
+
 test("only a fully opaque surface is accepted, and never something unreadable", () => {
   // No document in Node: the helper must stay safe and return the solid colour.
   expect(resolveOpaqueSurface()).toBe(FALLBACK_BG);

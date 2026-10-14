@@ -29,6 +29,26 @@ STEP_FAILED = "failed"
 STEP_COMPENSATED = "compensated"
 STEP_CONFLICT = "conflict"
 
+# Evidenced write PHASE of a failed step. Durable (survives a restart) and
+# internal only: it is deliberately NOT in the public step projection.
+#   WRITE_PHASE_PRE       -- the step failed BEFORE any write attempt
+#                            (revision recheck / fresh read). The store was
+#                            provably never touched by this step, so a later
+#                            revision change is an external edit, NOT evidence
+#                            of our write. The step stays retryable.
+#   WRITE_PHASE_POST      -- the write landed (a post_revision is recorded).
+#   WRITE_PHASE_AMBIGUOUS -- a write may or may not have landed; ownership is
+#                            undecidable. Fail closed to recovery_required.
+# Only WRITE_PHASE_PRE is safe to treat as a known no-write.
+WRITE_PHASE_PRE = "pre_write"
+WRITE_PHASE_POST = "post_write"
+WRITE_PHASE_AMBIGUOUS = "ambiguous"
+
+# Bounded wait for a competing writer (a dashboard request thread, the
+# crash-recovery path, a CLI in another process). Combined with WAL this keeps
+# concurrent opens from failing with "database is locked".
+_BUSY_TIMEOUT_S = 5.0
+
 
 def is_inside_git_worktree(path: str) -> bool:
     """True if `path` (or any parent up to /) contains a `.git` entry.
@@ -103,37 +123,66 @@ class OperationJournal:
         finally:
             os.close(fd)
         self.db_path = raw
-        self._conn = sqlite3.connect(raw, isolation_level=None)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS operations (
-                op_id TEXT PRIMARY KEY,
-                state TEXT NOT NULL,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL,
-                payload TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS steps (
-                op_id TEXT NOT NULL,
-                seq INTEGER NOT NULL,
-                profile TEXT NOT NULL,
-                store_kind TEXT NOT NULL,
-                path TEXT NOT NULL,
-                state TEXT NOT NULL,
-                changes TEXT NOT NULL,
-                snapshot TEXT,
-                pre_revision TEXT,
-                post_revision TEXT,
-                PRIMARY KEY (op_id, seq),
-                FOREIGN KEY (op_id) REFERENCES operations(op_id)
-            );
-            """
-        )
-        # Additive migration; existing private recovery snapshots stay intact.
-        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(steps)")}
-        if "identity" not in columns:
-            self._conn.execute("ALTER TABLE steps ADD COLUMN identity TEXT")
+        # This connection is owned by THIS journal and is closed on any init
+        # error, so a failed open never leaks an fd or an open handle into the
+        # state dir. WAL + a bounded busy timeout keep concurrent opens (a
+        # dashboard request thread, the crash-recovery path, a CLI in another
+        # process) from failing with "database is locked".
+        conn = sqlite3.connect(raw, isolation_level=None,
+                               timeout=_BUSY_TIMEOUT_S)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=%d" % int(_BUSY_TIMEOUT_S * 1000))
+            # FULL, not NORMAL: the engine commits journal intent/snapshots
+            # BEFORE any external config write, so the journal is the recovery
+            # source of truth. NORMAL WAL may drop a committed journal write on
+            # power failure, silently weakening that guarantee; FULL syncs the
+            # WAL on every commit. Correctness over throughput for the journal.
+            conn.execute("PRAGMA synchronous=FULL")
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS operations (
+                    op_id TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    payload TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS steps (
+                    op_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    profile TEXT NOT NULL,
+                    store_kind TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    changes TEXT NOT NULL,
+                    snapshot TEXT,
+                    pre_revision TEXT,
+                    post_revision TEXT,
+                    PRIMARY KEY (op_id, seq),
+                    FOREIGN KEY (op_id) REFERENCES operations(op_id)
+                );
+                """
+            )
+            # Additive migrations; existing private recovery snapshots stay
+            # intact.
+            step_columns = {row[1] for row in conn.execute("PRAGMA table_info(steps)")}
+            if "identity" not in step_columns:
+                conn.execute("ALTER TABLE steps ADD COLUMN identity TEXT")
+            # Durable, internal write-phase marker for failed steps: lets
+            # reconcile tell a provably-pre-write failure (known no-write)
+            # from a write that may have landed, across a restart.
+            if "write_phase" not in step_columns:
+                conn.execute("ALTER TABLE steps ADD COLUMN write_phase TEXT")
+            op_columns = {row[1] for row in conn.execute("PRAGMA table_info(operations)")}
+            if "failure_category" not in op_columns:
+                conn.execute(
+                    "ALTER TABLE operations ADD COLUMN failure_category TEXT")
+        except BaseException:
+            conn.close()
+            raise
+        self._conn = conn
 
     def begin(self, payload: Dict[str, Any],
               op_id: Optional[str] = None) -> Dict[str, Any]:
@@ -187,8 +236,34 @@ class OperationJournal:
                 (state, post_revision, op_id, seq))
         self._touch(op_id, OP_APPLYING)
 
+    def set_step_phase(self, op_id: str, seq: int, phase: str) -> None:
+        """Record the EVIDENCED write phase of a failed step.
+
+        ``WRITE_PHASE_PRE`` means the step failed before any write attempt, so
+        the store was provably untouched by it; a later revision change is an
+        external edit and reconcile must not treat it as an ambiguous write.
+        Durable (a plain column) so the classification survives a restart. It
+        is internal: never added to the public step projection.
+        """
+        self._conn.execute(
+            "UPDATE steps SET write_phase=? WHERE op_id=? AND seq=?",
+            (phase, op_id, seq))
+        self._touch(op_id, OP_APPLYING)
+
     def finish(self, op_id: str, state: str) -> None:
         self._touch(op_id, state)
+
+    def set_failure_category(self, op_id: str, category: str) -> None:
+        """Record a FIXED, non-sensitive failure category.
+
+        Callers must pass a bounded label (engine._failure_category), never a
+        raw exception message — the message may embed config bytes or
+        credentials and must not be persisted or exposed.
+        """
+        self._conn.execute(
+            "UPDATE operations SET failure_category=?, updated_at=?"
+            " WHERE op_id=?",
+            (category, time.time(), op_id))
 
     def get(self, op_id: str) -> Optional[Dict[str, Any]]:
         row = self._conn.execute(
@@ -220,20 +295,37 @@ class OperationJournal:
 # Public DTO allowlist: only operation status and slot outcomes. The full
 # raw config, store paths, payload, recovery snapshots, changes and any
 # exception strings NEVER leave the journal through this projection.
-_PUBLIC_OP_FIELDS = ("op_id", "state", "created_at", "updated_at")
+_PUBLIC_OP_FIELDS = ("op_id", "state", "created_at", "updated_at",
+                     "failure_category")
 _PUBLIC_STEP_FIELDS = ("seq", "profile", "store_kind", "state",
                        "pre_revision", "post_revision")
+
+# Fixed, non-sensitive failure categories the engine may persist. Anything else
+# found in the column (a malformed or foreign journal written outside the
+# engine's contract) is projected as null, so an arbitrary/unknown string can
+# never leak through the public DTO.
+_PUBLIC_FAILURE_CATEGORIES = frozenset({
+    "revision_conflict", "store_unreadable", "write_verification_failed",
+    "io_error", "step_failed",
+})
 
 
 def to_public_operation(op: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Project an internal journal operation into a safe public DTO.
 
     Allowlist-only: anything not explicitly listed below (payload, step
-    paths, changes, snapshots, error strings) is dropped.
+    paths, changes, snapshots, error strings) is dropped. ``failure_category``
+    is additionally validated against the fixed category allowlist — an
+    unknown value (e.g. from a malformed journal) projects as ``None``.
     """
     if op is None:
         return None
     pub: Dict[str, Any] = {k: op[k] for k in _PUBLIC_OP_FIELDS if k in op}
+    if "failure_category" in pub:
+        cat = pub["failure_category"]
+        pub["failure_category"] = (
+            cat if isinstance(cat, str) and cat in _PUBLIC_FAILURE_CATEGORIES
+            else None)
     pub["steps"] = [
         {k: s[k] for k in _PUBLIC_STEP_FIELDS if k in s}
         for s in op.get("steps", [])

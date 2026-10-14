@@ -1,5 +1,7 @@
 // In-page mock of the plugin backend. Injected before the bundle loads.
-// Test hooks: window.__mockApi = { failState, failReadback, failUndo, okFalse }
+// Test hooks: window.__mockApi = { failState, failReadback, failUndo, okFalse,
+// rollbackMode: "compensated"|"partial"|"recovery_required", noWrite,
+// statusOverride, overrideState, undoPartial }
 (function () {
   const BASE = "/api/plugins/hermes-model-switcher";
 
@@ -82,31 +84,126 @@
       const preview = lastPreview;
       if (!preview || (body.previewId && body.previewId !== preview.id))
         return { status: 200, body: { ok: false, error: "unknown or stale preview" } };
+      const failed = Boolean(M.failReadback);
+      const rollback = M.rollbackMode || null; // "compensated" | "partial" | "recovery_required"
+      const noWrite = Boolean(M.noWrite); // F1 known no-write conflict
       const id = "op-" + (++opSeq);
-      const results = preview.changes.length
-        ? dedupeProfiles(preview.changes).map((pid) => ({
-            profileId: pid, status: M.failReadback ? "failed" : "applied",
-            revisionBefore: "rev" + pid + "-a", revisionAfter: M.failReadback ? "rev" + pid + "-a" : "rev" + pid + "-b",
-            readback: M.failReadback ? { ok: false, error: "readback failed: config unreadable" } : { ok: true },
-            error: M.failReadback ? "readback failed: config unreadable" : null,
-          }))
-        : [];
-      const operation = { id, results };
+      // Mirror the REAL POST /operations DTO (_op_dto): id / state / results /
+      // undoable, and — on a failed apply — a SAFE failure category plus
+      // final_state. The real backend never sends a per-step ``readback`` object
+      // nor raw exception text, so neither does this mock: the UI must render
+      // failures from ``results[].status`` / ``operation.failure`` alone.
+      //
+      // ``rollbackMode`` covers an apply that fails MID-operation and then
+      // compensates: the per-step status is the same ``compensated`` the undo
+      // path uses, so the drawer must not read it as a verified undo — and the
+      // engine persists the SAFE category BEFORE compensating (engine.py), so
+      // the real DTO carries ``failure`` alongside state ``compensated``.
+      // ``noWrite`` covers the F1 revision-conflict case where nothing is
+      // written: the FIRST step fails its pre-write recheck and the steps
+      // behind it stay ``pending`` (journal step states are only
+      // pending|applied|failed|compensated|conflict — never ``not_written``),
+      // op state ``pending`` with category ``revision_conflict``.
+      const pids = preview.changes.length ? dedupeProfiles(preview.changes) : [];
+      let state = "committed", failure = null, statusFor = () => "applied";
+      if (M.statusOverride) {
+        // Unknown/extra per-step status the backend may add later: the drawer
+        // must render it NEUTRAL (never green) instead of guessing success.
+        state = M.overrideState || "recovery_required";
+        statusFor = () => M.statusOverride;
+      } else if (noWrite) {
+        // F1: the first step fails its pre-write revision recheck; the steps
+        // behind it are never attempted and stay ``pending``. The op stays
+        // retryable: state/final_state ``pending`` + category
+        // ``revision_conflict``.
+        state = "pending"; failure = "revision_conflict";
+        statusFor = (i) => (i === 0 ? "failed" : "pending");
+      } else if (rollback === "compensated") {
+        // Every step was written then rolled back. The engine records the safe
+        // category BEFORE compensating (engine.py:306-307), so the real DTO is
+        // state/final_state ``compensated`` + failure
+        // ``write_verification_failed`` (test_backend_reliability_fixes.py).
+        state = "compensated"; failure = "write_verification_failed";
+        statusFor = () => "compensated";
+      } else if (rollback === "partial") {
+        // Mixed: one step rolled back, one never verified; the safe category
+        // for the failing step rides along with state/final_state ``partial``.
+        state = "partial"; failure = "io_error";
+        statusFor = (i) => (i % 2 === 0 ? "compensated" : "failed");
+      } else if (rollback === "recovery_required") {
+        state = "recovery_required"; failure = "write_verification_failed";
+        statusFor = () => "failed";
+      } else if (failed) {
+        state = "recovery_required"; failure = "write_verification_failed";
+        statusFor = () => "failed";
+      }
+      const committed = state === "committed";
+      const results = pids.map((pid, i) => {
+        const status = statusFor(i);
+        const changed = status === "applied";
+        return {
+          profileId: pid, status,
+          revisionBefore: "rev" + pid + "-a",
+          revisionAfter: changed ? "rev" + pid + "-b" : "rev" + pid + "-a",
+        };
+      });
+      const operation = {
+        id,
+        state,
+        results,
+        // A non-committed operation is not undoable through the drawer; the
+        // backend exposes that as ``undoable: false``.
+        undoable: results.some((r) => r.status === "applied"),
+        // Terminal classification + a FIXED failure category (never raw text).
+        final_state: state,
+        failure,
+      };
       operations[id] = operation;
-      return { status: 200, body: { ok: true, operation } };
+      // Envelope semantics: top-level ``ok`` is true only for committed/undone,
+      // so a failed apply is HTTP 200 with ok:false AND the operation DTO — the
+      // exact shape the UI must NOT discard.
+      return { status: 200, body: { ok: committed, operation } };
     }
     const opUndo = path.match(new RegExp("^" + BASE + "/operations/([^/]+)/undo$"));
     if (opUndo && method === "POST") {
       const op = operations[opUndo[1]];
       if (!op) return { status: 200, body: { ok: false, error: "unknown operation" } };
       if (M.failUndo) return { status: 200, body: { ok: false, error: "revision conflict: profile edited after apply" } };
+      // A PARTIAL undo: the first applied step's previous bytes are restored
+      // (``compensated``), but a later profile's revision changed since the apply
+      // so its undo hits a ``conflict``. The WHOLE operation is therefore
+      // ``recovery_required`` with ok:false — yet the restored profile's bytes
+      // ARE verified back. ``failure`` is null: the conflicted STEP carries the
+      // reason, and the real DTO sends no op-level safe category for this shape.
+      if (M.undoPartial) {
+        const operation = {
+          id: op.id,
+          state: "recovery_required",
+          results: op.results.map((r) => ({
+            ...r,
+            status: r.profileId === "default" ? "compensated" : "conflict",
+            revisionAfter: r.profileId === "default" ? "rev" + r.profileId + "-a" : r.revisionAfter,
+          })),
+          undoable: false,
+          final_state: "recovery_required",
+          failure: null,
+        };
+        operations[op.id] = operation;
+        return { status: 200, body: { ok: false, operation } };
+      }
+      // Real undo compensates each applied step: step state "compensated"
+      // (rendered "Restored (undo verified)"), operation state "undone".
       const operation = {
         id: op.id,
+        state: "undone",
         results: op.results.map((r) => ({
           ...r,
-          status: r.status === "applied" ? "restored" : r.status,
+          status: r.status === "applied" ? "compensated" : r.status,
           revisionAfter: "rev" + r.profileId + "-a",
         })),
+        undoable: false,
+        final_state: "undone",
+        failure: null,
       };
       operations[op.id] = operation;
       return { status: 200, body: { ok: true, operation } };
@@ -114,8 +211,9 @@
     const opGet = path.match(new RegExp("^" + BASE + "/operations/([^/]+)$"));
     if (opGet && method === "GET") {
       const op = operations[opGet[1]];
-      return op ? { status: 200, body: { ok: true, operation: op } }
-        : { status: 200, body: { ok: false, error: "unknown operation" } };
+      if (!op) return { status: 200, body: { ok: false, error: "unknown operation" } };
+      // ok iff committed/undone, mirroring the backend envelope.
+      return { status: 200, body: { ok: op.state === "committed" || op.state === "undone", operation: op } };
     }
     return { status: 404, body: { error: "not found: " + path } };
   }

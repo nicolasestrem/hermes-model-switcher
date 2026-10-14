@@ -1,8 +1,19 @@
 manifest_version: 1
 name: hermes-model-switcher
-version: 0.1.0
+version: 0.2.0
 description: "Choose models across Hermes profiles, preview changes, and reuse your setup with presets."
 kind: standalone
+author:
+  name: Nico Estrem
+  email: 103498114+nicolasestrem@users.noreply.github.com
+license: MIT
+homepage: https://github.com/nicolasestrem/hermes-model-switcher
+tags:
+  - dashboard
+  - models
+  - presets
+  - profiles
+  - configuration
 # No CLI/gateway surface. The only code surface is the Dashboard extension
 # (dashboard/manifest.json + dashboard/dist/index.js + dashboard/plugin_api.py,
 # mounted by the Dashboard at /api/plugins/hermes-model-switcher/) — the

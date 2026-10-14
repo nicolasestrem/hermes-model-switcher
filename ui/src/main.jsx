@@ -215,6 +215,13 @@ function ProfileFilter({ profiles, value, onChange }) {
   );
 }
 
+// The matrix column headers, in order. One extra leading column holds the row
+// selection checkbox, so the real column count is these + 1. Detail and
+// empty-state rows span ALL columns via COLUMN_COUNT — hard-coding the number
+// silently drifted from the header set once already.
+const MATRIX_COLUMNS = ["Profile", "Slot", "Family", "State", "Configured route", "Last observed"];
+const COLUMN_COUNT = MATRIX_COLUMNS.length + 1; // + selection checkbox column
+
 function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSelection, onExpand, expanded, filters, setFilters }) {
   // Resolved per render-source and refreshed on host theme changes, never a
   // module-scope snapshot (see useOpaqueSurface).
@@ -332,7 +339,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
                 disabled={!writableInView.length}
                 onChange={onMasterChange} />
             </th>
-            {["Profile", "Slot", "Family", "State", "Configured route", "Last observed"].map((h) => (
+            {MATRIX_COLUMNS.map((h) => (
               <th key={h} scope="col" style={{
                 textAlign: "left", borderBottom: `1px solid ${THEME.border}`, padding: 4,
                 position: "sticky", top: 0, left: h === "Profile" ? 40 : undefined,
@@ -382,7 +389,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
                 </tr>
                 {expanded[key] && (
                   <tr data-detail={key}>
-                    <td colSpan={8} style={{ padding: "6px 12px", background: THEME.bg }}>
+                    <td colSpan={COLUMN_COUNT} style={{ padding: "6px 12px", background: THEME.bg }}>
                       <RoutingDetail slot={s} />
                     </td>
                   </tr>
@@ -391,7 +398,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
             );
           })}
           {filtered.length === 0 && (
-            <tr><td colSpan={8} style={{ color: THEME.muted, padding: 16 }}>No slots match these filters. Reset filters to see every profile slot.</td></tr>
+            <tr><td colSpan={COLUMN_COUNT} style={{ color: THEME.muted, padding: 16 }}>No slots match these filters. Reset filters to see every profile slot.</td></tr>
           )}
         </tbody>
       </table>
@@ -661,6 +668,15 @@ function changeHeadline(c) {
   return `${from} → ${to ? `${to.provider || (c.slotId === "auxiliary.openrouter_model" ? "openrouter" : "default")}/${to.model || "automatic"}` : "?"}`;
 }
 
+// Stable React key for a preview row. Index keys re-mount every list item on
+// insert/reorder, discarding focus and state; a change's identity is its
+// (profile, slot) pair. The index is only a last-resort fallback when that
+// identity is absent from a malformed payload.
+function changeKey(c, i) {
+  if (c && c.profileId && c.slotId) return `${c.profileId}/${c.slotId}`;
+  return "change-" + i;
+}
+
 function PreviewPanel({ preview }) {
   if (!preview) return null;
   return (
@@ -669,7 +685,7 @@ function PreviewPanel({ preview }) {
       <h3 style={{ margin: "0 0 6px" }}>Preview ({preview.changes.length} {preview.changes.length === 1 ? "change" : "changes"})</h3>
       <ul>
         {preview.changes.map((c, i) => (
-          <li key={i}>
+          <li key={changeKey(c, i)}>
             <strong>{c.profileId}</strong> / {c.slotId}: {changeHeadline(c)}
             {c.sideEffects && c.sideEffects.length > 0 && (
               <span style={{ color: THEME.warn }}> · side effects: {c.sideEffects.join(", ")}</span>
@@ -680,7 +696,7 @@ function PreviewPanel({ preview }) {
             {c.diff && c.diff.length > 0 && (
               <ul data-testid="preview-diff" style={{ margin: "2px 0 0", paddingLeft: 18, color: THEME.muted }}>
                 {c.diff.map((d, j) => (
-                  <li key={j} data-diff-path={d.path}>
+                  <li key={d.path || "diff-" + j} data-diff-path={d.path}>
                     <code>{d.path}</code>: {formatDiffValue(d.from)} → {formatDiffValue(d.to)}
                   </li>
                 ))}
@@ -698,15 +714,63 @@ function PreviewPanel({ preview }) {
   );
 }
 
+// Per-step labels for the journal's REAL step vocabulary — pending | applied |
+// failed | compensated | conflict (journal.py). A ``not_written`` status only
+// ever existed in the test mock; no backend path can emit it, so it is not
+// mapped here — an unrecognised status renders the neutral default below.
 const RESULT_LABEL = {
   applied: { text: "Applied + read back", color: THEME.ok },
+  // ``restored``/``compensated`` mean "the previous revision is back". That is a
+  // SUCCESS only when the user asked for an undo (operation state ``undone``);
+  // after a FAILED APPLY the identical status is a rollback the user never
+  // requested, so it is relabelled below and never painted green.
   restored: { text: "Restored (undo verified)", color: THEME.ok },
   compensated: { text: "Restored (undo verified)", color: THEME.ok },
   failed: { text: "FAILED — not verified", color: THEME.danger },
   conflict: { text: "Conflict — recovery required", color: THEME.warn },
 };
 
-function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUndoGuarded, busy }) {
+// Same status, opposite meaning: an apply that rolled back mid-operation.
+const ROLLBACK_LABEL = { text: "Rolled back after failed apply", color: THEME.warn };
+// A compensated/restored step seen with NO recorded client action context (e.g.
+// an operation rehydrated from a GET): a user-requested undo and a rollback
+// after a failed apply are indistinguishable here, so we never invent "apply" —
+// a neutral, non-success label is the only truthful render.
+const UNKNOWN_RESTORE_LABEL = { text: "Restored — action context unknown", color: THEME.warn };
+const COMPENSATED_STATUSES = ["restored", "compensated"];
+
+// The backend sends a SAFE failure category, never an exception string. Render
+// descriptive copy where there is a clean mapping; the enum stays on
+// ``data-failure-category`` for traceability but is not the user-facing text.
+const FAILURE_COPY = {
+  write_verification_failed: "Write verification failed — the change did not stick",
+  revision_conflict: "Revision conflict — a profile changed after review",
+  store_unreadable: "Stored configuration could not be read",
+  blocked: "Apply blocked before any write",
+  io_error: "Storage error while writing the change",
+  step_failed: "A step failed before it could be verified",
+};
+const STATE_COPY = {
+  compensated: "rolled back after a failed apply",
+  partial: "partially rolled back after a failed apply",
+  recovery_required: "recovery required",
+  // ``pending`` is the known no-write terminal state (the step never touched
+  // the store; the op stays retryable) — stated as a no-change fact, never a
+  // success. This is the only op-level home for "not changed".
+  pending: "Not changed — review again",
+  undone: "undone",
+  committed: "committed",
+};
+
+// Only a scalar is displayable: an object would render as "[object Object]" and
+// the safe failure category / state strings are always scalars.
+function scalarText(v) {
+  if (typeof v === "string") return v.trim() || null;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  return null;
+}
+
+function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUndoGuarded, busy, action }) {
   const ref = useRef(null);
   React.useEffect(() => {
     if (open && ref.current) ref.current.focus();
@@ -741,31 +805,100 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
     return () => document.removeEventListener("keydown", onKey, true);
   }, [open]);
   if (!open || !operation) return null;
+  // Consume the ACTUAL operation DTO. Status is per-profile (`results[].status`)
+  // and the overall outcome is `operation.state` / `operation.final_state`; the
+  // backend exposes a SAFE failure category (never an exception string). The
+  // drawer must never infer success from anything else — in particular it no
+  // longer depends on a per-result ``readback`` field, which only ever existed
+  // in the test mock and never in a real response.
+  const results = Array.isArray(operation.results) ? operation.results : [];
+  const finalState = scalarText(operation.final_state) || scalarText(operation.state) || null;
+  // ``undone`` is the ONLY state in which a compensated/restored step is a
+  // verified user-requested undo. Every other non-committed state is a failed
+  // apply whose rollback must NOT be dressed as success.
+  const undoVerified = finalState === "undone";
+  // ``action`` is LOCAL UI context recorded at the client mutation that produced
+  // this DTO (``apply`` vs ``undo``). The DTO alone cannot distinguish a
+  // user-requested undo from a rollback after a failed apply — both surface as
+  // per-step ``compensated``/``restored``. Trust the recorded action, and fall
+  // back to the operation's own ``undone`` state when no local context exists
+  // (e.g. an operation rehydrated from a GET).
+  const undoContext = action === "undo" || undoVerified;
+  // In an UNDO context every compensated/restored step is a verified restore of
+  // THAT profile — even when the whole operation is incomplete (another profile
+  // hit a conflict). Per-profile bytes are verified independently of the op.
+  const isRestored = (status) => COMPENSATED_STATUSES.includes(status) && undoContext;
+  const appliedCount = results.filter((r) => r.status === "applied").length;
+  const restoredCount = results.filter((r) => isRestored(r.status)).length;
+  const conflictCount = results.filter((r) => r.status === "conflict").length;
+  // Any step that is not a verified ``applied`` needs attention — UNLESS it is a
+  // compensated/restored step of a user-requested undo. A fully-compensated
+  // failed apply therefore reads "0 applied · N need attention" instead of the
+  // old, dangerously clean "0 · 0"; a partial undo counts only the conflicted
+  // profile (the restored one is genuinely back); an unrecognised future status
+  // is counted too rather than silently ignored.
+  const attentionCount = results.filter((r) =>
+    r.status !== "applied" && !isRestored(r.status)
+  ).length;
+  const failure = scalarText(operation.failure) || results.map((r) => scalarText(r.failure)).find(Boolean) || null;
+  const failureCopy = failure ? FAILURE_COPY[failure] || failure : null;
+  // A failed apply may carry NO failure category (the rollback itself is the
+  // outcome); the terminal state still has to be on screen, so the state line
+  // is driven by the state, not by the presence of ``failure``. ``pending`` is
+  // the one terminal state that keeps the line even alongside a safe category:
+  // the step never wrote, so "not changed — review again" is the truthful
+  // headline next to the category.
+  const showStateLine = !undoVerified && Boolean(finalState) && finalState !== "committed" &&
+    (!failure || finalState === "pending");
   return (
     <aside ref={ref} tabIndex={-1} role="dialog" aria-modal="true"
       aria-label="Operation drawer" data-testid="operation-drawer"
       style={{ position: "fixed", right: 0, top: 0, bottom: 0, width: "min(380px, 100vw)", boxSizing: "border-box", overflow: "auto",
         background: THEME.bg, borderLeft: `1px solid ${THEME.border}`, padding: 12, zIndex: 50, outline: "none" }}>
       <h3>Operation results</h3>
-      <p>{operation.results.filter(r => r.status === "applied" && r.readback?.ok !== false).length} profiles applied · {operation.results.filter(r => ["failed", "conflict"].includes(r.status) || r.readback?.ok === false).length} need attention</p>
+      <p data-testid="operation-summary" data-attention={attentionCount > 0 ? "true" : "false"}
+        data-restored={restoredCount} data-conflict={conflictCount}
+        style={{ color: attentionCount > 0 ? THEME.warn : THEME.muted }}>
+        {appliedCount} profiles applied · {attentionCount} need attention
+      </p>
       <p className="hms-note">Reference: {operation.id}</p>
       <button type="button" onClick={onClose} aria-label="Close operation drawer">Close</button>
       <p style={{ color: THEME.muted }}>Configured ≠ live: existing sessions may keep their old route.</p>
+      {failure && (
+        <p data-testid="operation-failure" role="alert" data-failure-category={failure}
+          style={{ color: THEME.danger }}>
+          {failureCopy}{finalState ? ` · final state: ${finalState}` : ""}
+        </p>
+      )}
+      {showStateLine && (
+        <p data-testid="operation-state" data-state={finalState} style={{ color: THEME.warn }}>
+          {undoContext ? "Undo incomplete" : "Apply did not commit"} — {STATE_COPY[finalState] || finalState}
+        </p>
+      )}
+      {undoVerified && (
+        <p data-testid="operation-state" data-state="undone" style={{ color: THEME.ok }}>
+          Undo verified — previous revisions restored
+        </p>
+      )}
       <ul style={{ listStyle: "none", padding: 0 }}>
-        {operation.results.map((r) => {
-          const label = RESULT_LABEL[r.status] || { text: r.status, color: THEME.fg };
+        {results.map((r) => {
+          const isCompensated = COMPENSATED_STATUSES.includes(r.status);
+          const label = isCompensated
+            ? (undoContext
+                ? RESULT_LABEL[r.status]   // verified restore of this profile (green)
+                : action === "apply"
+                  ? ROLLBACK_LABEL         // rollback after a failed apply (warn)
+                  : UNKNOWN_RESTORE_LABEL) // no context: never invent "apply"
+            : RESULT_LABEL[r.status] || { text: r.status, color: THEME.fg };
           return (
             <li key={r.profileId} data-testid={`result-${r.profileId}`}
               style={{ borderBottom: `1px solid ${THEME.border}`, padding: "6px 0" }}>
               <strong>{r.profileId}</strong>{" "}
               <span role="status" style={{ color: label.color }} data-status={r.status}>
-                {r.readback && r.readback.ok === false
-                  ? "FAILED — readback not verified"
-                  : label.text}
+                {label.text}
               </span>
               <div style={{ fontSize: 13, color: THEME.muted }}>
                 rev {r.revisionBefore?.slice(0, 8) || "?"} → {r.revisionAfter?.slice(0, 8) || "?"}
-                {r.error && <span style={{ color: THEME.danger }}> · {r.error}</span>}
               </div>
             </li>
           );
@@ -885,6 +1018,10 @@ function App() {
   const [preview, setPreview] = useState(null);
   const [previewFor, setPreviewFor] = useState(""); // fingerprint of change-set the preview belongs to
   const [operation, setOperation] = useState(null);
+  // Local UI-only context for the operation DTO on screen: which client mutation
+  // produced it. Never sent to the backend; the DTO itself cannot tell a
+  // user-requested undo from a rollback after a failed apply.
+  const [opAction, setOpAction] = useState(null);
   const [showOperation, setShowOperation] = useState(false);
   const [undoGuarded, setUndoGuarded] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1017,7 +1154,11 @@ function App() {
         profileId: editor.pickerProfileId || (filters.profileIds.length === 1 ? filters.profileIds[0] : "default"), refresh });
       if (seq === pickerSeq.current) setPicker({ data, error: null, loading: false });
     } catch (e) {
-      if (seq === pickerSeq.current) setPicker({ data: null, error: e.message, loading: false });
+      // Mirror the load path's safety: a non-Error rejection has no `.message`,
+      // so `e.message` would render the literal "undefined" in the picker alert.
+      if (seq === pickerSeq.current) {
+        setPicker({ data: null, error: e instanceof ApiError ? e.message : String(e), loading: false });
+      }
     }
   };
 
@@ -1030,11 +1171,19 @@ function App() {
         : { previewId: activePreview.id, allowUnknownCost: editor.ackUnknownCost };
       const op = await api.apply(payload);
       setOperation(op.operation);
+      setOpAction("apply");
       openDrawer();
       setUndoGuarded(false);
       await refreshSilently();
-      announce(`Operation ${op.operation.id} finished: ` +
-        op.operation.results.map((r) => `${r.profileId} ${r.status}`).join(", "));
+      // ok === true only for committed/undone. A non-success apply still carries
+      // the operation DTO (per-profile statuses + safe failure category +
+      // final_state), so render the drawer either way; the announcement stays
+      // neutral (the per-profile statuses carry the severity) and never claims a
+      // success it did not get.
+      const statuses = op.operation.results.map((r) => `${r.profileId} ${r.status}`).join(", ");
+      const outcome = op.ok === true ? "" : ` · ${op.operation.final_state || "incomplete"}` +
+        (op.operation.failure ? ` (${op.operation.failure})` : "");
+      announce(`Operation ${op.operation.id} finished: ${statuses}${outcome}`);
     } catch (e) {
       announce("Apply failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
     } finally {
@@ -1063,9 +1212,18 @@ function App() {
     try {
       const op = await api.undo(operation.id);
       setOperation(op.operation);
+      // Tag the undo action even on ok:false (HTTP 200 with the operation DTO):
+      // the drawer must read the per-profile outcome as an undo, not an apply.
+      setOpAction("undo");
       setUndoGuarded(false);
       await refreshSilently();
-      announce("Undo finished: " + op.operation.results.map((r) => `${r.profileId} ${r.status}`).join(", "));
+      // A conflicted undo returns ok:false WITH the operation DTO
+      // (recovery_required); render it and say so plainly instead of "Undo
+      // failed" for an outcome the user can actually see in the drawer.
+      const statuses = op.operation.results.map((r) => `${r.profileId} ${r.status}`).join(", ");
+      const outcome = op.ok === true ? "" : ` · ${op.operation.final_state || "incomplete"}` +
+        (op.operation.failure ? ` (${op.operation.failure})` : "");
+      announce(`Undo finished: ${statuses}${outcome}`);
     } catch (e) {
       announce("Undo failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
     } finally {
@@ -1111,7 +1269,7 @@ function App() {
           style={{ color: THEME.danger, marginBottom: 8 }}>
           Load failed: {loadError}
         </div>
-        <button onClick={load}>Retry</button>
+        <button onClick={() => load()}>Retry</button>
       </div>
     );
   }
@@ -1217,7 +1375,7 @@ function App() {
       </div>
 
       <OperationDrawer open={showOperation} operation={operation} onClose={closeDrawer} onUndo={undo} undoGuarded={undoGuarded}
-        setUndoGuarded={setUndoGuarded} busy={busy} />
+        setUndoGuarded={setUndoGuarded} busy={busy} action={opAction} />
     </div>
   );
 }

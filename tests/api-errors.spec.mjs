@@ -57,3 +57,43 @@ test("a null/absent body falls back to the status and never says ok", () => {
   expect(errorMessage({}, 500)).toBe("HTTP 500");
   expect(errorMessage({ ok: false }, 200)).toBe("HTTP 200");
 });
+
+test("unwraps detail.blocked per-profile/slot reasons so the user knows WHICH slot", () => {
+  const body = {
+    detail: {
+      ok: false,
+      error: "preview blocked for some profiles",
+      blocked: [
+        { profileId: "default", slotId: "auxiliary.goal_judge", reason: "typed-decision model required" },
+        { profileId: "research", reason: "profile is read-only" },
+      ],
+    },
+  };
+  expect(errorMessage(body, 422)).toBe(
+    "preview blocked for some profiles — default/auxiliary.goal_judge: typed-decision model required; research: profile is read-only",
+  );
+});
+
+test("blocked reasons combine with reasons and surface without an error summary", () => {
+  expect(errorMessage({ error: "blocked", reasons: ["r1"], blocked: [{ profileId: "p", reason: "bad" }] }, 400))
+    .toBe("blocked — r1; p: bad");
+  // No summary sentence → the HTTP status is preserved (blocked alone does not
+  // fabricate a message), matching the existing reasons-only behaviour.
+  expect(errorMessage({ detail: { blocked: [{ profileId: "p", slotId: "s", reason: "why" }] } }, 409))
+    .toBe("HTTP 409");
+});
+
+test("malformed blocked payloads never throw or print [object Object]", () => {
+  // blocked as a bare string is a single reason
+  expect(errorMessage({ error: "e", blocked: "blocked-elsewhere" }, 400)).toBe("e — blocked-elsewhere");
+  // entries that are objects without a scalar reason, or bare non-scalars, are dropped
+  expect(errorMessage({ error: "e", blocked: [{ a: 1 }, null, { profileId: "p" }, { reason: { x: 1 } }] }, 400))
+    .toBe("e");
+  // non-array, non-string blocked values are ignored, never stringified
+  expect(errorMessage({ error: "e", blocked: { profileId: "p", reason: "r" } }, 400)).toBe("e — p: r");
+  expect(errorMessage({ error: "e", blocked: 42 }, 400)).toBe("e");
+  // nested detail.blocked, mixed valid and malformed
+  expect(errorMessage({ detail: { error: "e",
+    blocked: [null, { profileId: "p", slotId: "s", reason: "r" }, "junk"] } }, 422))
+    .toBe("e — p/s: r; junk");
+});

@@ -42,6 +42,22 @@ class StoreWriteAmbiguous(StoreConflict):
     post_revision = None
 
 
+class StorePreWriteConflict(StoreConflict):
+    """A guarded revision recheck refused BEFORE any write was attempted.
+
+    The base ``apply_changes_guarded`` rechecks the revision and only then
+    delegates to ``apply_changes`` — so a refusal there provably never touched
+    the store (a concurrent writer landed in the check-then-save window between
+    the engine's recheck and ours). The ``write_phase`` tag tells the engine and
+    reconcile this is a known no-write step, NOT a written-but-
+    ambiguous one. Deliberately bounded: it does NOT cover post-write ambiguity
+    (:class:`StoreWriteAmbiguous`), which must keep failing closed to
+    ``recovery_required``.
+    """
+
+    write_phase = "pre_write"
+
+
 class _DeleteSentinel:
     """Explicit ``remove this key`` marker. Distinct from a literal ``None``
     value: ``DELETE`` means the key must be ABSENT after apply/readback, while
@@ -154,7 +170,10 @@ class StoreAdapter:
         write lock (the canonical config store) overrides this so the guard
         runs INSIDE that lock (closing the check-then-save race)."""
         if expected_revision is not None and self.revision() != expected_revision:
-            raise StoreConflict(
+            # The recheck runs BEFORE apply_changes -> provably no write, so
+            # this refusal is tagged pre-write (known no-write), never the
+            # post-write ambiguity that must fail closed to recovery_required.
+            raise StorePreWriteConflict(
                 f"{self.path}: revision changed before write "
                 f"({self.revision()} != {expected_revision})")
         return self.apply_changes(changes)
@@ -345,7 +364,9 @@ class CanonicalConfigStoreAdapter(YamlFileStoreAdapter):
         # the lock: the check-then-save race is closed there, not here.
         # Raises ReadOnlyRuntime / UnknownProfile / ProfileIdentityChanged on
         # any violation — never a raw file write. Hermes' StoreConflict is
-        # translated to the adapter-set StoreConflict the engine catches.
+        # raised ONLY at its locked fresh-revision guard, BEFORE the save, so
+        # it is translated to the pre-write-tagged StorePreWriteConflict;
+        # identity/scope violations keep the ordinary (untagged) StoreConflict.
         from hermes_adapter import (
             StoreConflict as _CanonSegmentConflict,
             ProfileIdentityChanged,
@@ -360,7 +381,17 @@ class CanonicalConfigStoreAdapter(YamlFileStoreAdapter):
             with expected_revision_scope(expected_revision):
                 result = self._adapter().apply_canonical_save(
                     self.profile, data, identity=self._identity)
-        except (_CanonSegmentConflict, ProfileIdentityChanged, UnknownProfile) as exc:
+        except _CanonSegmentConflict as exc:
+            # Hermes' canonical save raises its StoreConflict ONLY at the
+            # locked fresh-revision guard, BEFORE config_mod.save_config —
+            # provably no write was attempted. Tag it pre-write so the engine
+            # records a known no-write step instead of escalating to
+            # recovery_required. (Post-write ambiguity keeps failing closed
+            # via StoreWriteAmbiguous, which is never tagged here.)
+            raise StorePreWriteConflict(str(exc)) from exc
+        except (ProfileIdentityChanged, UnknownProfile) as exc:
+            # identity/scope violations keep the conservative ordinary
+            # conflict contract (no pre-write tag).
             raise StoreConflict(str(exc)) from exc
         self.last_canonical_result = result
         # authoritative post-write revision reported by the save under its lock

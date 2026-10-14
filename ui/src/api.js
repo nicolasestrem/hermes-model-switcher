@@ -4,6 +4,12 @@
 // status is 2xx AND the parsed body has ok === true. A network failure, a
 // non-JSON body, an HTTP error, or ok:false is a failure — never empty state,
 // never a success badge.
+//
+// The ONE exception is the operation envelope (apply/undo/get): a non-success
+// outcome (partial, compensated, recovery_required, pending) is HTTP 200 with
+// ok:false but a real ``operation`` DTO attached. There ok:false means "did not
+// fully succeed", not "discard the data" — see `preserveOperationFailure` in
+// `request` and the `api` operation methods below.
 export class ApiError extends Error {
   constructor(message, { status = 0, body = null } = {}) {
     super(message);
@@ -31,10 +37,15 @@ function transport() {
 }
 
 async function request(path, opts = {}) {
-  // Merge headers instead of letting a caller's `opts.headers` silently drop
-  // Content-Type: `{headers: X, ...opts}` would replace the whole object, and
-  // SDK transports add their own auth headers on top.
-  const { headers, ...rest } = opts;
+  // `preserveOperationFailure` opts an /operations call into receiving an
+  // HTTP-200 body whose top-level ``ok`` is false but which still carries a
+  // structured ``operation`` DTO (a partial / compensated / recovery_required
+  // apply). The operation endpoints are the ONLY ones where ok:false is a
+  // meaningful outcome rather than an error.
+  // `headers` is pulled out (not spread) so a caller's `opts.headers` cannot
+  // drop Content-Type: `{headers: X, ...opts}` would replace the whole object,
+  // and SDK transports add their own auth headers on top.
+  const { headers, preserveOperationFailure = false, ...rest } = opts;
   let res;
   try {
     res = await transport()(BASE + path, {
@@ -59,7 +70,16 @@ async function request(path, opts = {}) {
     throw new ApiError(errorMessage(body, res.status), { status: res.status, body });
   }
   if (!body || body.ok !== true) {
-    // ok:false (or missing ok) is a failure, not empty data.
+    // ok:false (or missing ok) is a failure, not empty data — EXCEPT when the
+    // operation contract says otherwise: the backend reports a partial /
+    // compensated / recovery_required apply as HTTP 200 with ok:false AND the
+    // operation DTO (its top-level ok is true only for committed/undone).
+    // Throwing would discard the per-profile statuses + safe failure category
+    // and show a generic error instead of the real outcome. When the caller
+    // opted in and a DTO is present, hand the body back for the drawer.
+    if (preserveOperationFailure && body && typeof body.operation === "object" && body.operation !== null) {
+      return body;
+    }
     throw new ApiError(errorMessage(body, res.status), { status: res.status, body });
   }
   return body;
@@ -79,8 +99,38 @@ export function errorMessage(body, status) {
   // string — `.join` on a string would throw inside the error path itself.
   const raw = asPresent(detail && detail.reasons) || asPresent(body && body.reasons);
   const reasons = (Array.isArray(raw) ? raw : raw ? [raw] : []).map(asText).filter(Boolean);
+  // FastAPI's block contract wraps a per-target list under ``detail.blocked``
+  // ([{profileId, slotId?, reason}]). Rendering only the generic summary hides
+  // WHICH slot was refused and why, so the user cannot fix anything: unwrap it
+  // here, alongside ``reasons``. Malformed payloads are skipped, never printed
+  // as "[object Object]", and never allowed to throw in this error path.
+  const blocked = blockedReasons(
+    asPresent(detail && detail.blocked) || asPresent(body && body.blocked));
+  const parts = reasons.concat(blocked);
   if (!message) return "HTTP " + status;
-  return reasons.length ? `${message} — ${reasons.join("; ")}` : message;
+  return parts.length ? `${message} — ${parts.join("; ")}` : message;
+}
+
+// Per-target block reasons (`{profileId, slotId?, reason}`) flattened into
+// displayable sentences. A bare STRING entry is a single reason; anything
+// without a scalar reason (or a non-string, non-object entry) is dropped rather
+// than stringified.
+function blockedReasons(raw) {
+  const items = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  const out = [];
+  for (const item of items) {
+    if (item && typeof item === "object") {
+      const reason = asText(item.reason);
+      if (!reason) continue;
+      const profileId = asText(item.profileId);
+      const slotId = asText(item.slotId);
+      // Match PreviewPanel's own blocked formatting: "profile/slot: reason".
+      out.push(profileId ? `${profileId}${slotId ? "/" + slotId : ""}: ${reason}` : reason);
+    } else if (typeof item === "string" && item.trim()) {
+      out.push(item.trim());
+    }
+  }
+  return out;
 }
 
 // Only scalars are displayable. Ternaries alone are not enough: an object lands
@@ -115,9 +165,15 @@ export const api = {
   // `allowUnknownCost` is the explicit, checked acknowledgement for the current
   // review; the backend enforces the cost-approval policy, so the UI never
   // implies an unknown-cost route is free by omitting the field.
-  apply: (payload) => request("/operations", { method: "POST", body: JSON.stringify(payload) }),
-  getOperation: (id) => request("/operations/" + encodeURIComponent(id)),
-  undo: (id) => request("/operations/" + encodeURIComponent(id) + "/undo", { method: "POST" }),
+  // The three operation endpoints use `preserveOperationFailure`: a non-success
+  // apply/undo (partial, compensated, recovery_required) arrives as HTTP 200
+  // with ok:false AND the operation DTO, which the drawer must render.
+  apply: (payload) => request("/operations", {
+    method: "POST", body: JSON.stringify(payload), preserveOperationFailure: true }),
+  getOperation: (id) => request("/operations/" + encodeURIComponent(id),
+    { preserveOperationFailure: true }),
+  undo: (id) => request("/operations/" + encodeURIComponent(id) + "/undo",
+    { method: "POST", preserveOperationFailure: true }),
   // GET /models?provider=&profileId=&refresh=1 →
   // { ok:true, provider, models:[{id,name}], fetchedAt, source, stale, error }
   getModels: (opts) => request(modelsUrl(opts)),
