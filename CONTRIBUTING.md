@@ -66,6 +66,25 @@ git -C /tmp/hermes-agent checkout -q FETCH_HEAD
 git -C /tmp/hermes-agent rev-parse HEAD   # 0e427d788d253630d38a3a51cd76849e73cd6925
 ```
 
+The clone must also carry a **source identity**. `hermes_cli.__version__` is read
+from `install-stamp.json` — an installer-generated file that is git-ignored — so a
+bare clone reports the pre-stamp placeholder `0.0.0`. That trips the adapter's
+supported-baseline guard (`v0.21.7`), which refuses writes and fails the
+integration tests. Write the stamp the supported way, with Hermes' own
+`scripts/write_install_stamp.py`, deriving the base version from the verified tag:
+
+```sh
+python scripts/bootstrap_ci_runtime.py \
+    --checkout /tmp/hermes-agent \
+    --sha 0e427d788d253630d38a3a51cd76849e73cd6925 \
+    --tag v0.22.0+canary.20261014T070054Z
+```
+
+`bootstrap_ci_runtime.py` fetches the annotated tag, peels it to a commit, and
+refuses unless that commit, the pinned SHA, and the checkout `HEAD` all agree — it
+never hand-authors a version. After it runs, `probe_runtime()` reports
+`supported=True` on genuine metadata. CI runs the same step (see below).
+
 A plain checkout is enough: the plugin's own `.[test]` dependencies run the whole
 suite once the checkout is on the path — you do not install Hermes's own dependency
 set for these tests.
@@ -107,9 +126,10 @@ refuses an existing destination unless you pass `--replace`.
 only. Three jobs:
 
 - **backend** — `pip install -e '.[test]'` then `python -m pytest tests/`, on Python
-  3.11 and 3.13, after cloning the pinned Hermes checkout above.
+  3.11 and 3.13, after cloning the pinned Hermes checkout above and running
+  `scripts/bootstrap_ci_runtime.py` to give it a real source identity.
 - **browser** — `npm ci`, `npm run build`, `npx playwright install --with-deps chromium`,
-  then bare `npm test`, on Node 22 and 24, with the pinned checkout available.
+  then bare `npm test`, on Node 22 and 24, with the pinned, stamped checkout available.
 - **package** — the declared Python 3.10 floor: install, UI build, `compileall`, and
   the privacy guard.
 
