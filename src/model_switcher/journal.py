@@ -29,6 +29,21 @@ STEP_FAILED = "failed"
 STEP_COMPENSATED = "compensated"
 STEP_CONFLICT = "conflict"
 
+# Evidenced write PHASE of a failed step. Durable (survives a restart) and
+# internal only: it is deliberately NOT in the public step projection.
+#   WRITE_PHASE_PRE       -- the step failed BEFORE any write attempt
+#                            (revision recheck / fresh read). The store was
+#                            provably never touched by this step, so a later
+#                            revision change is an external edit, NOT evidence
+#                            of our write. The step stays retryable.
+#   WRITE_PHASE_POST      -- the write landed (a post_revision is recorded).
+#   WRITE_PHASE_AMBIGUOUS -- a write may or may not have landed; ownership is
+#                            undecidable. Fail closed to recovery_required.
+# Only WRITE_PHASE_PRE is safe to treat as a known no-write.
+WRITE_PHASE_PRE = "pre_write"
+WRITE_PHASE_POST = "post_write"
+WRITE_PHASE_AMBIGUOUS = "ambiguous"
+
 # Bounded wait for a competing writer (a dashboard request thread, the
 # crash-recovery path, a CLI in another process). Combined with WAL this keeps
 # concurrent opens from failing with "database is locked".
@@ -155,6 +170,11 @@ class OperationJournal:
             step_columns = {row[1] for row in conn.execute("PRAGMA table_info(steps)")}
             if "identity" not in step_columns:
                 conn.execute("ALTER TABLE steps ADD COLUMN identity TEXT")
+            # Durable, internal write-phase marker for failed steps: lets
+            # reconcile tell a provably-pre-write failure (known no-write)
+            # from a write that may have landed, across a restart.
+            if "write_phase" not in step_columns:
+                conn.execute("ALTER TABLE steps ADD COLUMN write_phase TEXT")
             op_columns = {row[1] for row in conn.execute("PRAGMA table_info(operations)")}
             if "failure_category" not in op_columns:
                 conn.execute(
@@ -214,6 +234,20 @@ class OperationJournal:
                 "UPDATE steps SET state=?, post_revision=?"
                 " WHERE op_id=? AND seq=?",
                 (state, post_revision, op_id, seq))
+        self._touch(op_id, OP_APPLYING)
+
+    def set_step_phase(self, op_id: str, seq: int, phase: str) -> None:
+        """Record the EVIDENCED write phase of a failed step.
+
+        ``WRITE_PHASE_PRE`` means the step failed before any write attempt, so
+        the store was provably untouched by it; a later revision change is an
+        external edit and reconcile must not treat it as an ambiguous write.
+        Durable (a plain column) so the classification survives a restart. It
+        is internal: never added to the public step projection.
+        """
+        self._conn.execute(
+            "UPDATE steps SET write_phase=? WHERE op_id=? AND seq=?",
+            (phase, op_id, seq))
         self._touch(op_id, OP_APPLYING)
 
     def finish(self, op_id: str, state: str) -> None:
