@@ -20,6 +20,9 @@
   --hms-radius: 6px;
 
   color: var(--midground, var(--text-color, #e6e8ee));
+  font-size: 14px;
+  line-height: 1.5;
+  min-width: 0;
 }
 
 /* Text-like fields and selects (NOT checkboxes — those stay natural below) */
@@ -106,4 +109,170 @@
 .hms-root label > input[type="checkbox"] {
   margin-right: 0.4em;
   vertical-align: middle;
+}
+
+/* ---------- Usability polish (DESIGN.md §4/§5/§6) ---------- */
+
+/* Workspace: matrix + bounded editor rail when the host pane has room. */
+.hms-root .hms-workspace {
+  display: block;
+}
+
+/* A ResizeObserver adds hms-wide when the actual host pane is >=1100px.
+   All rules are scoped so the host's own controls remain untouched. */
+.hms-root .hms-workspace.hms-wide {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 16px;
+  align-items: start;
+}
+
+/* Editor rail is DOM-first (before the matrix) but resolves to the RIGHT
+   column in the wide workspace; the matrix keeps the flexible column. */
+.hms-root .hms-workspace.hms-wide > [data-testid="action-surface"] {
+  grid-column: 2;
+  grid-row: 1;
+  max-width: 372px;
+}
+
+.hms-root .hms-workspace.hms-wide > section[aria-label="Profile model matrix"] {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+}
+
+.hms-root .hms-workspace > [data-testid="action-surface"] {
+  min-width: 0;
+}
+
+/* Human-readable state badges — text-backed semantics, colour is support only */
+.hms-root .hms-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--hms-border);
+  border-radius: 999px;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+/* Inline explanatory notes (read-only reasons, hidden-selection counts) */
+.hms-root .hms-note {
+  color: var(--text-muted-color, var(--midground, var(--text-color, #9aa1ad)));
+  font-size: 13px;
+}
+
+/* Removal disclosure reads as advanced, but its controls stay reachable */
+.hms-root details[data-testid="removal-advanced"] {
+  border: 1px solid var(--hms-border);
+  border-radius: var(--hms-radius);
+  padding: 6px 10px;
+}
+
+.hms-root details[data-testid="removal-advanced"] summary {
+  cursor: pointer;
+  padding: 4px 0;
+}
+
+.hms-root h2 {
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0 0 16px;
+}
+
+.hms-root h3 {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.hms-root .hms-profile-scope {
+  flex-basis: 100%;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--hms-border);
+  border-radius: var(--hms-radius);
+}
+
+.hms-root .hms-filter {
+  display: grid;
+  gap: 4px;
+  flex: 1 1 130px;
+  min-width: 0;
+}
+
+.hms-root .hms-filter input,
+.hms-root .hms-filter select,
+.hms-root [data-testid="change-editor"] input:not([type="checkbox"]),
+.hms-root [data-testid="change-editor"] select,
+.hms-root [data-testid="change-editor"] textarea {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  margin-top: 4px;
+}
+
+.hms-root [data-testid="change-editor"] label {
+  min-width: 0;
+}
+
+.hms-root details[data-testid="picker-advanced"] {
+  min-width: 0;
+}
+
+.hms-root summary {
+  display: list-item;
+  cursor: pointer;
+  padding: 8px 0;
+}
+
+.hms-root summary:focus-visible,
+.hms-root [data-testid="matrix-scroll"]:focus-visible {
+  outline: 2px solid var(--hms-accent);
+  outline-offset: 2px;
+}
+
+.hms-root [data-testid="matrix-scroll"] {
+  border: 1px solid var(--hms-border);
+  border-radius: var(--hms-radius);
+  margin-top: 8px;
+}
+
+.hms-root td,
+.hms-root th {
+  padding: 8px;
+  vertical-align: top;
+}
+
+.hms-root td[data-column="profile"] {
+  min-width: 100px;
+  max-width: 140px;
+  overflow-wrap: anywhere;
+}
+
+.hms-root td[data-column="configured"] {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  min-width: 160px;
+  overflow-wrap: anywhere;
+}
+
+.hms-root tr[data-selected="true"] {
+  outline: 1px solid var(--hms-accent);
+  outline-offset: -1px;
+}
+
+.hms-root [data-testid="action-surface"] {
+  border: 1px solid var(--hms-border);
+  border-radius: var(--hms-radius);
+  padding: 12px;
+  margin: 12px 0;
+}
+
+.hms-root [data-testid="profile-options"] label {
+  padding: 4px;
+  overflow-wrap: anywhere;
+}
+
+.hms-root .hms-expand {
+  text-align: left;
+  white-space: normal;
 }

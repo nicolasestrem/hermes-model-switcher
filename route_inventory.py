@@ -27,10 +27,11 @@ read-only (``writable=False``), never as a fake editable route.
 """
 from __future__ import annotations
 
+import contextvars
 import copy
 import enum
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass, field, replace
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 
 class SlotFamily(str, enum.Enum):
@@ -83,7 +84,25 @@ class SlotDescriptor:
     inherit_when_null: bool = False         # a literal null means "inherit" (chain slots)
     inherit_when_empty: bool = False         # empty/None means "inherit" (delegation.model)
     runtime_consumed: bool = True            # path read by the runtime; False => read-only
+    # Additive capability contract (dashboard DTO):
+    #   selectable            — the row may issue an explicit assignment/backend
+    #                           switch even when the CURRENT stored path is
+    #                           read-only (e.g. an unset TTS row that resolves to
+    #                           the model-less ``edge`` backend). Independent of
+    #                           ``writable``, which stays False for the current
+    #                           no-model section. The UI uses
+    #                           ``selectable ?? writable`` for selection.
+    #   requires_model_backend — a switch is only valid when it names an explicit,
+    #                           supported provider+model; an unset/disable/chain/
+    #                           remove of the model-less current section is refused.
     notes: str = ""
+    # Optional additive metadata (e.g. plugin-registered aux tasks: label/
+    # description/plugin/inheritFrom). Empty for core slots.
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    # None preserves legacy descriptors: selection follows current writability.
+    # Explicit True is reserved for assignments such as a speech backend switch.
+    selectable: Optional[bool] = None
+    requires_model_backend: bool = False
 
 
 @dataclass(frozen=True)
@@ -158,14 +177,328 @@ _CHAIN_SLOTS = {
     "fallback_providers",
 }
 
-_BUILTIN_AUX_SLOTS = (
-    # config_defaults.py auxiliary tasks. "goal_judge" is intentionally absent:
-    # judge.goal_judge.route below owns the auxiliary.goal_judge storage path, so
-    # a second row here would duplicate the same selectable slot.
-    ("auxiliary.review", PROTOCOL_TYPED_DECISION),
-    ("auxiliary.compression", PROTOCOL_CHAT),
-    ("auxiliary.title_generation", PROTOCOL_CHAT),
-)
+# Auxiliary selectors are DERIVED from the installed runtime, never frozen:
+# built-ins from DEFAULT_CONFIG['auxiliary'] (hermes_cli/config_defaults.py),
+# plugin-registered tasks from hermes_cli.plugins.get_plugin_auxiliary_tasks()
+# (PluginContext.register_auxiliary_task). Keep goal_judge out of the selector
+# set: judge.goal_judge.route below owns the auxiliary.goal_judge storage path,
+# so a second row here would duplicate one selectable slot.
+_JUDGE_OWNED_AUX_KEY = "goal_judge"
+
+# Policy/scalar keys of the auxiliary section — settings, not model slots.
+# auxiliary.openrouter_model is handled separately below (cross-cutting
+# OpenRouter fallback override consumed by agent/auxiliary_client.py).
+_AUX_POLICY_KEYS = frozenset({
+    "transient_retries", "free_only", "openrouter_model", "stream_only_base_urls"})
+
+# Obsolete aux blocks the runtime ignores at read time (config_defaults.py:
+# "session_search no longer uses an aux LLM; leftover blocks in user config are
+# ignored"). They surface neither as rows nor as edit targets.
+_OBSOLETE_AUX_BLOCKS = frozenset({"session_search", "web_extract"})
+
+# A plugin task key colliding with any of these crosses a DIFFERENT backend's
+# semantics: cross-cutting scalar keys (openrouter_model …), obsolete ignored
+# blocks and judge-owned goal_judge are all not selectable task slots. A
+# plugin registration under their name cannot shadow them truthfully.
+_AUX_DISALLOWED_TASK_KEYS = frozenset(
+    _AUX_POLICY_KEYS | _OBSOLETE_AUX_BLOCKS | {_JUDGE_OWNED_AUX_KEY})
+
+# /review reviewer is a full typed subagent; judge tasks speak typed decision.
+_AUX_TYPING_KEYS = frozenset({"review"})
+
+_BUILTIN_AUX_NOTES = {
+    "vision": ("An explicit auxiliary vision backend makes agent.image_input_mode "
+               "'auto' send a text interpretation of images to the main agent, "
+               "even when the main model supports vision. Explicit native/text "
+               "image modes remain unchanged. auxiliary.vision.download_timeout "
+               "is preserved and is not edited by this model selector."),
+}
+
+# Truthful record of runtime discovery that FAILED (not "empty"): consumers
+# must be able to distinguish "no plugin tasks registered" from "discovery
+# exploded and plugin rows silently vanished" (fail closed, never silent).
+#
+# Warnings are PER-BUILD, not a process-global pending sink: the collector is a
+# contextvar set for the duration of one ``build_inventory`` call, so a warning
+# raised while inventorying profile A can never contaminate the next build (or
+# a concurrent build in another thread/task for profile B). Consumers read the
+# returned ``InventoryResult.warnings``.
+_BUILD_WARNINGS: "contextvars.ContextVar[Optional[List[str]]]" = contextvars.ContextVar(
+    "route_inventory_build_warnings", default=None)
+
+
+def _record_inventory_warning(message: str) -> None:
+    """Append a warning to the ACTIVE build's collector (no-op outside a build).
+
+    Deduplicated within one build so a repeated failure path cannot spam the
+    same warning; callers pass sanitized text (never a raw exception string)."""
+    collector = _BUILD_WARNINGS.get()
+    if collector is not None and message not in collector:
+        collector.append(message)
+
+
+class InventoryResult(list):
+    """List-compatible inventory result (existing ``for x in build_inventory``
+    callers, ``len``, ``next`` and set-comprehensions all keep working) that also
+    carries the per-build ``warnings`` recorded while it was constructed."""
+
+    def __init__(self, observations: Iterable[SlotObservation], warnings: List[str]):
+        super().__init__(observations)
+        self.warnings: List[str] = list(warnings)
+
+
+def _installed_aux_defaults() -> Dict[str, Any]:
+    """The installed DEFAULT_CONFIG['auxiliary'] section, or {} when the Hermes
+    runtime is unavailable (degrades to no derivable aux selectors)."""
+    try:
+        from hermes_cli.config_defaults import DEFAULT_CONFIG as _installed
+        aux = _installed.get("auxiliary", {})
+    except Exception:
+        _record_inventory_warning(
+            "installed auxiliary task defaults unavailable; built-in auxiliary "
+            "slots are hidden until the runtime defaults import succeeds")
+        return {}
+    return aux if isinstance(aux, dict) else {}
+
+
+def _aux_placeholder_route() -> Dict[str, Any]:
+    """Shape of an unset aux task block (hermes_cli/plugins_aux_tasks.py's
+    non-inherit task_defaults: provider 'auto', empty model/base_url/api_key)."""
+    return {"provider": "auto", "model": "", "base_url": "", "api_key": "",
+            "timeout": 60, "extra_body": {}}
+
+
+def _mirror_layer_route_over_inherited(inherited: Dict[str, Any],
+                                       user: Dict[str, Any]) -> Dict[str, Any]:
+    """Mirror of agent/auxiliary_task_config.py ``_layer_over_inherited``:
+    once the operator pins a route (non-auto provider, model or base_url) the
+    whole route comes from the task's own block — a pinned task never picks up
+    the base's base_url/api_key (that would send one vendor's key to another's
+    endpoint). Empty-string route placeholders mean 'follow the base'."""
+    route_keys = frozenset({"provider", "model", "base_url", "api_key", "api_mode",
+                            "key_env", "api_key_env", "reasoning_effort"})
+    provider = str(user.get("provider") or "").strip().lower()
+    pinned = (provider not in ("", "auto") or bool(str(user.get("model") or "").strip())
+              or bool(str(user.get("base_url") or "").strip()))
+    merged = {k: v for k, v in inherited.items()
+              if not (pinned and k in route_keys)}
+    for key, value in user.items():
+        if value == "" and not (pinned and key in route_keys):
+            continue
+        if key == "provider" and not pinned:
+            continue
+        merged[key] = value
+    return merged
+
+
+def _layer_route_over_inherited(inherited: Dict[str, Any],
+                                user: Dict[str, Any]) -> Dict[str, Any]:
+    """Read-time layering of a task block over its inherit base — the REAL
+    runtime helper (agent.auxiliary_task_config._layer_over_inherited) whenever
+    it is importable, with the exact-shape mirror as fallback."""
+    try:
+        from agent.auxiliary_task_config import _layer_over_inherited as resolved
+    except Exception:
+        _record_inventory_warning(
+            "agent.auxiliary_task_config is unavailable; auxiliary "
+            "inheritance layering uses the exact-shape local mirror")
+        resolved = _mirror_layer_route_over_inherited
+    try:
+        return resolved(inherited, user)
+    except Exception:
+        _record_inventory_warning(
+            "runtime auxiliary inheritance layering failed; the exact-shape "
+            "local mirror was used for this task")
+        return _mirror_layer_route_over_inherited(inherited, user)
+
+
+def _aux_effective_route(cfg: Dict[str, Any], task_key: str,
+                         entries_by_key: Mapping[str, Dict[str, Any]],
+                         _visited: Optional[frozenset] = None) -> Dict[str, Any]:
+    """Read-time effective route of auxiliary.<task_key>, mirroring
+    agent/auxiliary_task_config.py:_get_auxiliary_task_config over the raw cfg
+    document: defaults (installed or plugin-declared) layered under the user
+    block; a registered ``inherit_from`` resolves over the base task's
+    effective route. Returns defaults + user block for built-ins.
+
+    A ``inherit_from`` CYCLE (A -> B -> A) is broken fail-closed: the row falls
+    back to its own defaults with a per-build warning, never an infinite
+    recursion / RecursionError."""
+    visited = _visited or frozenset()
+    aux = cfg.get("auxiliary") if isinstance(cfg, dict) else None
+    aux = aux if isinstance(aux, dict) else {}
+    raw = aux.get(task_key)
+    user_block = dict(raw) if isinstance(raw, dict) else {}
+    entry = entries_by_key.get(task_key)
+    if task_key in visited:
+        _record_inventory_warning(
+            f"plugin auxiliary task {task_key!r} participates in a circular "
+            "inherit_from chain; its effective route stops inheriting here")
+        if entry is not None and isinstance(entry, dict):
+            rd = entry.get("defaults")
+            own = copy.deepcopy(rd) if isinstance(rd, dict) else {}
+        else:
+            own = {}
+        return _layer_route_over_inherited({**_aux_placeholder_route(), **own},
+                                           copy.deepcopy(user_block))
+    if entry is not None and isinstance(entry, dict):
+        raw_defaults = entry.get("defaults")
+        own_defaults = copy.deepcopy(raw_defaults) if isinstance(raw_defaults, dict) else {}
+        inherit = entry.get("inherit_from")
+        if inherit and isinstance(inherit, str) and inherit != task_key:
+            base = _aux_effective_route(cfg, inherit, entries_by_key,
+                                        visited | {task_key})
+            merged = {**base, **own_defaults}
+        else:
+            merged = {**_aux_placeholder_route(), **own_defaults}
+        return _layer_route_over_inherited(merged, copy.deepcopy(user_block))
+    installed = _installed_aux_defaults().get(task_key)
+    base = copy.deepcopy(installed) if isinstance(installed, dict) else {}
+    return {**_aux_placeholder_route(), **base, **copy.deepcopy(user_block)}
+
+
+def _plugin_aux_entries_from_runtime() -> Dict[str, Dict[str, Any]]:
+    """Plugin-registered auxiliary task entries for the Hermes home active in
+    the current context (hermes_cli.plugins.get_plugin_auxiliary_tasks, whose
+    manager keys on the context-local home). Callers that inventory a specific
+    profile MUST scope that profile's home so profile B's rows come from B's
+    plugins, never the process-active profile's. Fail-closed on unreadable
+    state: the failure is RECORDED as a per-build warning (sanitized — no raw
+    exception text); the DTO reports it rather than rendering a false
+    'no plugins registered'."""
+    try:
+        from hermes_cli.plugins import get_plugin_auxiliary_tasks
+        entries = list(get_plugin_auxiliary_tasks())
+    except Exception:
+        _record_inventory_warning(
+            "plugin auxiliary task discovery failed; plugin-registered "
+            "auxiliary rows are hidden until discovery succeeds")
+        return {}
+    return {e.get("key"): dict(e) for e in entries
+            if isinstance(e, dict) and isinstance(e.get("key"), str) and e.get("key")
+            and e.get("key") != _JUDGE_OWNED_AUX_KEY}
+
+
+def _entries_by_key_map(entries: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    by_key: Dict[str, Dict[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        key = entry.get("key")
+        if isinstance(key, str) and key and key not in _AUX_DISALLOWED_TASK_KEYS:
+            # colliding keys (cross-cutting scalars, obsolete, judge-owned)
+            # can never shadow the real row's storage/semantics
+            by_key[key] = dict(entry)
+    return by_key
+
+
+_AUX_OPENROUTER_FALLBACK_SLOT = "auxiliary.openrouter_model"
+
+
+def _aux_route_is_pinned(block: Any) -> bool:
+    """Runtime pin test (agent.auxiliary_task_config._layer_over_inherited):
+    a non-``auto`` provider, a non-empty ``model``, or a non-empty ``base_url``
+    pins the route so it stops following its inherit base. ``""``/``auto`` and
+    whitespace-only placeholders mean "follow the base"."""
+    if not isinstance(block, dict):
+        return False
+    provider = str(block.get("provider") or "").strip().lower()
+    return (provider not in ("", "auto")
+            or bool(str(block.get("model") or "").strip())
+            or bool(str(block.get("base_url") or "").strip()))
+
+
+def _aux_user_block(cfg: Dict[str, Any], task: str) -> Dict[str, Any]:
+    """The raw ``auxiliary.<task>`` block as a dict (``{}`` when absent)."""
+    aux = cfg.get("auxiliary") if isinstance(cfg, dict) else None
+    aux = aux if isinstance(aux, dict) else {}
+    raw = aux.get(task)
+    return raw if isinstance(raw, dict) else {}
+
+
+def _aux_base_exists(base: str, entries_by_key: Mapping[str, Dict[str, Any]]) -> bool:
+    if base in entries_by_key:
+        return True
+    defaults = _installed_aux_defaults().get(base)
+    return (isinstance(defaults, dict) and base not in _AUX_POLICY_KEYS
+            and base not in _OBSOLETE_AUX_BLOCKS
+            and any(key in defaults for key in ("provider", "model", "base_url")))
+
+
+def _aux_inherit_cycle(task: str, inherit: str,
+                       entries_by_key: Mapping[str, Dict[str, Any]]) -> bool:
+    """True when following ``inherit``'s own ``inherit_from`` chain reaches
+    ``task`` (or repeats) — a cycle that must never read as inheritance."""
+    seen = {task}
+    current: Optional[str] = inherit
+    while isinstance(current, str) and current:
+        if current in seen:
+            return True
+        seen.add(current)
+        nxt = entries_by_key.get(current)
+        current = nxt.get("inherit_from") if isinstance(nxt, dict) else None
+    return False
+
+
+def _aux_observation_source(cfg: Dict[str, Any], task: str,
+                            entries_by_key: Mapping[str, Dict[str, Any]],
+                            obs_source: str) -> Optional[str]:
+    """Return ``"inherited"`` when an UNPINNED plugin task resolves through its
+    declared ``inherit_from`` base; else ``None`` (keep the stored source).
+
+    Mirrors the runtime: an unpinned task route (absent block, timeout-only, or
+    the ``auto``/empty placeholders the picker persists) follows its declared
+    base, so the row must report the base's provider/model as inherited — a
+    ``default``/``configured`` source makes ``/state`` label it Unset and the UI
+    hide the route the runtime actually uses. A pinned own route — whether the
+    user block or the plugin's OWN declared defaults pin provider/model/base_url
+    — stays configured/default. A missing base or a cycle never fabricates
+    inheritance (a genuinely unresolved base
+    warns; a cycle already warned in ``_aux_effective_route``)."""
+    entry = entries_by_key.get(task)
+    if not isinstance(entry, dict):
+        return None  # built-in selectors carry no declared inheritance
+    inherit = entry.get("inherit_from")
+    if not (isinstance(inherit, str) and inherit and inherit != task):
+        return None
+    defaults = entry.get("defaults")
+    defaults = defaults if isinstance(defaults, dict) else {}
+    if _aux_route_is_pinned(_aux_user_block(cfg, task)) or _aux_route_is_pinned(defaults):
+        return None  # own route (or own declared default) is pinned
+    if _aux_inherit_cycle(task, inherit, entries_by_key):
+        return None  # cycle: never claimed as inheritance
+    if not _aux_base_exists(inherit, entries_by_key):
+        _record_inventory_warning(
+            f"plugin auxiliary task {task!r} declares inherit_from {inherit!r} "
+            "which resolves no auxiliary task; its effective route stays "
+            "unpinned (inheritance not claimed)")
+        return None
+    # A real base's automatic routing is still inherited. Report its auto
+    # placeholders truthfully; do not invent a concrete provider/model.
+    return "inherited"
+
+
+def _aux_observation(cfg: Dict[str, Any], desc: SlotDescriptor,
+                     selector_keys: frozenset, entries_by_key: Mapping[str, Dict[str, Any]]
+                     ) -> SlotObservation:
+    """Aux rows carry the read-time EFFECTIVE route (runtime defaults layered
+    under the user block) so an unset task reports the real resolution —
+    provider 'auto' with no model, matching `hermes model` / the web picker.
+    Plugin-registered tasks resolve their declared defaults and inheritance; an
+    unpinned task following a declared base reports source 'inherited' so the UI
+    shows the provider/model the runtime uses."""
+    obs = _obs(cfg, desc)
+    # Only auxiliary SELECTOR rows (built-in or plugin-registered) reach here;
+    # the openrouter scalar row is added directly by build_inventory, so no
+    # dead "is this the scalar?" comparison exists.
+    task = desc.slot_id.split(".", 1)[1]
+    if task not in selector_keys and task not in entries_by_key:
+        return obs  # rows without selector semantics
+    effective = _aux_effective_route(cfg, task, entries_by_key)
+    source = _aux_observation_source(cfg, task, entries_by_key, obs.source)
+    if source is None:
+        return replace(obs, effective=effective)
+    return replace(obs, effective=effective, source=source)
 
 # Runtime-consumed, backend-specific specialist paths (tools/transcription_tools.py
 # resolves stt.<provider>.model; tts_tool*.py resolves tts.<provider>.model).
@@ -175,6 +508,11 @@ _SPECIALIST_SLOTS = (
 )
 
 # Fields consumed by tools/transcription_tools.py and tools/tts_tool_*.
+# Only backends with a REAL model config key appear here (per-provider keys
+# read by tools/transcription_tools._BUILTIN_MODEL_KEYS and the per-provider
+# tts sections of config_defaults.py); backends whose section carries NO model
+# key (edge / xai / piper TTS voices) are read-only rows below, with no
+# invented <section>.<backend>.model store key.
 _SPEECH_BACKENDS = {
     "stt": {name: "model" for name in ("local", "groq", "openai", "mistral", "xai", "deepinfra")},
     "tts": {name: "model" for name in ("openai", "gemini", "mistral", "minimax", "kittentts", "neutts", "deepinfra")},
@@ -182,18 +520,140 @@ _SPEECH_BACKENDS = {
 for _speech_fields in _SPEECH_BACKENDS.values():
     _speech_fields["elevenlabs"] = "model_id"
 
+# Unset speech defaults, mirrored from the installed runtime and read through
+# it whenever importable: STT has no seeded provider ("No seeded provider ...
+# unset = autodetect", config_defaults.py stt section) and the resolver's
+# default-first backend is tools/transcription_common.DEFAULT_PROVIDER = local;
+# TTS defaults to the free Edge voice backend (tools/tts_tool.DEFAULT_PROVIDER
+# and config_defaults.py tts.provider = edge).
+_SPEECH_FALLBACK_BACKEND = {"stt": "local", "tts": "edge"}
+
+
+def _speech_default_backend(cfg: Dict[str, Any], section: str) -> str:
+    """How the runtime resolves section.provider when unset (a stored pick
+    wins; unset = autodetect that defaults to 'local' STT / 'edge' TTS)."""
+    settings = cfg.get(section) if isinstance(cfg, dict) else None
+    if isinstance(settings, dict):
+        stored = settings.get("provider")
+        if isinstance(stored, str) and stored.strip():
+            return stored.strip()
+    fallback = _SPEECH_FALLBACK_BACKEND.get(section, "")
+    if section == "stt":
+        try:
+            from tools.transcription_common import DEFAULT_PROVIDER as resolved
+            return str(resolved)
+        except Exception:
+            return fallback
+    try:
+        from hermes_cli.config_defaults import DEFAULT_CONFIG as _installed
+        resolved = _installed.get("tts", {}).get("provider")
+    except Exception:
+        resolved = None
+    return str(resolved or fallback)
+
+
+# Truthful no-model-backend notes (NOT "unsupported"): these voice backends
+# carry NO model key at all, so the CURRENT section is presented read-only with
+# the backend SECTION as the storage path — never an invented model key the
+# runtime would ignore. The row stays SELECTABLE so an explicit supported
+# provider+model can switch it to a model-bearing backend.
+_SPEECH_NO_MODEL_NOTES = {
+    "stt": {
+        "local": ("unset stt.provider = autodetect, local-first "
+                  "(tools/transcription_tools._get_provider) — stt.local.model "
+                  "feeds the local faster-whisper backend"),
+    },
+    "tts": {
+        "edge": ("unset/default TTS backend is 'edge' (tts_tool.DEFAULT_PROVIDER / "
+                 "config_defaults tts.provider) — free Edge voices carry no model "
+                 "config key: the current section is read-only, no invented "
+                 "tts.edge.model store key; the row is still selectable to switch "
+                 "to a model-bearing backend"),
+        "xai": ("x.ai TTS voices are voice_id-only (no model config key) — current "
+                "tts.xai section read-only, no invented tts.xai.model store key; "
+                "still selectable to switch to a model-bearing backend"),
+        "piper": ("Piper selects voice files, not model ids (voices_dir) — no "
+                  "model config key: current tts.piper section read-only, no "
+                  "invented tts.piper.model store key; still selectable to switch "
+                  "to a model-bearing backend"),
+    },
+}
+
 
 def _speech_descriptor(cfg: Dict[str, Any], slot_id: str, provider: Optional[str] = None) -> SlotDescriptor:
     section = slot_id.rsplit(".", 1)[-1]
-    settings = cfg.get(section)
-    if not isinstance(settings, dict):
-        settings = {}
-    backend = str(provider or settings.get("provider") or "openai")
-    field = _SPEECH_BACKENDS[section].get(backend)
+    backend = str(provider or _speech_default_backend(cfg, section)).strip()
+    field_kind = _SPEECH_BACKENDS.get(section, {}).get(backend)
+    if field_kind is not None:
+        notes = _SPEECH_NO_MODEL_NOTES.get(section, {}).get(backend) or (
+            "Backend-specific speech model; voice and language settings are preserved")
+        return SlotDescriptor(slot_id, SlotFamily.SPECIALIST, PROTOCOL_SPEECH,
+            f"{section}.{backend}.{field_kind}", companion_paths=(f"{section}.provider",),
+            writable=True, runtime_consumed=True, selectable=True,
+            requires_model_backend=False, notes=notes)
+    # No model config key for this backend: the CURRENT section is read-only with
+    # an honest backend path (no invented key), but the row stays SELECTABLE so
+    # an explicit supported provider+model can switch to a model-bearing backend.
     return SlotDescriptor(slot_id, SlotFamily.SPECIALIST, PROTOCOL_SPEECH,
-        f"{section}.{backend}.{field or 'model'}", companion_paths=(f"{section}.provider",),
-        writable=field is not None, runtime_consumed=field is not None,
-        notes="Backend-specific speech model; voice and language settings are preserved")
+        f"{section}.{backend}", companion_paths=(f"{section}.provider",),
+        writable=False, runtime_consumed=False, selectable=True,
+        requires_model_backend=True,
+        notes=_SPEECH_NO_MODEL_NOTES.get(section, {}).get(backend) or
+        f"backend {backend!r} declares no model config key — read-only, no "
+        f"invented {section}.{backend}.model store key")
+
+
+def _model_identifier_refusal(slot_id: str, model: Any, what: str) -> Optional[str]:
+    """Shared guard for a LITERAL model id that will be stored byte-exact.
+
+    A model identifier must be a non-empty string with no leading/trailing
+    whitespace: it is persisted verbatim (never trimmed or repaired), so a
+    malformed value would store an id the runtime cannot route — e.g.
+    ``str(None)`` becomes the literal model id ``"None"``. Backs BOTH the speech
+    assignment guard and the cross-cutting ``auxiliary.openrouter_model`` scalar
+    so the model-string class cannot drift between them.
+    """
+    if not isinstance(model, str):
+        return (f"{slot_id}: {what} requires a string 'model', not "
+                f"{type(model).__name__}")
+    if not model.strip():
+        return f"{slot_id}: {what} requires a non-empty 'model'"
+    if model != model.strip():
+        return (f"{slot_id}: model has leading/trailing whitespace; "
+                "refusing to store an untrimmed model id")
+    return None
+
+
+def _speech_assignment_refusal(slot_id: str, value: Dict[str, Any]) -> Optional[str]:
+    """Refuse a speech SET that would persist an unusable model id.
+
+    Validate the submitted identifiers before backend lookup. The caller also
+    refuses a resolved model-less/voice-only section. An assignment must carry
+    a usable, LITERAL model id:
+
+      * ``provider`` (when the key is present) must be a string; ``""`` stays
+        the documented unset/unspecified sentinel resolved to the runtime
+        default backend, but an explicit invalid provider (``None``, a number,
+        a list) is REFUSED rather than allowed to fall back to the resolved
+        backend route, and a non-empty provider must be whitespace-clean;
+      * ``model`` must be a non-empty string.
+
+    Identifiers are stored byte-exact, so a provider/model id carrying leading
+    or trailing whitespace is REJECTED rather than silently canonicalized: the
+    value the client sent is the value that would be persisted, and a
+    ``" openai "`` provider must never be recognized-but-stored-untrimmed.
+    """
+    if "provider" in value:
+        provider = value["provider"]
+        if not isinstance(provider, str):
+            return (f"{slot_id}: 'provider' must be a string, not "
+                    f"{type(provider).__name__}")
+        if provider != provider.strip():
+            return (f"{slot_id}: provider has leading/trailing "
+                    "whitespace; refusing to store an untrimmed backend id")
+    model = value.get("model")
+    return _model_identifier_refusal(slot_id, model, "model-bearing speech route")
+
 
 # Explicitly unsupported: there is no runtime-consumed embedding-model config key
 # (hermes_cli/config_defaults.py has no ``embedding`` section), so this row is
@@ -204,8 +664,16 @@ _UNSUPPORTED_SPECIALIST_SLOTS = (
 )
 
 
-def build_inventory(cfg: Dict[str, Any]) -> List[SlotObservation]:
-    """Typed inventory of every supported slot family, including unset slots."""
+def _build_inventory_impl(cfg: Dict[str, Any],
+                          plugin_aux_entries: Optional[Iterable[Dict[str, Any]]] = None
+                          ) -> List[SlotObservation]:
+    """Typed inventory of every supported slot family, including unset slots.
+
+    ``plugin_aux_entries`` overrides plugin auxiliary-task discovery; None
+    discovers through hermes_cli.plugins.get_plugin_auxiliary_tasks().
+    """
+    entries_by_key = (_plugin_aux_entries_from_runtime() if plugin_aux_entries is None
+                      else _entries_by_key_map(plugin_aux_entries))
     out: List[SlotObservation] = []
     add = out.append
 
@@ -230,12 +698,53 @@ def build_inventory(cfg: Dict[str, Any]) -> List[SlotObservation]:
         inherit_from="fallback_providers", inherit_when_null=True,
         notes="null means inherit-unset; [] means explicitly disabled — never normalized")))
 
-    # Auxiliary built-ins (stores its own route; 'auto' is NOT 'same as main').
+    # Auxiliary: built-in model-slot tasks derived from the INSTALLED defaults
+    # (route-dict keys of DEFAULT_CONFIG["auxiliary"]), plus the cross-cutting
+    # OpenRouter fallback override scalar. 'goal_judge' is judge-owned (see
+    # above); policy scalars and runtime-ignored obsolete blocks are excluded.
     # The genuine guard is the slot's protocol (see preview_changes), not an
     # unconditional read-only bool — valid typed routes must stay permitted.
-    for slot_id, protocol in _BUILTIN_AUX_SLOTS:
-        add(_obs(cfg, SlotDescriptor(
-            slot_id, SlotFamily.AUXILIARY, protocol, slot_id)))
+    aux_defaults = _installed_aux_defaults()
+    aux_selector_keys: frozenset = frozenset(
+        key for key, block in aux_defaults.items()
+        if isinstance(block, dict) and "provider" in block
+        and key not in _AUX_POLICY_KEYS | _OBSOLETE_AUX_BLOCKS
+        and key != _JUDGE_OWNED_AUX_KEY)
+    for key in sorted(aux_selector_keys):
+        protocol = (PROTOCOL_TYPED_DECISION if key in _AUX_TYPING_KEYS else PROTOCOL_CHAT)
+        add(_aux_observation(
+            cfg, SlotDescriptor(
+                f"auxiliary.{key}", SlotFamily.AUXILIARY, protocol, f"auxiliary.{key}",
+                notes=_BUILTIN_AUX_NOTES.get(key, "")), aux_selector_keys, entries_by_key))
+    add(_obs(cfg, SlotDescriptor(
+        _AUX_OPENROUTER_FALLBACK_SLOT, SlotFamily.AUXILIARY, PROTOCOL_CHAT,
+        _AUX_OPENROUTER_FALLBACK_SLOT,
+        notes=("cross-cutting OpenRouter fallback override for the auxiliary "
+               "auto-chain — read by agent/auxiliary_client for ALL auxiliary "
+               "tasks at once; a non-':free' model engages the paid lane "
+               "(one-time runtime warning). Stored as the bare model id."))))
+
+    # Plugin-registered auxiliary tasks (register_auxiliary_task): the same
+    # auxiliary contract, plus optional metadata and declared inheritance.
+    for key in sorted(entries_by_key):
+        if key in aux_selector_keys or key in _AUX_DISALLOWED_TASK_KEYS:
+            continue  # a plugin never shadows a built-in selector or a scalar
+        entry = entries_by_key[key]
+        metadata = {
+            "label": str(entry.get("display_name") or key),
+            "description": str(entry.get("description") or ""),
+            "plugin": str(entry.get("plugin") or entry.get("plugin_key") or ""),
+            "inheritFrom": (str(entry.get("inherit_from")) if entry.get("inherit_from") else ""),
+        }
+        add(_aux_observation(
+            cfg, SlotDescriptor(
+                f"auxiliary.{key}", SlotFamily.AUXILIARY, PROTOCOL_CHAT,
+                f"auxiliary.{key}",
+                notes=("plugin-registered auxiliary task; effective route follows "
+                       f"{metadata['inheritFrom']!r} until this task is pinned"
+                       if metadata["inheritFrom"] else
+                       "plugin-registered auxiliary task"),
+                metadata=metadata), aux_selector_keys, entries_by_key))
 
     # Judges: core typed slots + thresholds are protected.
     add(_obs(cfg, SlotDescriptor(
@@ -289,9 +798,31 @@ def build_inventory(cfg: Dict[str, Any]) -> List[SlotObservation]:
     for slot_id, path, protocol, note in _UNSUPPORTED_SPECIALIST_SLOTS:
         add(_obs(cfg, SlotDescriptor(
             slot_id, SlotFamily.SPECIALIST, protocol, path,
-            writable=False, runtime_consumed=False, notes=note)))
+            writable=False, runtime_consumed=False, selectable=False, notes=note)))
 
     return out
+
+
+def build_inventory(cfg: Dict[str, Any],
+                    plugin_aux_entries: Optional[Iterable[Dict[str, Any]]] = None
+                    ) -> InventoryResult:
+    """Typed inventory of every supported slot family, including unset slots.
+
+    ``plugin_aux_entries`` overrides plugin auxiliary-task discovery; None
+    discovers through hermes_cli.plugins.get_plugin_auxiliary_tasks() for the
+    Hermes home active in the current context (scope the home to inventory a
+    specific profile).
+
+    Returns an ``InventoryResult`` — a ``list`` subclass, so existing
+    ``build_inventory`` callers are unchanged — whose ``warnings`` carry the
+    per-build discovery warnings (never a process-global pending sink).
+    """
+    warnings: List[str] = []
+    token = _BUILD_WARNINGS.set(warnings)
+    try:
+        return InventoryResult(_build_inventory_impl(cfg, plugin_aux_entries), warnings)
+    finally:
+        _BUILD_WARNINGS.reset(token)
 
 
 def _obs(cfg: Dict[str, Any], desc: SlotDescriptor) -> SlotObservation:
@@ -414,10 +945,12 @@ def _bad_chain_entry(chain: List[Any]) -> Optional[str]:
     return None
 
 
-def preview_changes(cfg: Dict[str, Any], edits: List[RouteEdit]) -> ChangePreview:
+def preview_changes(cfg: Dict[str, Any], edits: List[RouteEdit],
+                    plugin_aux_entries: Optional[Iterable[Dict[str, Any]]] = None) -> ChangePreview:
     """Deterministic before/after preview. Validates first; any rejected edit
     fails the whole preview (invalid preflight performs no writes)."""
-    inventory = {obs.descriptor.slot_id: obs for obs in build_inventory(cfg)}
+    inventory = {obs.descriptor.slot_id: obs
+                 for obs in build_inventory(cfg, plugin_aux_entries=plugin_aux_entries)}
     rejected: List[str] = []
     accepted: List[Tuple[str, SlotDescriptor, Any]] = []
 
@@ -428,7 +961,36 @@ def preview_changes(cfg: Dict[str, Any], edits: List[RouteEdit]) -> ChangePrevie
             continue
         desc = obs.descriptor
         if edit.slot_id in ("specialist.stt", "specialist.tts") and isinstance(edit.value, dict):
+            refusal = _speech_assignment_refusal(edit.slot_id, edit.value)
+            if refusal is not None:
+                rejected.append(refusal)
+                continue
             desc = _speech_descriptor(cfg, edit.slot_id, edit.value.get("provider"))
+            if not desc.writable:
+                backend = desc.storage_path.split(".")[1]
+                rejected.append(
+                    f"{edit.slot_id}: backend {backend!r} declares no model config key "
+                    f"(voice-only) — set {desc.storage_path.split('.')[0]}.provider to a "
+                    "model-bearing backend first; no invented store key is written")
+                continue
+        if desc.storage_path == _AUX_OPENROUTER_FALLBACK_SLOT and isinstance(edit.value, dict):
+            # The cross-cutting override is ONE bare model id: it is NOT a task
+            # route block and carries no provider/base_url of its own.
+            if any(str(edit.value.get(k) or "").strip() for k in ("provider", "base_url", "api_mode")):
+                rejected.append(
+                    f"{edit.slot_id}: the OpenRouter fallback override accepts only a "
+                    "'model' id — it is a shared auto-chain setting, not a task route")
+                continue
+            # The single stored value IS the model id: reject a malformed model
+            # (None / number / list / dict / empty / untrimmed) BEFORE
+            # ``_stored_value_for`` stringifies it — otherwise ``model: null``
+            # persists the literal id "None" and clobbers a valid fallback.
+            model_refusal = _model_identifier_refusal(
+                edit.slot_id, edit.value.get("model"),
+                "the OpenRouter fallback override")
+            if model_refusal is not None:
+                rejected.append(model_refusal)
+                continue
         if desc.storage_path == "moa.default_preset" and isinstance(edit.value, dict):
             try:
                 from hermes_cli.moa_config import normalize_moa_config
@@ -530,6 +1092,12 @@ def preview_changes(cfg: Dict[str, Any], edits: List[RouteEdit]) -> ChangePrevie
                 comp_val = payload[ck]
             else:
                 continue
+            if (desc.family is SlotFamily.SPECIALIST and comp.endswith(".provider")
+                    and not str(comp_val).strip()):
+                # "": unset/unspecified provider — never persist an explicit
+                # empty pick (the runtime treats a present-but-empty provider
+                # key as a broken explicit selection).
+                continue
             _set(after_cfg, comp, comp_val)
             comp_before = _get(cfg, comp)
             comp_before = None if comp_before is MISSING else comp_before
@@ -576,6 +1144,6 @@ def _stored_value_for(desc: SlotDescriptor, payload: Dict[str, Any]) -> Any:
 
 # Slots whose canonical stored value is the bare model-id string.
 _SCALAR_ROUTE_SLOTS = (
-    {"model.default", "delegation.model"}
+    {"model.default", "delegation.model", _AUX_OPENROUTER_FALLBACK_SLOT}
     | {path for _slot, path, _proto in _SPECIALIST_SLOTS}
 )

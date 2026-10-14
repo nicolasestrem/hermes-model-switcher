@@ -48,6 +48,7 @@ import copy
 import json
 import os
 
+from contextlib import contextmanager
 import threading
 import time
 import uuid
@@ -529,8 +530,9 @@ def _slot_configured_view(obs, cfg: Dict[str, Any],
     ids …) carry a bare model string; their provider comes from the paired
     companion path (model.provider / delegation.provider / cron.model_provider)
     when one exists. Route-dict slots read provider and model out of the stored
-    dict. Nothing is inferred: an absent provider reports as "" — never a guess
-    and never an inherited value (the resolved route lives in effectiveRoute).
+    dict. The OpenRouter auxiliary scalar has a fixed implicit provider, not
+    a companion to write. Otherwise an absent provider reports as "" — never
+    a guess or an inherited value (the resolved route lives in effectiveRoute).
     """
     stored = obs.configured
     if stored is _STORE_MISSING:
@@ -542,6 +544,8 @@ def _slot_configured_view(obs, cfg: Dict[str, Any],
         model = stored.get("model")
     elif isinstance(stored, str):
         model = stored
+        if d.storage_path == "auxiliary.openrouter_model" and stored.strip():
+            provider = "openrouter"
     if provider is None:
         for comp in d.companion_paths:
             # Only PROVIDER companions qualify: a route dict's neighbours can
@@ -617,6 +621,30 @@ def _ui_family_for_slot(slot_raw: Any) -> str:
     return _INVENTORY_FAMILY_TO_UI.get(prefix, prefix)
 
 
+@contextmanager
+def _plugin_home_scope(home: Any):
+    """Scope plugin-registry / resolver lookups to a specific Hermes home for
+    the block, via Hermes' own context-local override (never ``os.environ``).
+
+    ``hermes_cli.plugins.get_plugin_manager`` keys its manager on the
+    context-local home (``_plugin_home_key`` -> ``get_hermes_home()``), so
+    plugin auxiliary-task discovery must run under the home of the profile being
+    inventoried — otherwise every profile's DTO would report the process-active
+    profile's plugin rows. No config is written and no ``os.environ`` is mutated.
+    """
+    try:
+        from hermes_constants import (set_hermes_home_override,
+                                      reset_hermes_home_override)
+    except Exception:
+        yield
+        return
+    token = set_hermes_home_override(str(home))
+    try:
+        yield
+    finally:
+        reset_hermes_home_override(token)
+
+
 def _profile_inventory() -> Dict[str, Dict[str, Any]]:
     """Per discovered profile: sanitized route inventory. Never returns raw
     config documents."""
@@ -629,7 +657,12 @@ def _profile_inventory() -> Dict[str, Dict[str, Any]]:
                               "error": "config unreadable", "slots": []}
             continue
         slots = []
-        for obs in build_inventory(cfg):
+        # Scope THIS profile's home so plugin-aux discovery keys on the right
+        # registry (Claude 2) and read the per-build warnings off the result
+        # (no process-global pending sink).
+        with _plugin_home_scope(getattr(ident, "path", None)):
+            result = build_inventory(cfg)
+        for obs in result:
             d = obs.descriptor
             # UI contract: the main route presents as slotId "main"; the raw
             # inventory slot is "main.default" (model) with provider as a
@@ -649,11 +682,28 @@ def _profile_inventory() -> Dict[str, Dict[str, Any]]:
                 # inventory's source names onto it exactly.
                 "state": _UI_STATE_NAMES.get(obs.source, obs.source),
                 "writable": _runtime_writable() and d.writable and not d.protected,
+                # Additive capability contract: a row may be SELECTABLE (an
+                # explicit assignment/backend switch is permitted) even when its
+                # CURRENT stored path is read-only — e.g. an unset TTS row that
+                # resolves to the model-less edge backend. The UI selects on
+                # ``selectable ?? writable``. ``requiresModelBackend`` marks such
+                # a row as only accepting a set with an explicit supported
+                # provider+model (never an unset/disable/chain/remove of the
+                # model-less current section).
+                "selectable": (_runtime_writable() and not d.protected
+                               and (d.writable if d.selectable is None else d.selectable)),
+                "requiresModelBackend": bool(getattr(d, "requires_model_backend", False)),
                 "storagePath": d.storage_path,
                 # No runtime usage evidence here: last-observed is genuinely
                 # UNOBSERVED (never a copy of the configured value).
                 "lastObserved": None,
                 "protocol": d.protocol,
+                "note": d.notes,
+                # Plugin-registered task metadata (label/description/plugin/
+                # inheritFrom) is projected from the descriptor when present —
+                # the descriptor is the only truthful source, so it must reach
+                # the DTO and not stay hidden on the inventory object.
+                "metadata": (dict(d.metadata) if getattr(d, "metadata", None) else None),
             }
             if d.storage_path in _CHAIN_STORAGE_PATHS:
                 # Chains carry three states, not one: a stored null INHERITS
@@ -671,6 +721,13 @@ def _profile_inventory() -> Dict[str, Dict[str, Any]]:
             slots.append(entry)
         profiles[name] = {"id": name, "name": name,
                           "writable": _runtime_writable(), "slots": slots}
+        warnings = list(getattr(result, "warnings", ()) or ())
+        if warnings:
+            # Truthful fail-closed discovery status: a failed runtime
+            # discovery is REPORTED, never silently rendered as an empty
+            # selector set. These are THIS build's warnings — a failed build
+            # for another profile can never leak into this DTO.
+            profiles[name]["inventoryWarnings"] = warnings
     return profiles
 
 
@@ -775,9 +832,11 @@ def _removal_changes_for(desc, cfg: Dict[str, Any],
     # run the same check above; scalar slots previously skipped it.)
     if isinstance(current, str):
         observed = {
-            "provider": _provider_from_changes(
-                {c: _get_dotted(cfg, c) for c in desc.companion_paths
-                 if _get_dotted(cfg, c) is not _STORE_MISSING}),
+            "provider": (
+                "openrouter" if desc.storage_path == "auxiliary.openrouter_model"
+                else _provider_from_changes(
+                    {c: _get_dotted(cfg, c) for c in desc.companion_paths
+                     if _get_dotted(cfg, c) is not _STORE_MISSING})),
             "model": current,
         }
         _assert_removal_identity(desc, observed, from_payload)
@@ -870,8 +929,9 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
         except Exception:
             blocked.append({"profileId": pid, "reason": "config unreadable"})
             continue
-        desc = next((o.descriptor for o in build_inventory(cfg)
-                     if o.descriptor.slot_id == slot_raw), None)
+        with _plugin_home_scope(ident.path):
+            desc = next((o.descriptor for o in build_inventory(cfg)
+                         if o.descriptor.slot_id == slot_raw), None)
         if desc is None:
             blocked.append({"profileId": pid,
                             "reason": f"unknown slot {c.get('slotId')!r}"})
@@ -910,7 +970,8 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
                 continue
         else:
             try:
-                cp = preview_changes(cfg, [RouteEdit(slot_raw, _typed_payload(to or {}))])
+                with _plugin_home_scope(ident.path):
+                    cp = preview_changes(cfg, [RouteEdit(slot_raw, _typed_payload(to or {}))])
             except HTTPException as exc:
                 blocked.append({"profileId": pid, "slotId": c.get("slotId"),
                                 "reason": _clean_detail(exc)})
@@ -981,6 +1042,14 @@ def _referenced_providers(stored: Dict[str, Any]) -> List[str]:
         if dotted.endswith(".provider") or dotted.endswith("_provider"):
             if isinstance(value, str):
                 add(value)
+        elif (dotted == "auxiliary.openrouter_model"
+                and isinstance(value, str) and value.strip()):
+            # The SCALAR OpenRouter override ROUTES THROUGH OpenRouter
+            # (agent/auxiliary_client consumes it for every aux auto-chain
+            # task), so a non-empty value must authenticate like any routed
+            # provider — never vacuously pass the credential gate. Empty/
+            # unset values write no route and stay vacuous.
+            add("openrouter")
         elif isinstance(value, dict) and isinstance(value.get("provider"), str):
             add(value.get("provider"))
         elif dotted in _CHAIN_STORAGE_PATHS or dotted.endswith(".chain"):
@@ -1835,7 +1904,11 @@ def _unchanged_provider_hops(profile: str,
         return []
     try:
         cfg = _ADAPTER.load_raw_config(profile)
-        inventory = build_inventory(cfg)
+        ident = discover_profiles().get(profile)
+        if ident is None:
+            return []
+        with _plugin_home_scope(ident.path):
+            inventory = build_inventory(cfg)
     except Exception:
         return []
     out: List[str] = []

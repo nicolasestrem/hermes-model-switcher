@@ -125,6 +125,7 @@ test("applying a custom preview after reviewing a preset sends no stale presetId
   await expect(page.getByTestId("live-status")).toContainText("finished");
 
   // now build a custom preview in the editor on top of that context
+  await page.getByRole("button", { name: "Close operation drawer" }).click();
   await page.getByLabel("Select default main").check();
   await page.getByLabel("Select research main").check();
   await page.getByLabel("New provider").fill("zhipu");
@@ -136,7 +137,7 @@ test("applying a custom preview after reviewing a preset sends no stale presetId
 
   // The single custom Apply control must not carry the old presetId.
   await page.getByTestId("apply-custom").click();
-  await expect(page.locator('[data-testid="operation-drawer"] h3')).toContainText("op-2");
+  await expect(page.getByTestId("operation-drawer")).toContainText("Reference: op-2");
   await expect(page.getByTestId("result-default")).toContainText("Applied + read back");
 
   const bodies = await page.evaluate(() =>
@@ -152,12 +153,13 @@ test("applying a custom preview after reviewing a preset sends no stale presetId
 test("exact-model removal only matches exact identity", async ({ page }) => {
   await open(page);
   await page.getByLabel("Select default main").check();
+  await page.getByTestId("removal-advanced").locator('summary').click();
   await page.getByLabel("Exact provider/model to remove").fill("openai/gpt-5.1");
   await expect(page.getByRole("note")).toContainText("No selected configured slot matches exactly");
   await expect(page.getByRole("button", { name: "Preview changes" })).toBeDisabled();
 
   await page.getByLabel("Exact provider/model to remove").fill("anthropic/claude-sonnet-4-6");
-  await expect(page.getByRole("note")).toHaveCount(0);
+  await expect(page.getByRole("note")).toContainText("1 selected configured slot");
   await page.getByRole("button", { name: "Preview changes" }).click();
   await expect(page.getByTestId("preview-panel")).toContainText("remove anthropic/claude-sonnet-4-6");
 });

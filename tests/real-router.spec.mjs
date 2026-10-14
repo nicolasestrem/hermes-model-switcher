@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,17 +17,14 @@ const profiles = {
 };
 const cfg = (p) => readFileSync(profiles[p], "utf8");
 
-const ORIGINAL = {
-  // Seeded documents (tests/real_app.py PROFILES) — the undo contract is a
-  // byte-exact restore of the pre-apply file, providers rows included.
-  default: "model:\n  provider: anthropic\n  default: claude-sonnet-4-6\n"
-    + "providers:\n  zhipu:\n    base_url: http://127.0.0.1:8080/v1\n",
-  research: "model:\n  provider: openai\n  default: gpt-5.1\n"
-    + "providers:\n  zhipu:\n    base_url: http://127.0.0.1:8080/v1\n",
-};
-const seedCfg = (p) =>
-  p === "default" ? ORIGINAL.default
-  : `model:\n  provider: anthropic\n  default: claude-sonnet-4-6\n`;
+// The undo contract is a BYTE-EXACT restore of the pre-apply document. The
+// baseline comes from the REAL seed source (tests/real_app.py PROFILES), never
+// from hardcoded copies that drift from the fixture (e.g. omit delegation
+// rows), and the pre-apply bytes are captured on disk before any apply.
+const seedProfiles = JSON.parse(execFileSync(
+  process.env.HMS_PYTHON || "python",
+  [join(HERE, "real_app.py"), "--print-profiles"],
+  { cwd: join(HERE, ".."), encoding: "utf8" }));
 
 // Real-plugin-api responses never leak: no credentials, no host/lab paths,
 // no journal snapshots, no raw change payloads.
@@ -43,6 +41,12 @@ test("real router: preset select → preview → apply writes configs on disk �
 
   await page.goto(URL);
   await expect(page.getByRole("button", { name: /Fast lane/ })).toBeVisible();
+
+  // byte-exact undo baseline: the pre-apply bytes, cross-checked against the
+  // seed source so a drifted fixture fails here, not at the undo compare
+  const before = { default: cfg("default"), research: cfg("research") };
+  expect(before.default).toBe(seedProfiles.default);
+  expect(before.research).toBe(seedProfiles.research);
 
   // review the preset (auto-preview) then one-click apply — real engine
   await page.getByRole("button", { name: /Fast lane/ }).click();
@@ -70,8 +74,8 @@ test("real router: preset select → preview → apply writes configs on disk �
   await page.getByTestId("undo-guard").check();
   await page.getByTestId("undo-button").click();
   await expect(page.getByTestId("result-default")).toContainText("Restored (undo verified)");
-  expect(cfg("default")).toBe(ORIGINAL.default);
-  expect(cfg("research")).toBe(ORIGINAL.research);
+  expect(cfg("default")).toBe(before.default);
+  expect(cfg("research")).toBe(before.research);
 
   // every captured plugin-api response is leak-free
   for (const res of apiResponses) {
