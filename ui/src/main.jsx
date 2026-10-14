@@ -714,6 +714,10 @@ function PreviewPanel({ preview }) {
   );
 }
 
+// Per-step labels for the journal's REAL step vocabulary — pending | applied |
+// failed | compensated | conflict (journal.py). A ``not_written`` status only
+// ever existed in the test mock; no backend path can emit it, so it is not
+// mapped here — an unrecognised status renders the neutral default below.
 const RESULT_LABEL = {
   applied: { text: "Applied + read back", color: THEME.ok },
   // ``restored``/``compensated`` mean "the previous revision is back". That is a
@@ -724,8 +728,6 @@ const RESULT_LABEL = {
   compensated: { text: "Restored (undo verified)", color: THEME.ok },
   failed: { text: "FAILED — not verified", color: THEME.danger },
   conflict: { text: "Conflict — recovery required", color: THEME.warn },
-  // A known no-write conflict (F1): the step was deliberately left untouched.
-  not_written: { text: "Not changed — review again", color: THEME.warn },
 };
 
 // Same status, opposite meaning: an apply that rolled back mid-operation.
@@ -747,7 +749,10 @@ const STATE_COPY = {
   compensated: "rolled back after a failed apply",
   partial: "partially rolled back after a failed apply",
   recovery_required: "recovery required",
-  pending: "pending — not written",
+  // ``pending`` is the known no-write terminal state (the step never touched
+  // the store; the op stays retryable) — stated as a no-change fact, never a
+  // success. This is the only op-level home for "not changed".
+  pending: "Not changed — review again",
   undone: "undone",
   committed: "committed",
 };
@@ -821,8 +826,12 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
   const failureCopy = failure ? FAILURE_COPY[failure] || failure : null;
   // A failed apply may carry NO failure category (the rollback itself is the
   // outcome); the terminal state still has to be on screen, so the state line
-  // is driven by the state, not by the presence of ``failure``.
-  const showStateLine = !failure && !undoVerified && Boolean(finalState) && finalState !== "committed";
+  // is driven by the state, not by the presence of ``failure``. ``pending`` is
+  // the one terminal state that keeps the line even alongside a safe category:
+  // the step never wrote, so "not changed — review again" is the truthful
+  // headline next to the category.
+  const showStateLine = !undoVerified && Boolean(finalState) && finalState !== "committed" &&
+    (!failure || finalState === "pending");
   return (
     <aside ref={ref} tabIndex={-1} role="dialog" aria-modal="true"
       aria-label="Operation drawer" data-testid="operation-drawer"

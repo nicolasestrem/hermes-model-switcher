@@ -96,9 +96,14 @@
       //
       // ``rollbackMode`` covers an apply that fails MID-operation and then
       // compensates: the per-step status is the same ``compensated`` the undo
-      // path uses, so the drawer must not read it as a verified undo.
+      // path uses, so the drawer must not read it as a verified undo — and the
+      // engine persists the SAFE category BEFORE compensating (engine.py), so
+      // the real DTO carries ``failure`` alongside state ``compensated``.
       // ``noWrite`` covers the F1 revision-conflict case where nothing is
-      // written at all (status ``not_written``, state ``pending``).
+      // written: the FIRST step fails its pre-write recheck and the steps
+      // behind it stay ``pending`` (journal step states are only
+      // pending|applied|failed|compensated|conflict — never ``not_written``),
+      // op state ``pending`` with category ``revision_conflict``.
       const pids = preview.changes.length ? dedupeProfiles(preview.changes) : [];
       let state = "committed", failure = null, statusFor = () => "applied";
       if (M.statusOverride) {
@@ -107,16 +112,23 @@
         state = M.overrideState || "recovery_required";
         statusFor = () => M.statusOverride;
       } else if (noWrite) {
+        // F1: the first step fails its pre-write revision recheck; the steps
+        // behind it are never attempted and stay ``pending``. The op stays
+        // retryable: state/final_state ``pending`` + category
+        // ``revision_conflict``.
         state = "pending"; failure = "revision_conflict";
-        statusFor = () => "not_written";
+        statusFor = (i) => (i === 0 ? "failed" : "pending");
       } else if (rollback === "compensated") {
-        // Every step rolled back, no failure category — the rollback is the
-        // whole outcome (this is the case that used to read "0 · 0").
-        state = "compensated";
+        // Every step was written then rolled back. The engine records the safe
+        // category BEFORE compensating (engine.py:306-307), so the real DTO is
+        // state/final_state ``compensated`` + failure
+        // ``write_verification_failed`` (test_backend_reliability_fixes.py).
+        state = "compensated"; failure = "write_verification_failed";
         statusFor = () => "compensated";
       } else if (rollback === "partial") {
-        // Mixed: some steps rolled back, some never verified.
-        state = "partial";
+        // Mixed: one step rolled back, one never verified; the safe category
+        // for the failing step rides along with state/final_state ``partial``.
+        state = "partial"; failure = "io_error";
         statusFor = (i) => (i % 2 === 0 ? "compensated" : "failed");
       } else if (rollback === "recovery_required") {
         state = "recovery_required"; failure = "write_verification_failed";
