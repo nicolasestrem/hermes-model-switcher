@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolvePython } from "./real-server.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // Seeded by tests/real-server.mjs before the run; removed at teardown.
@@ -22,7 +23,7 @@ const cfg = (p) => readFileSync(profiles[p], "utf8");
 // from hardcoded copies that drift from the fixture (e.g. omit delegation
 // rows), and the pre-apply bytes are captured on disk before any apply.
 const seedProfiles = JSON.parse(execFileSync(
-  process.env.HMS_PYTHON || "python",
+  resolvePython(),
   [join(HERE, "real_app.py"), "--print-profiles"],
   { cwd: join(HERE, ".."), encoding: "utf8" }));
 

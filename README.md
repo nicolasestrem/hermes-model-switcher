@@ -2,8 +2,8 @@
 
 **Your profiles. Your models. One clear view.**
 
-Model Switcher is a community plugin for the Hermes Web Dashboard. It gathers every
-model-selection slot from every profile into one searchable table, lets you preview
+Model Switcher is a community plugin for the Hermes Web Dashboard. It gathers supported
+model-selection slots from your profiles into one searchable table, lets you preview
 the effect of a change before anything is written, applies it with per-profile
 readback and a guarded Undo, and saves the setup you liked as a reusable preset.
 

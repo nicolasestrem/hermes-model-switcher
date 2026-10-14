@@ -110,8 +110,8 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
-      # Bare `npm test`: tests/real-server.mjs and tests/real-router.spec.mjs spawn
-      # `$HMS_PYTHON` or, when unset, `python` — which actions/setup-python provides.
+      # Bare `npm test` shares real-server.mjs's interpreter resolver:
+      # HMS_PYTHON override, local .venv/bin/python, then python3 on PATH.
       - name: Run the browser suite
         run: npm test
 
