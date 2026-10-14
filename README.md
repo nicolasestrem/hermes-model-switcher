@@ -1,31 +1,28 @@
 # Hermes Model Switcher
 
-**Your profiles. Your models. One clear view.**
+**Choose your models without hunting through config files.**
 
-Model Switcher is a community plugin for the Hermes Web Dashboard. It gathers supported
-model-selection slots from your profiles into one searchable table, lets you preview
-the effect of a change before anything is written, applies it with per-profile
-readback and a guarded Undo, and saves the setup you liked as a reusable preset.
+Model Switcher is a community plugin for the Hermes Web Dashboard. It brings the
+supported model routes in your profiles into one searchable table. Pick a model,
+review the changes, then Apply. Save setups as presets and use guarded Undo when
+you need to revert.
 
-**Why it exists.** Model choices live in many places at once — main models,
-delegation, auxiliary tasks, judges/reviewers, fallback chains, Mixture-of-Agents,
-cron automation, and specialist routes like speech. Editing them by hand means
-opening config after config and hoping nothing was missed. Model Switcher turns that
-into one reviewed surface, with a journal and readback instead of blind edits.
+Hermes keeps model choices in several places: main models, delegation, auxiliary
+tasks, judges/reviewers, fallback chains, Mixture of Agents, cron automation and
+specialist routes like speech. Model Switcher puts them together so you can see
+what is configured and check a change before writing it.
 
 ## What you can do
 
-- **See the whole setup.** Every supported route across profiles — main, auxiliary,
-  delegation, fallback, speech, and the rest — in one filterable matrix, with
-  configured state and last-observed usage kept clearly separate.
-- **Change exactly what you select.** Pick individual slots or a matching group,
-  browse provider models or enter a custom provider/model pair, then preview before
-  applying. Filters change the view; checkboxes choose edit targets.
-- **Save your favorite setups.** Keep reviewed provider/model choices as named
-  presets and reuse them, with a preview step before anything is applied.
-- **Know what happened.** Inspect per-profile readback in the operation drawer and
-  recover with a revision-guarded Undo. Failures attempt reverse-order compensation
-  and report `recovery_required` when a conflict cannot be resolved.
+- Inspect supported routes across profiles in one filterable matrix. Configured
+  routes stay separate from recorded usage; an open session may still use its old model.
+- Select individual slots or a matching group, browse provider models or enter a
+  provider/model pair, then preview the change. Filters change the view; checkboxes
+  choose edit targets.
+- Save reviewed choices as named presets and reuse them after a fresh preview.
+- Check per-profile results in the operation drawer and use revision-guarded Undo.
+  If a write fails, the engine attempts to restore completed steps and flags any
+  unresolved conflict as `recovery_required`.
 
 Built for the Hermes Dashboard, using its themes and authenticated transport. MIT licensed.
 
@@ -66,6 +63,16 @@ hermes plugins update hermes-model-switcher
 Run `hermes plugins install --help` for the full set of options (`--ref`,
 `--enable`/`--no-enable`, `--force`, dependency-consent flags). These are the official
 Hermes plugin commands; the plugin does not ship a self-updater.
+
+**Pinned installs do not move with `update`.** Hermes refuses that command rather
+than silently replacing your chosen revision. To move a pin, rerun `hermes plugins
+install` with the same repository, `--force`, and `--ref` followed by the new commit's
+full 40-character SHA. The guarded lab check verified that same-source reinstalls
+preserve untracked local state.
+
+The Dashboard bundle is already built and committed. If the installer reports that
+build-time Node dependencies were skipped, you do not need to install them to use
+these shipped assets; Node.js is needed when rebuilding the UI from source.
 
 ### From the built package
 

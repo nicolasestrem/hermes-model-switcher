@@ -1259,8 +1259,10 @@ def _sanitize_public_url(value: Any) -> Any:
     """Strip userinfo (credentials) and query/fragment from a URL before it
     leaves the backend. A ``base_url`` can embed credentials or a query token;
     the public diff only ever needs ``scheme://host[:port]/path``."""
-    if not isinstance(value, str) or not value:
+    if value is None or value == "":
         return value
+    if not isinstance(value, str):
+        return "<unparseable URL>"  # malformed containers may contain secrets
     try:
         from urllib.parse import urlsplit, urlunsplit
         parts = urlsplit(value)
