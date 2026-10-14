@@ -111,8 +111,18 @@ def test_chain_roundtrip_uses_fallback_providers_paths(hermes_home):
 def test_preset_apply_roundtrips_chain_and_specialist_slots(hermes_home):
     home = hermes_home.path
     _m(hermes_home, "default")
-    chain_cfg = (BASE_CONFIG + "fallback_providers:\n  - lablocal/lab-7b\n"
-                 "stt:\n  openai:\n    model: old-stt\n")
+    # stt.provider pinned: unset providers resolve to LOCAL (autodetect,
+    # local-first), so an openai model edit must have the backend stored
+    # explicitly. ONE providers table (a duplicate key makes the config
+    # unreadable). openai is declared as an OPENAI-COMPATIBLE LOCAL endpoint
+    # (base_url row): the profile needs NO hosted credential, per the
+    # user-declared custom-endpoint rule — never a fake key.
+    chain_cfg = ("model:\n  provider: openai\n  default: gpt-4o-mini\n"
+                 "providers:\n"
+                 "  lablocal:\n    base_url: http://127.0.0.1:8080/v1\n"
+                 "  openai:\n    base_url: http://127.0.0.1:8087/v1\n"
+                 "fallback_providers:\n  - lablocal/lab-7b\n"
+                 "stt:\n  provider: openai\n  openai:\n    model: old-stt\n")
     _m(hermes_home, "alpha", config=chain_cfg)
     tc = _client()
     changes = [

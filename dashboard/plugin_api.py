@@ -60,7 +60,8 @@ from pydantic import BaseModel
 from hermes_adapter import HermesAdapter
 from hermes_adapter import discover_profiles
 from route_inventory import (RouteEdit, SlotFamily, build_inventory,
-                             preview_changes, _JUDGE_TYPED_KEYS)
+                             pop_inventory_warnings, preview_changes,
+                             _JUDGE_TYPED_KEYS)
 
 from model_switcher.adapters import adapter_for
 from model_switcher.adapters import _get_dotted
@@ -654,6 +655,12 @@ def _profile_inventory() -> Dict[str, Dict[str, Any]]:
                 # UNOBSERVED (never a copy of the configured value).
                 "lastObserved": None,
                 "protocol": d.protocol,
+                "note": d.notes,
+                # Plugin-registered task metadata (label/description/plugin/
+                # inheritFrom) is projected from the descriptor when present —
+                # the descriptor is the only truthful source, so it must reach
+                # the DTO and not stay hidden on the inventory object.
+                "metadata": (dict(d.metadata) if getattr(d, "metadata", None) else None),
             }
             if d.storage_path in _CHAIN_STORAGE_PATHS:
                 # Chains carry three states, not one: a stored null INHERITS
@@ -671,6 +678,12 @@ def _profile_inventory() -> Dict[str, Dict[str, Any]]:
             slots.append(entry)
         profiles[name] = {"id": name, "name": name,
                           "writable": _runtime_writable(), "slots": slots}
+        warnings = pop_inventory_warnings()
+        if warnings:
+            # Truthful fail-closed discovery status: a failed runtime
+            # discovery is REPORTED, never silently rendered as an empty
+            # selector set.
+            profiles[name]["inventoryWarnings"] = warnings
     return profiles
 
 
@@ -981,6 +994,14 @@ def _referenced_providers(stored: Dict[str, Any]) -> List[str]:
         if dotted.endswith(".provider") or dotted.endswith("_provider"):
             if isinstance(value, str):
                 add(value)
+        elif (dotted == "auxiliary.openrouter_model"
+                and isinstance(value, str) and value.strip()):
+            # The SCALAR OpenRouter override ROUTES THROUGH OpenRouter
+            # (agent/auxiliary_client consumes it for every aux auto-chain
+            # task), so a non-empty value must authenticate like any routed
+            # provider — never vacuously pass the credential gate. Empty/
+            # unset values write no route and stay vacuous.
+            add("openrouter")
         elif isinstance(value, dict) and isinstance(value.get("provider"), str):
             add(value.get("provider"))
         elif dotted in _CHAIN_STORAGE_PATHS or dotted.endswith(".chain"):
