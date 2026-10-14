@@ -31,8 +31,29 @@ export function alphaOf(css) {
     /^color\(\s*(?:srgb|srgb-linear|display-p3|a98-rgb|rec2020)\s+[^/\s]+\s+[^/\s]+\s+[^/\s]+\s*(?:\/\s*([^)\s]+))?\)$/,
   );
   if (c) return c[1] === undefined ? 1 : alphaValue(c[1]);
-  if (s.startsWith("#") || /^[a-z]+$/.test(s)) return 1; // hex / named
+  // Hex collapses to a single opaque alpha unless it carries the alpha channel:
+  // #RGB/#RRGGBB are opaque, #RGBA/#RRGGBBAA embed it in the trailing nibble or
+  // byte. Treating every "#…" as opaque would accept a translucent host token
+  // (e.g. #16181d80) and leave the sticky header see-through.
+  if (s.startsWith("#")) return hexAlpha(s);
+  if (/^[a-z]+$/.test(s)) return 1; // named colour
   return null;
+}
+
+// Alpha of a #-prefixed colour: 1 for the 3/6-digit opaque forms, the trailing
+// nibble/byte for the 4/8-digit forms, and `null` for any malformed length so
+// an unknown value is never assumed opaque.
+function hexAlpha(s) {
+  const h = s.slice(1);
+  if (!/^[0-9a-f]+$/.test(h)) return null;
+  if (h.length === 3 || h.length === 6) return 1;
+  if (h.length === 4) return clamp01(parseInt(h[3], 16) / 15); // #RGBA
+  if (h.length === 8) return clamp01(parseInt(h.slice(6, 8), 16) / 255); // #RRGGBBAA
+  return null;
+}
+
+function clamp01(n) {
+  return Number.isFinite(n) ? Math.min(Math.max(n, 0), 1) : null;
 }
 
 function alphaValue(token) {

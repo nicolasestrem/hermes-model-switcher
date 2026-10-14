@@ -35,6 +35,9 @@ test("select → preview → save → apply → readback → undo", async ({ pag
   await expect(page.getByTestId("result-default")).toContainText("Applied + read back");
   await expect(page.getByTestId("result-research")).toContainText("Applied + read back");
   await expect(page.getByTestId("live-status")).toContainText("finished");
+  // The summary counts come from the operation DTO's per-profile
+  // ``results[].status`` — never from a per-step field the backend does not send.
+  await expect(page.getByTestId("operation-summary")).toContainText("2 profiles applied · 0 need attention");
 
   // the preset apply pairs the reviewed preset with exactly this preview
   const opBodies = await page.evaluate(() =>
@@ -45,7 +48,7 @@ test("select → preview → save → apply → readback → undo", async ({ pag
   expect(opBodies[0].presetId).toBe("p-fast");
   expect(typeof opBodies[0].previewId).toBe("string");
 
-  // --- readback: applied statuses verified via readback.ok === true ---
+  // --- status comes straight from the operation DTO's results[].status ---
   await expect(page.getByTestId("result-default").locator("[data-status='applied']")).toBeVisible();
 
   // --- guarded undo ---
@@ -180,28 +183,51 @@ test("failed read and ok:false are not success", async ({ page }) => {
   await page.reload();
   await expect(page.getByRole("button", { name: /Fast lane/ })).toBeVisible();
 
-  // (b) apply succeeds but readback fails → per-profile FAILED, no success badge, undo still offered but result not claimed as success
+  // (b) apply fails at write verification → the backend returns HTTP 200 with
+  // ok:false AND the operation DTO (top-level ok is true only for
+  // committed/undone). The UI must PRESERVE that DTO — render per-profile
+  // FAILED, the safe failure category and the final state — instead of
+  // discarding it for a generic error. No undo for a non-committed operation.
   await page.evaluate(() => { window.__mockApi.failReadback = true; });
   await page.getByRole("button", { name: /Fast lane/ }).click();
   await expect(page.getByTestId("preview-panel")).toBeVisible();
   await page.getByTestId("apply-preset").click();
   const drawer = page.getByTestId("operation-drawer");
   await expect(drawer).toBeVisible();
-  await expect(page.getByTestId("result-default")).toContainText("FAILED — readback not verified");
-  await expect(page.getByTestId("result-research")).toContainText("FAILED — readback not verified");
+  await expect(page.getByTestId("result-default")).toContainText("FAILED — not verified");
+  await expect(page.getByTestId("result-research")).toContainText("FAILED — not verified");
+  // the safe failure category and final state come from the operation DTO
+  await expect(page.getByTestId("operation-failure")).toContainText("write_verification_failed");
+  await expect(page.getByTestId("operation-failure")).toContainText("final state: recovery_required");
+  await expect(page.getByTestId("operation-summary")).toContainText("0 profiles applied · 2 need attention");
   await expect(page.locator("[data-status='applied']")).toHaveCount(0);
   // Severity is explicit, not substring-matched: this summary legitimately
   // CONTAINS "failed" (per-profile statuses) but is not an app-level error, so
-  // it must stay neutral instead of being painted red.
+  // it must stay neutral instead of being painted red. It also names the
+  // non-success outcome so "finished" alone never reads as success.
   await expect(page.getByTestId("live-status")).toContainText("finished");
+  await expect(page.getByTestId("live-status")).toContainText("recovery_required");
   expect(await statusColor(page)).toBe("rgb(154, 161, 173)"); // THEME.muted fallback
-  // undo remains available for recovery, but guarded
+  // a failed (non-committed) operation is not undoable through the drawer, even
+  // once the guard is acknowledged — the backend assembles this via ``undoable``.
   await expect(page.getByTestId("undo-button")).toBeDisabled();
+  await page.getByTestId("undo-guard").check();
+  await expect(page.getByTestId("undo-button")).toBeDisabled();
+});
+
+test("an undo the backend refuses is announced and never claims a restore", async ({ page }) => {
+  await open(page);
+  await page.getByRole("button", { name: /Fast lane/ }).click();
+  await expect(page.getByTestId("preview-panel")).toBeVisible();
+  await page.getByTestId("apply-preset").click();
+  await expect(page.getByTestId("result-default")).toContainText("Applied + read back");
+
   await page.getByTestId("undo-guard").check();
   await page.evaluate(() => { window.__mockApi.failUndo = true; });
   await page.getByTestId("undo-button").click();
   await expect(page.getByTestId("live-status")).toContainText("Undo failed");
-  await expect(page.locator("[data-status='restored']")).toHaveCount(0);
+  await expect(page.locator("[data-status='compensated']")).toHaveCount(0);
+  await expect(page.getByTestId("result-default")).toContainText("Applied + read back");
 });
 
 test("a blocked apply reports the engine's reason, not a bare status code", async ({ page }) => {
@@ -356,4 +382,24 @@ test("the sticky matrix header stays opaque when the host surface token is trans
   const bg = await th.evaluate((el) => getComputedStyle(el).backgroundColor);
   expect(bg).toBe("rgb(22, 24, 29)"); // solid fallback, never transparent
   expect(bg).not.toBe("rgba(0, 0, 0, 0)");
+});
+
+test("detail and empty-state rows span exactly the rendered column count", async ({ page }) => {
+  // Regression: both used colSpan={8} while the table actually renders 7 columns
+  // (a leading checkbox column + the 6 headers), so each cell over-claimed a
+  // column that does not exist.
+  await open(page);
+  const headerCount = await page.locator('[data-testid="matrix-scroll"] thead th').count();
+  expect(headerCount).toBe(7);
+
+  // expand a slot's routing detail: its cell spans every column
+  await page.getByRole("button", { name: "auxiliary.goal_judge" }).click();
+  const detail = page.locator('[data-testid="matrix-scroll"] tr[data-detail] td').first();
+  expect(Number(await detail.getAttribute("colspan"))).toBe(headerCount);
+
+  // filter to zero rows: the empty-state cell spans every column too
+  await page.getByLabel("Filter by provider").fill("zzz-no-such-provider");
+  const empty = page.locator('[data-testid="matrix-scroll"] tbody td').first();
+  await expect(empty).toContainText("No slots match");
+  expect(Number(await empty.getAttribute("colspan"))).toBe(headerCount);
 });

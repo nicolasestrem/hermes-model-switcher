@@ -128,6 +128,22 @@ test('picker contract fixture: search and selection preserve provider-native IDs
   }
 });
 
+test('picker note: an ok:true catalog carrying a warning still surfaces it', async ({ page }) => {
+  // Reconciling the audit: the picker note is NOT dead code. The real /models
+  // returns ok:true WITH a non-null error when a provider row resolves but
+  // reports no models (or carries a warning), so this state is reachable and
+  // must render — prove it rather than deleting the branch.
+  await page.route('**/api/plugins/hermes-model-switcher/models?*', route =>
+    route.fulfill({ json: { ok: true, provider: 'nous', models: [], fetchedAt: null,
+      source: 'curated', stale: true, error: "provider 'nous' reported no models" } }));
+  await open(page);
+  await page.getByTestId('picker-advanced').locator('summary').click();
+  await page.getByLabel('Picker provider', { exact: true }).fill('nous');
+  await page.getByTestId('fetch-models').click();
+  await expect(page.getByTestId('picker-note')).toContainText('reported no models');
+  await expect(page.getByTestId('picker-error')).toHaveCount(0);
+});
+
 test('real API: object-shaped diff values render as JSON, never [object Object]', async ({ page }) => {
   await open(page);
   await page.getByLabel('Select research delegation.fallback_chain', { exact: true }).check();

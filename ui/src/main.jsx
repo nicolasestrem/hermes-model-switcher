@@ -215,6 +215,13 @@ function ProfileFilter({ profiles, value, onChange }) {
   );
 }
 
+// The matrix column headers, in order. One extra leading column holds the row
+// selection checkbox, so the real column count is these + 1. Detail and
+// empty-state rows span ALL columns via COLUMN_COUNT — hard-coding the number
+// silently drifted from the header set once already.
+const MATRIX_COLUMNS = ["Profile", "Slot", "Family", "State", "Configured route", "Last observed"];
+const COLUMN_COUNT = MATRIX_COLUMNS.length + 1; // + selection checkbox column
+
 function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSelection, onExpand, expanded, filters, setFilters }) {
   // Resolved per render-source and refreshed on host theme changes, never a
   // module-scope snapshot (see useOpaqueSurface).
@@ -332,7 +339,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
                 disabled={!writableInView.length}
                 onChange={onMasterChange} />
             </th>
-            {["Profile", "Slot", "Family", "State", "Configured route", "Last observed"].map((h) => (
+            {MATRIX_COLUMNS.map((h) => (
               <th key={h} scope="col" style={{
                 textAlign: "left", borderBottom: `1px solid ${THEME.border}`, padding: 4,
                 position: "sticky", top: 0, left: h === "Profile" ? 40 : undefined,
@@ -382,7 +389,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
                 </tr>
                 {expanded[key] && (
                   <tr data-detail={key}>
-                    <td colSpan={8} style={{ padding: "6px 12px", background: THEME.bg }}>
+                    <td colSpan={COLUMN_COUNT} style={{ padding: "6px 12px", background: THEME.bg }}>
                       <RoutingDetail slot={s} />
                     </td>
                   </tr>
@@ -391,7 +398,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
             );
           })}
           {filtered.length === 0 && (
-            <tr><td colSpan={8} style={{ color: THEME.muted, padding: 16 }}>No slots match these filters. Reset filters to see every profile slot.</td></tr>
+            <tr><td colSpan={COLUMN_COUNT} style={{ color: THEME.muted, padding: 16 }}>No slots match these filters. Reset filters to see every profile slot.</td></tr>
           )}
         </tbody>
       </table>
@@ -661,6 +668,15 @@ function changeHeadline(c) {
   return `${from} → ${to ? `${to.provider || (c.slotId === "auxiliary.openrouter_model" ? "openrouter" : "default")}/${to.model || "automatic"}` : "?"}`;
 }
 
+// Stable React key for a preview row. Index keys re-mount every list item on
+// insert/reorder, discarding focus and state; a change's identity is its
+// (profile, slot) pair. The index is only a last-resort fallback when that
+// identity is absent from a malformed payload.
+function changeKey(c, i) {
+  if (c && c.profileId && c.slotId) return `${c.profileId}/${c.slotId}`;
+  return "change-" + i;
+}
+
 function PreviewPanel({ preview }) {
   if (!preview) return null;
   return (
@@ -669,7 +685,7 @@ function PreviewPanel({ preview }) {
       <h3 style={{ margin: "0 0 6px" }}>Preview ({preview.changes.length} {preview.changes.length === 1 ? "change" : "changes"})</h3>
       <ul>
         {preview.changes.map((c, i) => (
-          <li key={i}>
+          <li key={changeKey(c, i)}>
             <strong>{c.profileId}</strong> / {c.slotId}: {changeHeadline(c)}
             {c.sideEffects && c.sideEffects.length > 0 && (
               <span style={{ color: THEME.warn }}> · side effects: {c.sideEffects.join(", ")}</span>
@@ -680,7 +696,7 @@ function PreviewPanel({ preview }) {
             {c.diff && c.diff.length > 0 && (
               <ul data-testid="preview-diff" style={{ margin: "2px 0 0", paddingLeft: 18, color: THEME.muted }}>
                 {c.diff.map((d, j) => (
-                  <li key={j} data-diff-path={d.path}>
+                  <li key={d.path || "diff-" + j} data-diff-path={d.path}>
                     <code>{d.path}</code>: {formatDiffValue(d.from)} → {formatDiffValue(d.to)}
                   </li>
                 ))}
@@ -705,6 +721,14 @@ const RESULT_LABEL = {
   failed: { text: "FAILED — not verified", color: THEME.danger },
   conflict: { text: "Conflict — recovery required", color: THEME.warn },
 };
+
+// Only a scalar is displayable: an object would render as "[object Object]" and
+// the safe failure category / state strings are always scalars.
+function scalarText(v) {
+  if (typeof v === "string") return v.trim() || null;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  return null;
+}
 
 function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUndoGuarded, busy }) {
   const ref = useRef(null);
@@ -741,31 +765,47 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
     return () => document.removeEventListener("keydown", onKey, true);
   }, [open]);
   if (!open || !operation) return null;
+  // Consume the ACTUAL operation DTO. Status is per-profile (`results[].status`)
+  // and the overall outcome is `operation.state` / `operation.final_state`; the
+  // backend exposes a SAFE failure category (never an exception string). The
+  // drawer must never infer success from anything else — in particular it no
+  // longer depends on a per-result ``readback`` field, which only ever existed
+  // in the test mock and never in a real response.
+  const results = Array.isArray(operation.results) ? operation.results : [];
+  const appliedCount = results.filter((r) => r.status === "applied").length;
+  const attentionCount = results.filter((r) => ["failed", "conflict"].includes(r.status)).length;
+  const failure = scalarText(operation.failure) || results.map((r) => scalarText(r.failure)).find(Boolean) || null;
+  const finalState = scalarText(operation.final_state) || scalarText(operation.state) || null;
   return (
     <aside ref={ref} tabIndex={-1} role="dialog" aria-modal="true"
       aria-label="Operation drawer" data-testid="operation-drawer"
       style={{ position: "fixed", right: 0, top: 0, bottom: 0, width: "min(380px, 100vw)", boxSizing: "border-box", overflow: "auto",
         background: THEME.bg, borderLeft: `1px solid ${THEME.border}`, padding: 12, zIndex: 50, outline: "none" }}>
       <h3>Operation results</h3>
-      <p>{operation.results.filter(r => r.status === "applied" && r.readback?.ok !== false).length} profiles applied · {operation.results.filter(r => ["failed", "conflict"].includes(r.status) || r.readback?.ok === false).length} need attention</p>
+      <p data-testid="operation-summary">{appliedCount} profiles applied · {attentionCount} need attention</p>
       <p className="hms-note">Reference: {operation.id}</p>
       <button type="button" onClick={onClose} aria-label="Close operation drawer">Close</button>
       <p style={{ color: THEME.muted }}>Configured ≠ live: existing sessions may keep their old route.</p>
+      {failure && (
+        <p data-testid="operation-failure" role="alert" style={{ color: THEME.danger }}>
+          {failure}{finalState ? ` · final state: ${finalState}` : ""}
+        </p>
+      )}
+      {!failure && finalState && finalState !== "committed" && (
+        <p data-testid="operation-state" style={{ color: THEME.warn }}>Final state: {finalState}</p>
+      )}
       <ul style={{ listStyle: "none", padding: 0 }}>
-        {operation.results.map((r) => {
+        {results.map((r) => {
           const label = RESULT_LABEL[r.status] || { text: r.status, color: THEME.fg };
           return (
             <li key={r.profileId} data-testid={`result-${r.profileId}`}
               style={{ borderBottom: `1px solid ${THEME.border}`, padding: "6px 0" }}>
               <strong>{r.profileId}</strong>{" "}
               <span role="status" style={{ color: label.color }} data-status={r.status}>
-                {r.readback && r.readback.ok === false
-                  ? "FAILED — readback not verified"
-                  : label.text}
+                {label.text}
               </span>
               <div style={{ fontSize: 13, color: THEME.muted }}>
                 rev {r.revisionBefore?.slice(0, 8) || "?"} → {r.revisionAfter?.slice(0, 8) || "?"}
-                {r.error && <span style={{ color: THEME.danger }}> · {r.error}</span>}
               </div>
             </li>
           );
@@ -1017,7 +1057,11 @@ function App() {
         profileId: editor.pickerProfileId || (filters.profileIds.length === 1 ? filters.profileIds[0] : "default"), refresh });
       if (seq === pickerSeq.current) setPicker({ data, error: null, loading: false });
     } catch (e) {
-      if (seq === pickerSeq.current) setPicker({ data: null, error: e.message, loading: false });
+      // Mirror the load path's safety: a non-Error rejection has no `.message`,
+      // so `e.message` would render the literal "undefined" in the picker alert.
+      if (seq === pickerSeq.current) {
+        setPicker({ data: null, error: e instanceof ApiError ? e.message : String(e), loading: false });
+      }
     }
   };
 
@@ -1033,8 +1077,15 @@ function App() {
       openDrawer();
       setUndoGuarded(false);
       await refreshSilently();
-      announce(`Operation ${op.operation.id} finished: ` +
-        op.operation.results.map((r) => `${r.profileId} ${r.status}`).join(", "));
+      // ok === true only for committed/undone. A non-success apply still carries
+      // the operation DTO (per-profile statuses + safe failure category +
+      // final_state), so render the drawer either way; the announcement stays
+      // neutral (the per-profile statuses carry the severity) and never claims a
+      // success it did not get.
+      const statuses = op.operation.results.map((r) => `${r.profileId} ${r.status}`).join(", ");
+      const outcome = op.ok === true ? "" : ` · ${op.operation.final_state || "incomplete"}` +
+        (op.operation.failure ? ` (${op.operation.failure})` : "");
+      announce(`Operation ${op.operation.id} finished: ${statuses}${outcome}`);
     } catch (e) {
       announce("Apply failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
     } finally {
@@ -1065,7 +1116,13 @@ function App() {
       setOperation(op.operation);
       setUndoGuarded(false);
       await refreshSilently();
-      announce("Undo finished: " + op.operation.results.map((r) => `${r.profileId} ${r.status}`).join(", "));
+      // A conflicted undo returns ok:false WITH the operation DTO
+      // (recovery_required); render it and say so plainly instead of "Undo
+      // failed" for an outcome the user can actually see in the drawer.
+      const statuses = op.operation.results.map((r) => `${r.profileId} ${r.status}`).join(", ");
+      const outcome = op.ok === true ? "" : ` · ${op.operation.final_state || "incomplete"}` +
+        (op.operation.failure ? ` (${op.operation.failure})` : "");
+      announce(`Undo finished: ${statuses}${outcome}`);
     } catch (e) {
       announce("Undo failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
     } finally {
@@ -1111,7 +1168,7 @@ function App() {
           style={{ color: THEME.danger, marginBottom: 8 }}>
           Load failed: {loadError}
         </div>
-        <button onClick={load}>Retry</button>
+        <button onClick={() => load()}>Retry</button>
       </div>
     );
   }

@@ -82,31 +82,55 @@
       const preview = lastPreview;
       if (!preview || (body.previewId && body.previewId !== preview.id))
         return { status: 200, body: { ok: false, error: "unknown or stale preview" } };
+      const failed = Boolean(M.failReadback);
       const id = "op-" + (++opSeq);
+      // Mirror the REAL POST /operations DTO (_op_dto): id / state / results /
+      // undoable, and — on a failed apply — a SAFE failure category plus
+      // final_state. The real backend never sends a per-step ``readback`` object
+      // nor raw exception text, so neither does this mock: the UI must render
+      // failures from ``results[].status`` / ``operation.failure`` alone.
       const results = preview.changes.length
         ? dedupeProfiles(preview.changes).map((pid) => ({
-            profileId: pid, status: M.failReadback ? "failed" : "applied",
-            revisionBefore: "rev" + pid + "-a", revisionAfter: M.failReadback ? "rev" + pid + "-a" : "rev" + pid + "-b",
-            readback: M.failReadback ? { ok: false, error: "readback failed: config unreadable" } : { ok: true },
-            error: M.failReadback ? "readback failed: config unreadable" : null,
+            profileId: pid, status: failed ? "failed" : "applied",
+            revisionBefore: "rev" + pid + "-a",
+            revisionAfter: failed ? "rev" + pid + "-a" : "rev" + pid + "-b",
           }))
         : [];
-      const operation = { id, results };
+      const operation = {
+        id,
+        state: failed ? "recovery_required" : "committed",
+        results,
+        // A non-committed operation is not undoable through the drawer; the
+        // backend exposes that as ``undoable: false``.
+        undoable: results.some((r) => r.status === "applied"),
+        // Terminal classification + a FIXED failure category (never raw text).
+        final_state: failed ? "recovery_required" : "committed",
+        failure: failed ? "write_verification_failed" : null,
+      };
       operations[id] = operation;
-      return { status: 200, body: { ok: true, operation } };
+      // Envelope semantics: top-level ``ok`` is true only for committed/undone,
+      // so a failed apply is HTTP 200 with ok:false AND the operation DTO — the
+      // exact shape the UI must NOT discard.
+      return { status: 200, body: { ok: !failed, operation } };
     }
     const opUndo = path.match(new RegExp("^" + BASE + "/operations/([^/]+)/undo$"));
     if (opUndo && method === "POST") {
       const op = operations[opUndo[1]];
       if (!op) return { status: 200, body: { ok: false, error: "unknown operation" } };
       if (M.failUndo) return { status: 200, body: { ok: false, error: "revision conflict: profile edited after apply" } };
+      // Real undo compensates each applied step: step state "compensated"
+      // (rendered "Restored (undo verified)"), operation state "undone".
       const operation = {
         id: op.id,
+        state: "undone",
         results: op.results.map((r) => ({
           ...r,
-          status: r.status === "applied" ? "restored" : r.status,
+          status: r.status === "applied" ? "compensated" : r.status,
           revisionAfter: "rev" + r.profileId + "-a",
         })),
+        undoable: false,
+        final_state: "undone",
+        failure: null,
       };
       operations[op.id] = operation;
       return { status: 200, body: { ok: true, operation } };
@@ -114,8 +138,9 @@
     const opGet = path.match(new RegExp("^" + BASE + "/operations/([^/]+)$"));
     if (opGet && method === "GET") {
       const op = operations[opGet[1]];
-      return op ? { status: 200, body: { ok: true, operation: op } }
-        : { status: 200, body: { ok: false, error: "unknown operation" } };
+      if (!op) return { status: 200, body: { ok: false, error: "unknown operation" } };
+      // ok iff committed/undone, mirroring the backend envelope.
+      return { status: 200, body: { ok: op.state === "committed" || op.state === "undone", operation: op } };
     }
     return { status: 404, body: { error: "not found: " + path } };
   }
