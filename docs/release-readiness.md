@@ -98,3 +98,20 @@ Raw focused verification on Windows:
 ```
 
 Exit code 0. Three existing symlink tests skip on Windows; the new publication-boundary regression passes. No runtime/UI changes were made.
+
+## PR #10 latest-head verification
+
+Checked both inline findings and the full Claude review against `601011c`. Both inline findings have code fixes and regression coverage. Re-ran the complete Linux backend suite including the approved-document manifest test and all symlink cases:
+
+```text
+413 passed, 2 warnings in 32.10s
+TEST_EXIT=0
+```
+
+Local guard output:
+
+```text
+privacy guard: clean (110 files scanned)
+```
+
+No additional review comments were present at this check. The automated review of `601011c` was still running, so this does not assert its eventual outcome. Existing private-Hermes-API and platform limitations remain documented.
