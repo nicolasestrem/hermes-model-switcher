@@ -18,6 +18,7 @@ Exit codes: 0 clean, 1 findings, 2 error.
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 import subprocess
 import sys
@@ -144,9 +145,9 @@ def main(argv: list[str]) -> int:
     staged = staged_files()
     files = staged if staged_only else tracked_files()
     # Scan the index independently: unstaged edits must never hide staged secrets.
-    findings = scan(staged, blob_ref=":")
+    findings = scan(staged if staged_only else files, blob_ref=":")
     if not staged_only:
-        findings += scan(files)
+        findings += scan([path for path in files if os.path.lexists(path)])
     findings = list(dict.fromkeys(findings))
     if findings:
         print("PRIVACY GUARD: private-looking data in tracked files\n"

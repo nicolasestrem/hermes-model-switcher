@@ -3,12 +3,25 @@
 #
 # Usage: bash scripts/install-local.sh [HERMES_HOME] [PACKAGE_DIR] [--replace]
 #
-# Refuses the LIVE home (~/.hermes) unless HERMES_MODEL_SWITCHER_ALLOW_LIVE=1.
+# GNU/Linux only (GNU readlink required). Always refuses the live home (~/.hermes).
 # Build the package first:  npm run build && python scripts/build_package.py
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-TARGET_HOME="${1:-${HERMES_HOME:-}}"
+REPLACE=0
+POSITIONAL=()
+for ARG in "$@"; do
+  case "$ARG" in
+    --replace) REPLACE=1 ;;
+    --*) echo "install-local: unknown option $ARG" >&2; exit 2 ;;
+    *) POSITIONAL+=("$ARG") ;;
+  esac
+done
+if [ "${#POSITIONAL[@]}" -gt 2 ]; then
+  echo "Usage: install-local.sh [HERMES_HOME] [PACKAGE_DIR] [--replace]" >&2
+  exit 2
+fi
+TARGET_HOME="${POSITIONAL[0]:-${HERMES_HOME:-}}"
 if [ -z "$TARGET_HOME" ]; then
   echo "lab helper: no target home given" >&2
   exit 2
@@ -44,7 +57,7 @@ if [ "$RESOLVED_DEST" != "$DEST" ]; then
   echo "lab helper: destination escapes the lab home" >&2; exit 3
 fi
 
-PKG="${2:-$REPO/dist-package/hermes-model-switcher}"
+PKG="${POSITIONAL[1]:-$REPO/dist-package/hermes-model-switcher}"
 # ``__init__.py`` is part of the loadable layout, not a nicety: Hermes rejects a
 # plugin.yaml with no __init__.py/desktop/plugin.js/plugin.json beside it.
 if [ ! -f "$PKG/dashboard/manifest.json" ] || [ ! -f "$PKG/dashboard/dist/index.js" ] \
@@ -54,12 +67,12 @@ if [ ! -f "$PKG/dashboard/manifest.json" ] || [ ! -f "$PKG/dashboard/dist/index.
 fi
 
 if [ -e "$DEST" ]; then
-  if [ "${3:-}" != "--replace" ]; then
+  if [ "$REPLACE" != 1 ]; then
     echo "install-local: destination exists; pass --replace to replace it" >&2
     exit 5
   fi
   # Preserve the old install and recovery state rather than deleting it.
-  BACKUP="$(mktemp -d -- "$TARGET_HOME/plugins/.model-switcher-backup.XXXXXXXX")"
+  BACKUP="$(mktemp -d -- "$TARGET_HOME/.model-switcher-backup.XXXXXXXX")"
   mv -- "$DEST" "$BACKUP/plugin"
   echo "install-local: previous installation preserved at $BACKUP/plugin"
 fi

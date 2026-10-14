@@ -87,11 +87,11 @@ class OperationJournal:
         # Private DB and parent: group/other get no access. Private
         # recovery snapshots stay local — they are the only source for
         # exact undo, but they must never be readable beyond the user.
+        if os.path.islink(db_dir):
+            raise ValueError("journal parent directory must not be a symlink")
         os.chmod(db_dir, stat.S_IRWXU)
         if os.name == "posix" and stat.S_IMODE(os.stat(db_dir).st_mode) != 0o700:
             raise PermissionError("journal directory permissions must be private")
-        if os.path.islink(db_dir):
-            raise ValueError("journal parent directory must not be a symlink")
         # Create privately before SQLite opens the file, so permissive umasks
         # cannot expose the initial database or its recovery snapshots.
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)

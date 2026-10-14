@@ -1240,7 +1240,7 @@ def _sanitize_public_url(value: Any) -> Any:
         from urllib.parse import urlsplit, urlunsplit
         parts = urlsplit(value)
         if not parts.netloc:
-            return ""  # malformed URLs must not echo potential credentials
+            return "<unparseable URL>"  # preserve set-vs-cleared semantics
         host = parts.hostname or ""
         if ":" in host:
             host = f"[{host}]"  # retain valid IPv6 authority syntax
@@ -1248,8 +1248,7 @@ def _sanitize_public_url(value: Any) -> Any:
         netloc = f"{host}:{port}" if port is not None else host
         return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
     except (ValueError, TypeError):
-        return ""  # never return the original potentially secret-bearing URL
-
+        return "<unparseable URL>"  # never echo potentially secret-bearing input
 
 
 def _public_route_field(key: str, value: Any) -> Any:

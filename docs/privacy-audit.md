@@ -31,3 +31,9 @@ python scripts/privacy_guard.py
 ```
 
 Local result: 11 standalone tests ran; 10 passed, one POSIX-only permission check skipped on Windows. Scanner returned exit 0 for 97 tracked files at inspection time. Remote Linux mode checks and full host integration must be included in final acceptance. Raw command output is available in the implementation verification record.
+
+### PR 10 review follow-up
+
+Journal directories are checked for symlinks immediately before permission changes. Permission errors intentionally fail closed on every platform; POSIX mode verification adds a further check on Linux. Native Windows and mounts without enforceable private permissions remain unverified and may reject journal creation.
+
+Scheme-less or malformed configured URLs display `<unparseable URL>` in public DTOs, preserving the distinction between a configured endpoint and a cleared field without echoing credentials. The privacy guard scans every tracked index blob plus existing working-tree files; an unstaged deletion cannot hide indexed credentials or cause a spurious working-tree read error.

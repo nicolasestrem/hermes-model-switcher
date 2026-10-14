@@ -56,3 +56,64 @@ def test_cannot_replace_source_checkout(monkeypatch):
     with pytest.raises(SystemExit):
         builder.main()
     assert (builder.REPO / "README.md").is_file()
+
+
+@pytest.mark.parametrize("source", ["docs", "src/model_switcher"])
+def test_output_inside_recursive_input_is_rejected(source, monkeypatch):
+    builder = load_builder()
+    parent = builder.REPO / source
+    destination = parent / builder.NAME
+    monkeypatch.setattr("sys.argv", ["build_package.py", "--out", str(parent)])
+    with pytest.raises(SystemExit):
+        builder.main()
+    assert not destination.exists()
+
+
+def test_parent_symlink_input_preserves_output(tmp_path, monkeypatch):
+    builder = load_builder()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "required.txt").write_text("private")
+    try:
+        (repo / "linked").symlink_to(external, target_is_directory=True)
+    except OSError:
+        pytest.skip("Creating symlinks is unavailable")
+    (repo / "docs").mkdir()
+    (repo / "src" / builder.PY_PACKAGE).mkdir(parents=True)
+    monkeypatch.setattr(builder, "REPO", repo)
+    monkeypatch.setattr(builder, "COPY_FILES", ["linked/required.txt"])
+    monkeypatch.setattr(builder, "PY_MODULES", [])
+    monkeypatch.setattr(builder, "DASHBOARD", [])
+    for path in ["scripts/privacy_guard.py", "dashboard/dist/index.js", "dashboard/dist/style.css"]:
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("fixture")
+    output = tmp_path / "output" / builder.NAME
+    output.mkdir(parents=True)
+    (output / "keep.txt").write_text("preserve")
+    monkeypatch.setattr("sys.argv", ["build_package.py", "--out", str(output.parent), "--replace"])
+    with pytest.raises(SystemExit):
+        builder.main()
+    assert (output / "keep.txt").read_text() == "preserve"
+
+
+@pytest.mark.parametrize("unsafe", [False, True])
+def test_output_parent_alias_uses_canonical_containment(tmp_path, monkeypatch, unsafe):
+    builder = load_builder()
+    target = builder.REPO / "docs" if unsafe else tmp_path / "safe"
+    target.mkdir(exist_ok=True)
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("Creating symlinks is unavailable")
+    monkeypatch.setattr("sys.argv", ["build_package.py", "--out", str(alias)])
+    if unsafe:
+        with pytest.raises(SystemExit):
+            builder.main()
+        assert not (target / builder.NAME).exists()
+    else:
+        builder.main()
+        assert (target / builder.NAME / "README.md").is_file()

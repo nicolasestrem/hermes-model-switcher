@@ -57,13 +57,13 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(self.run_guard('--staged-only').returncode, 0)
         self.assertEqual(self.run_guard().returncode, 1)
 
-    def test_missing_tracked_file_fails_closed(self):
+    def test_deleted_clean_tracked_file_scans_index(self):
         Path('sample.txt').write_text('clean')
         self.git('add', 'sample.txt')
         Path('sample.txt').unlink()
         result = self.run_guard()
-        self.assertEqual(result.returncode, 2)
-        self.assertIn('READ-ERROR', result.stdout)
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn('READ-ERROR', result.stdout)
 
     def test_staged_deletion_does_not_read_absent_blob(self):
         Path('sample.txt').write_text('clean')

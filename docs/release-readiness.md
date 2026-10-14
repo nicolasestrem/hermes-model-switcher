@@ -65,3 +65,24 @@ Three real isolated state requests per profile count, milliseconds:
 First requests after adding profiles include cold discovery. Fifty profiles expose a scalability limit. No additional cache was added because invalidation must preserve profile/runtime freshness.
 
 Local Chromium SDK fixture navigation through rendered rows plus two animation frames, three fresh pages per size: 40 slots median 80ms; 200 slots 111ms; 1,000 slots 275ms. A synthetic 2,000-model catalog rendered in 21ms and search to one result took 9ms (single samples). These measurements do not establish provider discovery latency. No frontend optimization was justified by this sample.
+
+## PR #10 review follow-up
+
+Fixed recursive output containment and canonical output parent aliases, journal symlink-check ordering, nonblank redacted URL previews, Git-index scanning for deleted working files, flexible replacement flags, and backup placement outside plugin discovery. Shell files are pinned to LF. Permission failures intentionally remain fail-closed on every platform; native Windows runtime remains unverified. The README passes the privacy guard, committed bundles support fresh checkout package tests, and package versions remain 0.1.0 with Unreleased changelog entries.
+
+Remote Linux raw verification:
+
+```text
+412 passed, 2 warnings in 33.55s
+TEST_EXIT=0
+```
+
+Local privacy verification:
+
+```text
+Ran 13 tests in 1.623s
+OK (skipped=1)
+privacy guard: clean (110 files scanned)
+```
+
+Linux suite covers the symlink and permission checks skipped locally. Browser behavior was unchanged by this follow-up; previous 69-browser-test evidence remains scoped to the original candidate.

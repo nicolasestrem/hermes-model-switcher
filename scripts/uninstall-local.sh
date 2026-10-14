@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# GNU/Linux only (GNU readlink required).
 # LOCAL uninstall: removes the plugin directory from a target Hermes home.
 # Applied model choices are NEVER undone by removal — see README "Recovery".
 #
@@ -46,6 +47,6 @@ if [ ! -d "$DEST" ]; then
   exit 1
 fi
 # Preserve journals/snapshots for explicit recovery after uninstall.
-BACKUP="$(mktemp -d -- "$TARGET_HOME/plugins/.model-switcher-removed.XXXXXXXX")"
+BACKUP="$(mktemp -d -- "$TARGET_HOME/.model-switcher-removed.XXXXXXXX")"
 mv -- "$DEST" "$BACKUP/plugin"
 echo "uninstalled $DEST; recovery data preserved at $BACKUP/plugin (model choices unchanged)"

@@ -90,3 +90,19 @@ problem: the tab must use the host SDK transport even if the bundle renders.
 ## Configuration
 
 `HERMES_MODEL_SWITCHER_HERMES_REPO` selects the read-only Hermes source checkout for registry scans (default `~/.hermes/hermes-agent`). `HERMES_MODEL_SWITCHER_PLUGINS_DIR` can expose plugin coverage gaps; it does not grant write access.
+
+## Disposable lab helpers
+
+`install-local.sh` and `uninstall-local.sh` require GNU/Linux, Bash and GNU
+`readlink -m`; native Windows and macOS are not supported. They always refuse
+the native live home and its ancestors or descendants; there is no live override.
+`--replace` is accepted anywhere among the install arguments, including
+`bash scripts/install-local.sh /path/to/lab --replace` with the default package.
+
+Replacement and removal preserve complete plugin trees, including private recovery
+data, under the lab home as `.model-switcher-backup.*/plugin` and
+`.model-switcher-removed.*/plugin`. These directories are outside `plugins/` so
+Hermes plugin discovery cannot load them. Applied model choices remain in effect.
+After confirming recovery is no longer needed, inspect the printed backup path
+and remove that exact backup directory manually. Backups are never pruned
+automatically; deleting one permanently removes its retained journals/snapshots.

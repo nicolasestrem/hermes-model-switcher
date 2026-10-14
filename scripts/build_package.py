@@ -54,13 +54,18 @@ def main() -> None:
     ap.add_argument("--replace", action="store_true",
                     help="replace an existing assembled package directory")
     args = ap.parse_args()
-    out = Path(args.out).absolute() / NAME
-    for candidate in (out, *out.parents):
-        if candidate.is_symlink():
-            fail("output path must not contain symlinks")
-    out = out.resolve()
+    requested = Path(args.out).absolute() / NAME
+    if requested.is_symlink():
+        fail("package output itself must not be a symlink")
+    # Canonicalize parents for platforms where temporary/home directories
+    # are aliases, then apply containment guards to the actual destination.
+    out = requested.parent.resolve() / NAME
     if out == REPO or out in REPO.parents:
         fail("output must not replace the source checkout or its ancestors")
+    recursive_inputs = [REPO / "docs", REPO / "src" / PY_PACKAGE]
+    for source in recursive_inputs:
+        if out == source.resolve() or source.resolve() in out.parents:
+            fail("output must not be inside a recursively copied source tree")
     if out.exists() and not args.replace:
         fail("output already exists; use --replace to replace it explicitly")
     inputs = [REPO / f for f in COPY_FILES + PY_MODULES + ["scripts/privacy_guard.py"]]
@@ -72,6 +77,20 @@ def main() -> None:
         fail("missing Python package source")
     if not (REPO / "docs").is_dir():
         fail("missing documentation")
+
+    # copytree/copy2 follow links by default. Reject links in both the
+    # recursively copied trees and every input's parent chain before replacing
+    # any existing package, so external/private files cannot enter the bundle.
+    for source in inputs + recursive_inputs:
+        for candidate in (source, *source.parents):
+            if candidate == REPO.parent:
+                break
+            if candidate.is_symlink():
+                fail("package inputs must not contain symlinks")
+    for source in recursive_inputs:
+        for candidate in source.rglob("*"):
+            if candidate.is_symlink():
+                fail("package inputs must not contain symlinks")
 
     bundle = REPO / "dashboard" / BUNDLE
     if not bundle.is_file():

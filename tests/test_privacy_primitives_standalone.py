@@ -4,6 +4,8 @@ import importlib.util
 import os
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -20,9 +22,27 @@ sanitize = namespace['_sanitize_public_url']
 
 
 class PrimitiveTests(unittest.TestCase):
+    def test_deleted_worktree_file_still_scans_index(self):
+        with tempfile.TemporaryDirectory() as folder:
+            subprocess.run(["git", "init", folder], check=True, capture_output=True)
+            secret_file = Path(folder) / "example.txt"
+            secret_file.write_text("sk-" + "x" * 25)
+            subprocess.run(["git", "-C", folder, "add", "example.txt"], check=True)
+            secret_file.unlink()
+            result = subprocess.run([sys.executable, str(ROOT / "scripts/privacy_guard.py")], cwd=folder, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("api-key-literal", result.stdout)
+            self.assertNotIn("READ-ERROR", result.stdout)
+            self.assertNotIn("x" * 25, result.stdout)
+
     def test_url_credentials_and_queries_are_removed(self):
         self.assertEqual(sanitize('https://user:private@example.invalid:443/v1?token=private#private'), 'https://example.invalid:443/v1')
         self.assertEqual(sanitize('http://[::1]:8080/v1'), 'http://[::1]:8080/v1')
+
+    def test_schemeless_urls_remain_visibly_set(self):
+        for value in ("localhost:8080/v1", "api.example.com/v1"):
+            self.assertEqual(sanitize(value), "<unparseable URL>")
+        self.assertEqual(sanitize(""), "")
 
     def test_malformed_urls_never_echo_input(self):
         for value in ('https://user:private@[invalid?token=private', 'https://user:private@example.invalid:bad', 'user:private@host?token=private'):
