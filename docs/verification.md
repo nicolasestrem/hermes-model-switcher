@@ -3,14 +3,19 @@
 This page separates local checks from CI, real host behavior and deployment.
 No production configuration, inference call or live plugin installation is used by these checks.
 
-## Local integrated candidate
+## Observed integrated checks
 
-The integrated 0.2.0 candidate was checked on Linux, Python 3.13 and Node 26:
+Candidate `188add0` was checked on Linux, Python 3.13 and Node 26:
 
 ```text
-433 passed, 5 warnings in 46.75s
-77 passed (21.2s)
+463 passed, 1 skipped, 5 warnings in 46.72s
+83 passed (31.5s)
 ```
+
+The single local skip is the explicitly gated clean-checkout bootstrap E2E test.
+It was exercised separately with its gate enabled (`32 passed, 5 warnings in 9.27s`
+including bootstrap and adjacent write-path tests); CI enables it too. These are
+revision-bounded historical receipts, not promises that a later checkout passes.
 
 Commands: `python -m pytest -o addopts='' -q` and `npm test`. The browser command needs no `HMS_PYTHON` override: its entry point and seed reader share a resolver (explicit override, local virtual environment, then `python3`).
 

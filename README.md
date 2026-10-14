@@ -32,6 +32,23 @@ Built for the Hermes Dashboard, using its themes and authenticated transport. MI
 screenshot demonstrates the interface; it is not evidence of live Dashboard
 deployment or provider inference.*
 
+### In the real Hermes Dashboard
+
+The same plugin, running in an isolated one-profile lab with synthetic routes:
+
+![Routing matrix in the real Hermes Dashboard](docs/images/model-switcher-real-dashboard.png)
+
+*Choose the slots you want to change; filters do not select edit targets.*
+
+![A real preview of one synthetic main-model change](docs/images/model-switcher-real-preview.png)
+
+*Review the provider/model diff before any configuration is written.*
+
+![A real committed operation with verified readback](docs/images/model-switcher-real-operation.png)
+
+*Applied and read back. The lab's subsequent Undo restored the original configuration
+bytes exactly. These captures show configuration changes, not provider inference.*
+
 ## Setup
 
 You need a running Hermes installation with the Web Dashboard and plugin support, and
