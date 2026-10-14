@@ -19,7 +19,15 @@ The scanner reports rule names and locations, never matched values. The scanner 
 
 ## History inspection
 
-Inspected 225 unique reachable Git blobs across all refs before implementation using the guard's path and content patterns, respecting its explicit source/fixture exemptions. Zero pattern findings. No private historical content was confirmed. This does not establish that all historical data is public; heuristic coverage and binary-image limitations still apply. No history was rewritten.
+Inspected 225 unique reachable Git blobs across all refs before implementation using the guard's path and content patterns, respecting its explicit source/fixture exemptions. Zero pattern findings. No private historical content was confirmed. This does not establish that all historical data is public; heuristic coverage and binary-image limitations still apply.
+
+### Remote identity cleanup — scope
+
+The published repository's history was subsequently rewritten so that no private identity remains in reachable commits, branches, or tags on the remote. This is a **scoped statement, not a claim of full erasure**:
+
+- GitHub pull-request refs and cached objects can retain the pre-rewrite metadata until GitHub support purges them; the rewrite alone does not expire those caches.
+- Forks, mirrors, and local clones taken before the rewrite are outside this project's control and are not covered by this cleanup.
+- The cleanup covers the remote branches and tags of this repository only; it says nothing about unrelated repositories or third-party services.
 
 ## Verification
 

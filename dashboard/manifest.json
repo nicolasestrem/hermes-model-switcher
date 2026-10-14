@@ -3,7 +3,7 @@
   "label": "Model Switcher",
   "description": "Choose models across Hermes profiles, preview changes, and reuse your setup with presets.",
   "icon": "Zap",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "tab": {
     "path": "/model-switcher",
     "position": "after:config"

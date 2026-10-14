@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Catalog/publication pass
+
+- Add catalog-grade `plugin.yaml` metadata (author, MIT license, homepage, tags) following the supported manifest schema; set version `0.2.0` consistently across `plugin.yaml`, `dashboard/manifest.json`, `pyproject.toml`, `package.json`, and `package-lock.json`.
+- Rewrite the README around what/why, the official `hermes plugins install`/`update` commands, a feature overview, an FAQ, and explicit limits (configured ≠ live). Add `CONTRIBUTING.md` with real dependency/runtime setup and the portable vs real-runtime test split.
+- Add `.github/workflows/ci.yml` (`push`/`pull_request`, `contents: read`) running pytest, the browser suite, and the declared Python-floor package build against the pinned tested Hermes revision; document that both suites require a real Hermes checkout and are not green when it is absent.
+- Record catalog-submission readiness (ready-for-submission, not submitted) and explain why the installer-generated `.hermes-catalog.json` is intentionally not committed. Note the remaining catalog rule 9 private-import warning.
+- Describe the removed `/probe` route honestly: there is no inference-probe capability.
+- Add `docs/backlog.md`; scope the privacy audit's history statement around the remote-identity cleanup (no full-erasure claim).
+- Reflect the backend review changes in the docs: no fleet-wide transaction or always-undo promise; compensated/partial/recovery_required results report `ok=false`; preset corruption quarantines the original and salvages valid entries with a `presetsCorrupt` warning.
+
+## Earlier unreleased notes
+
 - Rewrite the README around profile selection, reviewed model changes, and reusable presets.
 - Separate advanced routing and Dashboard integration details into a technical reference.
 - Clarify community status, platform verification boundaries, credential handling, and guarded recovery.
