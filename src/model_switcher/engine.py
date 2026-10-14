@@ -76,6 +76,27 @@ def _adapter_for_step(step: Dict[str, Any]) -> StoreAdapter:
                        identity=identity)
 
 
+_FAILURE_CATEGORIES = (
+    (StoreConflict, "revision_conflict"),
+    (StoreUnreadable, "store_unreadable"),
+    (StepFailure, "write_verification_failed"),
+    (OSError, "io_error"),
+)
+
+
+def _failure_category(exc: BaseException) -> str:
+    """Map a step failure to a FIXED, non-sensitive category label.
+
+    The exception message can embed config bytes or credentials, so it must
+    never be persisted or reported. Only one of these fixed labels leaves the
+    engine (contract: a safe failure category, never arbitrary exception text).
+    """
+    for exc_type, label in _FAILURE_CATEGORIES:
+        if isinstance(exc, exc_type):
+            return label
+    return "step_failed"
+
+
 def plan_operation(journal: OperationJournal,
                    targets: List[Dict[str, Any]],
                    payload: Optional[Dict[str, Any]] = None,
@@ -104,7 +125,19 @@ def plan_operation(journal: OperationJournal,
         # step, so a single pre_revision guards every change atomically.
         key = (t.get("profile"), t["store_kind"], t["path"])
         if key in group_index:
-            prepared[group_index[key]]["changes"].update(t["changes"])
+            # Coalesce same-store targets into ONE journalled step, but never
+            # let two targets silently disagree on a dotted key: last-writer
+            # wins would hide a conflicting preset behind an arbitrary order.
+            # Identical duplicate values remain fine (common in multi-slot
+            # presets that share a route field).
+            merged = prepared[group_index[key]]["changes"]
+            for dotted, value in t["changes"].items():
+                if dotted in merged and merged[dotted] != value:
+                    # Report only the (non-secret) dotted key name — a value
+                    # such as base_url may embed credentials.
+                    raise ApplyBlocked(
+                        "conflicting values for merged target key %r" % dotted)
+                merged[dotted] = value
             continue
         try:
             adapter = _adapter_for_step(t)
@@ -226,8 +259,12 @@ def apply_operation(journal: OperationJournal, op_id: str,
                    or (s["state"] == STEP_FAILED and s.get("post_revision"))]
     final_state = _compensate_applied(journal, op_id, applied_now,
                                       all_failed=(len(applied_now) == 0))
+    category = _failure_category(failure)
+    journal.set_failure_category(op_id, category)
     result = journal.get(op_id)
-    result["failure"] = str(failure)  # type: ignore[index]
+    # Safe, fixed category only — the raw exception text (which may embed
+    # config bytes or credentials) never leaves the engine.
+    result["failure_category"] = category  # type: ignore[index]
     result["final_state"] = final_state  # type: ignore[index]
     return result
 

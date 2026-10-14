@@ -11,11 +11,9 @@ Evidence produced:
      fields (goal-judge threshold) and unrelated config survive verbatim.
   2. The original session config is intact: journal snapshots equal the
      pre-images and undo restores the exact original document.
-  3. An EXPLICITLY AUTHORIZED new-session probe (a separate, named action —
-     never automatic, zero inference calls, zero cost) opens the real Hermes
-     SessionDB inside the throwaway home, records what a new session's first
-     API call records, and session_model_usage read back shows the SELECTED
-     provider/model — proving new sessions adopt the applied route.
+  3. The real-cost new-session probe route is removed from the backend: the
+     Dashboard exposes no path that can start a paid session, so no usage
+     rows can ever be fabricated.
 
 No forced paid fallback tests; no live inference anywhere.
 """
@@ -175,55 +173,6 @@ def test_t7_selected_routes_only_and_session_config_intact(fleet):
     assert undo_res["state"] in ("undone", "compensated"), undo_res
     for p in ("default", "alpha"):
         assert _load(_cfg_path(home, p)) == pre[p]
-
-
-def test_t7_new_session_probe_requires_explicit_authorization(fleet):
-    """The new-session probe is a real-cost action: without an EXPLICIT
-    authorization + cost approval naming the exact route it is BLOCKED
-    (HTTP 403, blocked:true) — no usage rows are ever fabricated and no
-    paid session starts."""
-    home, journal = fleet
-    from fastapi.testclient import TestClient
-    import dashboard.plugin_api as plugin_api
-    from fastapi import FastAPI
-    app = FastAPI()
-    app.include_router(plugin_api.router)
-    client = TestClient(app)
-
-    # Unauthorized probe -> blocked, nothing recorded anywhere.
-    r = client.post("/probe", json={"provider": NEW_PROVIDER, "model": NEW_MODEL})
-    assert r.status_code == 403, r.text
-    body = r.json()["detail"]
-    assert body["blocked"] is True and "authorization" in body["error"]
-    state_db = home / "state.db"
-    assert not state_db.exists() or _no_probe_rows(state_db)
-
-    # Mismatched cost approval -> blocked as well.
-    r = client.post("/probe", json={
-        "provider": NEW_PROVIDER, "model": NEW_MODEL, "authorized": True,
-        "cost_approval": {"provider": "other", "model": NEW_MODEL}})
-    assert r.status_code == 403 and r.json()["detail"]["blocked"] is True
-
-    # Authorized + matching approval: still honestly blocked in this
-    # environment (no paid session runner inside the plugin sandbox) —
-    # never fabricated.
-    r = client.post("/probe", json={
-        "provider": NEW_PROVIDER, "model": NEW_MODEL, "authorized": True,
-        "cost_approval": {"provider": NEW_PROVIDER, "model": NEW_MODEL}})
-    assert r.status_code == 403 and r.json()["detail"]["blocked"] is True
-    assert "not performable" in r.json()["detail"]["error"]
-    assert not _no_probe_rows(state_db) if state_db.exists() else True
-
-
-def _no_probe_rows(db_path):
-    import sqlite3
-    conn = sqlite3.connect(db_path)
-    try:
-        n = conn.execute(
-            "SELECT COUNT(*) FROM session_model_usage").fetchone()[0]
-    finally:
-        conn.close()
-    return n == 0
 
 
 def test_t7_api_end_to_end_state_preview_apply_undo(fleet):

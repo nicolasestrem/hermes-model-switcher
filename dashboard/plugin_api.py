@@ -13,10 +13,6 @@ Wiring (real, no mocks):
   POST /operations                 journalled apply (engine)
   GET  /operations/{op_id}         operation record (sanitized DTO)
   POST /operations/{op_id}/undo    revision-guarded undo
-  POST /probe                      new-session probe — EXPLICITLY
-                                   AUTHORIZED only; blocked without an
-                                   explicit route + cost approval. Never
-                                   fabricates usage rows.
 
 Privacy contract (Phase B review):
   - Public DTOs NEVER carry raw config documents, journal snapshots, or
@@ -79,6 +75,7 @@ from model_switcher.journal import (
     OP_PARTIAL,
     OP_PENDING,
     OP_RECOVERY_REQUIRED,
+    OP_UNDONE,
     OperationJournal,
     to_public_operation,
 )
@@ -241,6 +238,34 @@ def _quarantine_presets(path: Path) -> None:
     os.replace(path, dest)
 
 
+def _salvage_presets(path: Path) -> Tuple[List[ReviewedPreset], bool]:
+    """Parse the preset store, returning every salvageable preset plus whether
+    any record had to be dropped.
+
+    The ORIGINAL file is never mutated here: when a drop is reported the caller
+    quarantines it, so a corrupt record stays recoverable while the valid
+    presets remain usable (no whole-store loss on a single bad record).
+    """
+    records = json.loads(path.read_text())
+    if not isinstance(records, list):
+        raise ValueError("preset store is not a list")
+    salvaged: List[ReviewedPreset] = []
+    dropped = False
+    for rec in records:
+        try:
+            preset = _preset_from_record(rec)
+        except Exception:
+            dropped = True
+            continue
+        # ui_changes (the reviewed change intent incl. its slot identity) is
+        # attached, not baked into the frozen RouteTarget list.
+        ui = rec.get("ui_changes")
+        preset.ui_changes = ui if isinstance(ui, list) and ui \
+            else _ui_changes_from_targets(preset)
+        salvaged.append(preset)
+    return salvaged, dropped
+
+
 def _preset_store() -> PresetStore:
     global _PRESET_CORRUPT
     store = PresetStore()
@@ -248,23 +273,20 @@ def _preset_store() -> PresetStore:
     _PRESET_CORRUPT = bool(next(path.parent.glob("presets.json.corrupt-*"), None))
     if path.exists():
         try:
-            records = json.loads(path.read_text())
-            if not isinstance(records, list):
-                raise ValueError("preset store is not a list")
+            salvaged, dropped = _salvage_presets(path)
         except Exception:
+            # Whole file unparseable: quarantine it (bytes preserved) and
+            # start empty; the condition is surfaced via presetsCorrupt.
             _quarantine_presets(path)
-            records = []
-        for rec in records:
-            try:
-                preset = _preset_from_record(rec)
-            except Exception:
+            salvaged = []
+        else:
+            if dropped:
+                # A single bad record must not take the valid presets with it:
+                # move the ORIGINAL aside (its bytes stay intact for an
+                # operator) and salvage what still parses. A failed rename
+                # raises rather than authorizing silent data loss.
                 _quarantine_presets(path)
-                return PresetStore()
-            # ui_changes (the reviewed change intent incl. its slot identity)
-            # is attached, not baked into the frozen RouteTarget list.
-            ui = rec.get("ui_changes")
-            preset.ui_changes = ui if isinstance(ui, list) and ui \
-                else _ui_changes_from_targets(preset)
+        for preset in salvaged:
             store.save(preset)
     return store
 
@@ -464,13 +486,6 @@ class ApplyIn(BaseModel):
     # Explicit acknowledgement that unknown-cost routes are never treated as
     # free; without it an unknown-cost route blocks the one-click apply.
     allowUnknownCost: bool = False
-
-
-class ProbeIn(BaseModel):
-    provider: str
-    model: str
-    authorized: bool = False
-    cost_approval: Optional[Dict[str, Any]] = None
 
 
 # slot aliases: a UI slotId may use the family shorthand; resolve it to the
@@ -1295,7 +1310,9 @@ def _public_diff_value(value: Any, dotted: str) -> Any:
 def _op_dto(op: Dict[str, Any]) -> Dict[str, Any]:
     """Sanitized operation DTO built on journal.to_public_operation's
     allowlist projection: only status/profile/store-kind per step — NEVER
-    journal snapshots, storage paths, changes, or raw config contents."""
+    journal snapshots, storage paths, changes, or raw config contents. The
+    terminal ``final_state`` and a FIXED ``failure`` category (never a raw
+    exception message) are surfaced for the UI's failure contract."""
     pub = to_public_operation(op) or {}
     steps = pub.get("steps", [])
     undoable = (pub.get("state") == OP_COMMITTED
@@ -1313,7 +1330,28 @@ def _op_dto(op: Dict[str, Any]) -> Dict[str, Any]:
             "revisionAfter": _step_revision(s, "revision_after", "post_revision"),
         } for s in steps],
         "undoable": undoable,
+        # Terminal classification (committed/compensated/partial/
+        # recovery_required/undone) plus a fixed failure category label.
+        "final_state": pub.get("state"),
+        "failure": pub.get("failure_category"),
     }
+
+
+def _op_ok(op: Optional[Dict[str, Any]]) -> bool:
+    """True only when the operation's outcome is a durable success.
+
+    ``ok`` reflects committed (including an idempotent re-read of an
+    already-committed op) or a clean undo — a compensated / partial /
+    recovery_required / pending outcome is NOT ok, so the caller surfaces the
+    safe ``failure`` category and ``final_state`` instead of a bare success.
+    """
+    return (op or {}).get("state") in (OP_COMMITTED, OP_UNDONE)
+
+
+def _op_envelope(op: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Response envelope for an operation: top-level ``ok`` (outcome-derived)
+    plus the sanitized DTO."""
+    return {"ok": _op_ok(op), "operation": _op_dto(op or {})}
 
 
 def _step_revision(step: Dict[str, Any], *keys: str) -> Optional[str]:
@@ -2093,8 +2131,7 @@ def apply(body: ApplyIn):
             try:
                 op = plan_operation(journal, prepared)
                 outcome = apply_operation(journal, op["op_id"])
-                return {"ok": True,
-                        "operation": _op_dto(journal.get(outcome["op_id"]))}
+                return _op_envelope(journal.get(outcome["op_id"]))
             finally:
                 journal.close()
     except HTTPException:
@@ -2127,7 +2164,7 @@ def get_operation(op_id: str):
                 # indefinitely and recovery_required is reported verbatim.
                 if op["state"] in (OP_PENDING, OP_APPLYING, OP_PARTIAL):
                     op = reconcile(journal, op_id)
-                return {"ok": True, "operation": _op_dto(op)}
+                return _op_envelope(op)
             finally:
                 journal.close()
     except HTTPException:
@@ -2152,7 +2189,7 @@ def recover_operation(op_id: str):
                     raise HTTPException(status_code=404, detail={
                         "ok": False, "error": "unknown operation"})
                 op = reconcile(journal, op_id)
-                return {"ok": True, "operation": _op_dto(op)}
+                return _op_envelope(op)
             finally:
                 journal.close()
     except HTTPException:
@@ -2172,8 +2209,7 @@ def undo(op_id: str):
             journal = _journal()
             try:
                 undo_operation(journal, op_id)
-                return {"ok": True,
-                        "operation": _op_dto(journal.get(op_id))}
+                return _op_envelope(journal.get(op_id))
             finally:
                 journal.close()
     except ApplyBlocked as exc:
@@ -2182,37 +2218,3 @@ def undo(op_id: str):
     except Exception as exc:
         raise HTTPException(status_code=500, detail={
             "ok": False, "error": f"undo failed: {type(exc).__name__}"}) from None
-
-
-@router.post("/probe")
-def probe(body: ProbeIn):
-    """New-session probe — EXPLICIT AUTHORIZATION REQUIRED.
-
-    A probe starts a NEW session against the selected provider/model and
-    therefore incurs real, possibly metered cost. It runs ONLY when the
-    request carries authorized=true AND a cost approval naming the exact
-    route. Without that, the probe is BLOCKED — it never fabricates usage
-    rows, never fakes a session_model_usage record, and never performs an
-    unapproved paid call.
-    """
-    if not body.authorized:
-        raise HTTPException(status_code=403, detail={
-            "ok": False, "blocked": True,
-            "error": ("probe blocked: no explicit authorization — a new "
-                      "session would incur real cost on "
-                      f"{body.provider}/{body.model}")})
-    approval = body.cost_approval or {}
-    if approval.get("provider") != body.provider or approval.get("model") != body.model:
-        raise HTTPException(status_code=403, detail={
-            "ok": False, "blocked": True,
-            "error": "probe blocked: cost approval does not match the requested route"})
-    # Authorization is present, but actually starting a paid session from a
-    # dashboard plugin needs a live provider credential and an interactive
-    # approval surface — reported as blocked in this environment rather than
-    # silently skipped or fabricated.
-    raise HTTPException(status_code=403, detail={
-        "ok": False, "blocked": True,
-        "error": ("probe blocked: authorized but not performable here — "
-                  "no live provider session runner in the plugin sandbox; "
-                  "run the authorized probe via the CLI, then inspect "
-                  "session_model_usage")})
