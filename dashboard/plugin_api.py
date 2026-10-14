@@ -1239,13 +1239,17 @@ def _sanitize_public_url(value: Any) -> Any:
     try:
         from urllib.parse import urlsplit, urlunsplit
         parts = urlsplit(value)
-    except Exception:
-        return value
-    if not parts.scheme and not parts.netloc:
-        return value  # not a URL — leave scalars untouched
-    host = parts.hostname or ""
-    netloc = f"{host}:{parts.port}" if parts.port else host
-    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+        if not parts.netloc:
+            return ""  # malformed URLs must not echo potential credentials
+        host = parts.hostname or ""
+        if ":" in host:
+            host = f"[{host}]"  # retain valid IPv6 authority syntax
+        port = parts.port
+        netloc = f"{host}:{port}" if port is not None else host
+        return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    except (ValueError, TypeError):
+        return ""  # never return the original potentially secret-bearing URL
+
 
 
 def _public_route_field(key: str, value: Any) -> Any:

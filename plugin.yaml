@@ -1,7 +1,7 @@
 manifest_version: 1
 name: hermes-model-switcher
 version: 0.1.0
-description: "Reviewed provider/model preset application across profiles. In-process Dashboard writes only; hosted-isolation mode is read-only."
+description: "Choose models across Hermes profiles, preview changes, and reuse your setup with presets."
 kind: standalone
 # No CLI/gateway surface. The only code surface is the Dashboard extension
 # (dashboard/manifest.json + dashboard/dist/index.js + dashboard/plugin_api.py,

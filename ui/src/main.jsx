@@ -153,7 +153,7 @@ function PresetsBar({ presets, onReview, busy }) {
       <h3 style={{ margin: "4px 0" }}>Favorite presets</h3>
       {presets.length === 0 && (
         <p data-testid="presets-empty" style={{ color: THEME.muted, margin: "4px 0" }}>
-          No presets saved yet — select slots below, preview a change, then save it as a preset.
+          Keep a setup you love. Select slots, preview your changes, then save a preset to reuse them.
         </p>
       )}
       <div role="list" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
@@ -167,7 +167,7 @@ function PresetsBar({ presets, onReview, busy }) {
             title={`Billing policy: ${p.billingPolicy}`}
           >
             <strong>{p.name}</strong>
-            <span style={{ color: THEME.muted, marginLeft: 8, fontSize: "0.85em" }}>
+            <span style={{ color: THEME.muted, marginLeft: 8, fontSize: 13 }}>
               {scopeSummary(p)}
             </span>
           </button>
@@ -274,9 +274,10 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
 
   return (
     <section aria-label="Profile model matrix">
-      <h3 style={{ margin: "4px 0" }}>Profiles × model slots</h3>
+      <h3 style={{ margin: "4px 0" }}>Select your targets</h3>
+      <p className="hms-section-description">Choose the profile slots you want to change. Filters help you find them; selected targets stay selected.</p>
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "baseline", margin: "4px 0" }}>
-        <p data-testid="selection-summary" style={{ margin: 0 }}>{summaryText}</p>
+        <p data-testid="selection-summary" aria-live="polite" style={{ margin: 0 }}>{summaryText}</p>
         <button type="button" data-testid="clear-selection" disabled={selection.size === 0}
           title="Deselect every selected target, including ones hidden by the current filters"
           onClick={() => onClearSelection()}>Clear selection</button>
@@ -295,7 +296,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
         </select></label>
         <label className="hms-filter">Task<select aria-label="Filter by subfamily" data-testid="filter-subfamily" value={filters.subfamily}
           onChange={(e) => setFilter({ subfamily: e.target.value })}>
-          <option value="all">All subfamilies</option>
+          <option value="all">All tasks</option>
           {subfamilies.map((sf) => <option key={sf} value={sf}>{taskLabel(scoped.find(s => subfamilyOf(s) === sf) || { slotId: sf })}</option>)}
         </select></label>
         <label className="hms-filter">Provider<input aria-label="Filter by provider" placeholder="provider…" value={filters.provider}
@@ -309,7 +310,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
         </select></label>
         <button type="button" onClick={() => setFilter({ profileIds: [], family: "all", subfamily: "all", provider: "", model: "", state: "all" })}>Reset filters</button>
       </div>
-      <p style={{ color: THEME.muted, fontSize: "0.85em", margin: "4px 0" }}>{filtered.length} matching slots · {filtered.filter(s => !canSelectSlot(s)).length} read-only. Scroll horizontally to inspect routes on narrow screens.</p>
+      <p style={{ color: THEME.muted, fontSize: 13, margin: "4px 0" }}>{filtered.length} matching slots · {filtered.filter(s => !canSelectSlot(s)).length} read-only. Scroll horizontally to inspect routes on narrow screens.</p>
       <div data-testid="matrix-scroll" role="region" aria-label="Scrollable model slots" tabIndex={0} style={{ maxHeight: "70vh", overflow: "auto" }}>
       <table style={{ borderCollapse: "collapse", width: "100%" }}>
         {/* Screen-reader-only caption. The hidden styles are INLINE: the host
@@ -390,7 +391,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
             );
           })}
           {filtered.length === 0 && (
-            <tr><td colSpan={8} style={{ color: THEME.muted, padding: 8 }}>No slots match the current filters.</td></tr>
+            <tr><td colSpan={8} style={{ color: THEME.muted, padding: 16 }}>No slots match these filters. Reset filters to see every profile slot.</td></tr>
           )}
         </tbody>
       </table>
@@ -499,8 +500,9 @@ function ChangeEditor({
 
   return (
     <section aria-label="Custom change editor" data-testid="change-editor"
-      style={{ marginTop: 16, borderTop: `1px solid ${THEME.border}`, paddingTop: 8 }}>
-      <h3 style={{ margin: "4px 0" }}>Change selected models</h3>
+      style={{ marginTop: 0 }}>
+      <h3 style={{ margin: "4px 0" }}>Choose your routing</h3>
+      <p className="hms-section-description">Set the route, preview the exact changes, then apply when you’re ready.</p>
       {!hasSelection && <p style={{ color: THEME.muted }}>Select slots in the matrix to build a change.</p>}
       <p data-testid="editor-applicability" style={{ color: THEME.muted, margin: "0 0 4px" }}>{applicability}</p>
       {selectedSlots.some(s => s.note || s.metadata?.description) && <ul data-testid="selected-route-notes" className="hms-note">
@@ -585,7 +587,7 @@ function ChangeEditor({
           {picker.loading && <p role="status">Loading model catalog…</p>}
           {picker.data && (
             <div data-testid="model-picker" style={{ marginTop: 6 }}>
-              <div data-testid="picker-freshness" style={{ color: THEME.muted, fontSize: "0.85em" }}>
+              <div data-testid="picker-freshness" style={{ color: THEME.muted, fontSize: 13 }}>
                 provider <code>{picker.data.provider}</code> · source {picker.data.source || "unknown"} ·
                 {" "}fetched {picker.data.fetchedAt || "unverified"}
                 {picker.data.stale ? <> · <strong style={{ color: THEME.warn }}>stale</strong></> : null}
@@ -605,7 +607,10 @@ function ChangeEditor({
                   </li>
                 ))}
                 {(picker.data.models || []).length === 0 && (
-                  <li style={{ color: THEME.muted }}>No models reported.</li>
+                  <li style={{ color: THEME.muted }}>This provider returned no models. You can still enter an exact model ID above.</li>
+                )}
+                {(picker.data.models || []).length > 0 && !(picker.data.models || []).some((model) => `${model.name} ${model.id}`.toLowerCase().includes((editor.modelSearch || "").toLowerCase())) && (
+                  <li role="status" style={{ color: THEME.muted }}>No models match your search. Try a shorter name or clear the search.</li>
                 )}
               </ul>
             </div>
@@ -631,7 +636,7 @@ function ChangeEditor({
           </button>
           <span style={{ color: THEME.muted, alignSelf: "center" }}>
             {busy ? "Request in progress…" : preview
-              ? previewInvalid ? "Preview stale — re-run preview" : `${preview.changes.length} change(s) reviewed`
+              ? previewInvalid ? "Preview stale — preview your changes again" : `${preview.changes.length} ${preview.changes.length === 1 ? "change" : "changes"} reviewed`
               : !hasSelection ? "Select writable targets first" : incompatibleChain || mixedScalar || assignmentMismatch ? "Resolve the selection mismatch first" : "Preview required"}
           </span>
           {preview && !editor.ackUnknownCost && <span className="hms-note">Acknowledge the cost policy before applying.</span>}
@@ -758,7 +763,7 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
                   ? "FAILED — readback not verified"
                   : label.text}
               </span>
-              <div style={{ fontSize: "0.85em", color: THEME.muted }}>
+              <div style={{ fontSize: 13, color: THEME.muted }}>
                 rev {r.revisionBefore?.slice(0, 8) || "?"} → {r.revisionAfter?.slice(0, 8) || "?"}
                 {r.error && <span style={{ color: THEME.danger }}> · {r.error}</span>}
               </div>
@@ -1120,7 +1125,10 @@ function App() {
     <div ref={rootRef} className="hms-root" style={{ color: THEME.fg, padding: 12, fontFamily: "inherit" }}>
       <div aria-live="polite" role="status" data-testid="live-status"
         style={{ position: "absolute", left: -9999 }}>{status.text}</div>
-      <h2>Model Switcher</h2>
+      <header className="hms-page-header">
+        <h2>Model Switcher</h2>
+        <p>Choose models across your Hermes profiles. Review every change. Reuse your setup with presets.</p>
+      </header>
       {state.presetsCorrupt && <p role="alert" style={{ color: THEME.warn }}>
         A damaged preset store was saved aside for recovery. Its presets are not loaded; recover them before replacing saved presets.
       </p>}
@@ -1129,9 +1137,11 @@ function App() {
         <ul>{state.profiles.flatMap(p => (p.inventoryWarnings || []).map((warning, i) => <li key={`${p.id}/${i}`}>{p.name || p.id}: {warning}</li>))}</ul>
       </div>}
       <PresetsBar presets={state.presets} onReview={reviewPreset} busy={busy} />
-      <button data-testid="refresh-state" disabled={busy} onClick={() => load()}>Refresh state</button>
-      {" "}
-      {operation && !showOperation && <button onClick={openDrawer}>Show last operation</button>}
+      <div className="hms-workspace-tools">
+        <button data-testid="refresh-state" disabled={busy} onClick={() => load()}>Refresh state</button>
+        {operation && !showOperation && <button onClick={openDrawer}>Show last operation</button>}
+        <span className="hms-note">Configuration changes apply after review. Existing sessions may keep their current model.</span>
+      </div>
 
       {reviewedPreset && (
         <section aria-label="Preset review" data-testid="preset-review"
@@ -1163,7 +1173,7 @@ function App() {
         {status.text && (
           <p data-testid="visible-status"
             style={{
-              margin: "0 0 8px", fontSize: "0.9em",
+              margin: "0 0 8px", fontSize: 13,
               color: status.kind === "error" ? THEME.danger : THEME.muted,
             }}>
             {status.text}

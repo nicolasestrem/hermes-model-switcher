@@ -1,306 +1,80 @@
-# hermes-model-switcher
+# Hermes Model Switcher
 
-A Hermes Web Dashboard plugin for reviewed, one-click application of
-provider/model presets across profiles — including every auxiliary, delegate,
-judge, fallback, MoA, automation, plugin and specialist model-selection slot.
+**Your profiles. Your models. One clear view.**
 
-MIT licensed. No Hermes fork, no credential copying, no direct config writing
-outside the supported in-process Dashboard path.
+Choose models across your Hermes profiles, review the changes, and reuse your setup with presets. Model Switcher is a community plugin for the Hermes Web Dashboard that brings scattered model settings into one searchable workspace.
+
+- **See the whole setup:** main models, auxiliary tasks, delegation, fallbacks, speech, and other supported routes across profiles.
+- **Change exactly what you select:** pick individual slots or a matching group, then preview before applying.
+- **Save your favorite setups:** reuse reviewed provider/model choices with named presets.
+- **Know what happened:** inspect per-profile readback and use guarded Undo when you need to recover.
+
+Built for the Hermes Dashboard, with its themes and authentication. MIT licensed.
+
+![Model Switcher showing synthetic Hermes profiles in a dark theme](docs/images/model-switcher-dark-1440.png)
+
+*The compiled plugin in a Dashboard SDK fixture with synthetic lab profiles. This screenshot demonstrates the interface; it is not evidence of live Dashboard deployment or provider inference.*
 
 ## Setup
 
-1. Requirements: a running Hermes installation with the Web Dashboard enabled
-   and a Python version compatible with that Hermes release, plus Node.js 18+
-   for building. The usability-polish runtime reference is
-   **Hermes v0.22.0+119.g0e427d7**, running Python 3.14.7; the isolated plugin
-   test harness uses Python 3.13.5. See the verification boundary below.
-2. Install it into your Hermes plugins directory — either copy/clone this
-   repository there, or copy the assembled package
-   (`python scripts/build_package.py` → `dist-package/hermes-model-switcher/`).
-   Either layout must leave `plugin.yaml` beside a root `__init__.py`: a
-   manifest with no `__init__.py`, `desktop/plugin.js` or `plugin.json` next to
-   it is rejected by `hermes plugins validate` and fails to load.
-3. The Dashboard loads the prebuilt bundle, so Node is a build-time dependency
-   only. `dashboard/dist/index.js` is committed for that reason — a clone or a
-   plain copy installs straight from the repo. Rebuild it after changing the
-   UI:
+You need a running Hermes installation with the Web Dashboard and plugin support. The plugin needs a Python version compatible with your Hermes release. Linux is the verification target; macOS and native Windows are unverified. See [release readiness](docs/release-readiness.md) for evidence and remaining checks.
 
-   ```
-   npm install
-   npm run build      # produces dashboard/dist/index.js and ui/dist/plugin.js
-   ```
+1. Clone or copy this repository into your Hermes plugins directory as `hermes-model-switcher`. Keep the root `plugin.yaml` and `__init__.py` together.
+2. Enable **hermes-model-switcher** in Dashboard plugin settings and reload the Dashboard.
+3. Open **Model Switcher**.
 
-3b. Frontend host contract — the Dashboard entry is a plain IIFE that hands a
-   React component to the host registry, exactly as documented in Hermes'
-   *Extending the Dashboard* guide:
+The repository includes built Dashboard assets. Node.js 18+ is needed only when rebuilding the UI. You can also install the directory produced by `python scripts/build_package.py`; it includes the backend, assets, and documentation.
 
-   - React comes from `window.__HERMES_PLUGIN_SDK__.React`. React is never
-     bundled, and **the Dashboard does not set `globalThis.React` /
-     `globalThis.ReactDOM`** — a bundle that destructures them dies on load with
-     `Cannot destructure property 'useState' of 'q' as it is undefined`.
-   - The entry registers synchronously and must not mount itself:
-     `window.__HERMES_PLUGINS__.register("hermes-model-switcher", App)`. The
-     registered name must equal `dashboard/manifest.json`'s `name`, and the host
-     renders the component inside the tab. There is no ReactDOM on the SDK and no
-     host-provided root element.
-   - Control styling is plugin-owned: the manifest declares `css: "dist/style.css"`,
-     built from `ui/src/styles.css` and shipped beside the JS in both checkout and
-     assembled package. Tailwind's host reset removes native button/input/select
-     chrome; an unstyled control in the DOM is not a usable action. Scoped styles
-     supply borders, padding, focus rings and disabled feedback without changing
-     other Dashboard tabs. Fixtures load this same asset under the host reset,
-     rather than supplying their own control styles.
-   - Theme colours follow the Dashboard's background/midground tokens, with legacy
-     aliases supported. Sticky headers reject unsafe alpha values and use an opaque
-     theme background instead of a universally dark fallback in light themes.
-   - API calls use `window.__HERMES_PLUGIN_SDK__.authedFetch` so the host's
-     authentication and profile scope are preserved. Bare `fetch` is only a
-     standalone/fixture fallback, not the Dashboard transport.
-   - `ui/dist/plugin.js` (the standalone layout) keeps a self-mount fallback for
-     hosts that provide `globalThis.React`/`ReactDOM` instead — that is what the
-     local Playwright fixture uses.
+## Make your first switch
 
-   Both contracts are covered by `npm test`: `tests/fixture-sdk.html` reproduces
-   the real shell (SDK + registry globals, no `globalThis.React`) and loads the
-   shipped `dashboard/dist/index.js`; `tests/fixture.html` covers the legacy path.
+1. **Select targets.** Filter by profile, family, slot, or state. Select the slots you want to change. Filtering changes the view; checkboxes choose edit targets. The selection summary includes selected slots hidden by filters.
+2. **Choose routing.** Browse provider models or enter a custom provider/model pair. Model IDs belong to their provider, so keep the pair together.
+3. **Preview changes.** Review the affected profiles and side effects. Resolve blocked entries and acknowledge unknown-cost routes when required. Changing the selection or routing requires a fresh preview.
+4. **Apply and inspect.** Check each profile's readback in the operation drawer. Save the setup as a preset for next time.
 
-4. Enable `hermes-model-switcher` in the Dashboard plugin settings and reload.
-   The backend mounts under `/api/plugins/hermes-model-switcher/`.
-4b. Local (never-live) install of the assembled package into a LAB Hermes
-   home for isolated verification:
-
-   ```
-   npm run build && python scripts/build_package.py   # assemble dist-package/
-   bash scripts/install-local.sh /tmp/your-lab-home   # refuses the live home
-   bash scripts/uninstall-local.sh /tmp/your-lab-home
-   ```
-
-5. Python-side tests (runtime source is read-only; save/undo tests write only
-   throwaway lab profiles):
-
-   ```
-   python -m pytest tests/
-   ```
-
-Environment: `HERMES_MODEL_SWITCHER_HERMES_REPO` overrides the Hermes checkout
-used for registry scans (default `~/.hermes/hermes-agent`, resolved relative
-to the running user's home — never a baked-in path).
-
-## Using the tab
-
-1. Narrow the matrix to one or several searchable profiles, then choose a family,
-   exact subfamily/slot and state. **All profiles** resets the profile scope.
-   Profile filtering only controls what is shown: it does not select edit targets.
-   Select individual slot checkboxes or use **Select all matching slots** to
-   select matching writable rows. Selection survives filtering; the summary
-   identifies selected targets outside the current view. **Clear selection**
-   explicitly removes edit targets. The matrix scrolls internally with sticky
-   row identity, alongside the editor on wide screens and below it on narrow ones.
-2. Click **Preview changes** and review the affected routes and side effects.
-   Acknowledge unknown-cost routes when required before applying a custom change.
-   Editing the route, selection or filters invalidates the review; a late preview
-   response cannot revive it. The server also binds reviews to profile identities
-   and store revisions, with explicit expiration/stale errors.
-   A preview that contained blocked changes is **all-or-nothing**: it cannot be
-   applied partially — fix the blocked entries and re-preview. Apply (direct or
-   from a cached preview) re-checks every referenced provider's credentials for
-   the target profile before any write.
-3. Click **Apply** to apply the reviewed change, or enter a preset name and click
-   **Save as preset** for reuse. Favorite presets appear above the editor; an empty
-   list shows guidance rather than an unexplained blank section.
-4. Clicking a favorite preset reviews/previews it; **Apply preset** performs the
-   reviewed application. Check the operation drawer's per-profile readback result.
-   Undo remains an explicit, guarded recovery action.
-
-Expand **Browse provider models** to search Hermes' provider-scoped catalog, keeping the exact
-model ID alongside its provider. IDs are not portable across providers: Nous may
-use `deepseek/deepseek-v4.1-flash` while OpenCode Go uses `deepseek-v4.1-flash`.
-Refresh requests live discovery, but failed probes and curated/cache fallbacks
-remain visibly unproven-fresh. Manual entry stays available for custom routes.
-
-**Choose a model** assigns a provider and model. On a fallback slot, that is an
-explicit one-entry chain. **Set fallback sequence** supports several
-`provider/model` lines in order. **Reset to default or inherited routing** removes
-the override; **Turn off fallback** writes an explicit empty chain, not a disabled
-main model. These actions are distinct, and a malformed/missing chain is rejected
-instead of silently cleared. Exact-model removal is a separate advanced action.
-Speech routes bind the selected backend and its native model field together;
-MoA preset rows address their aggregator, preserving reference models and policy.
-
-Auxiliary tasks are derived from the installed Hermes defaults and registered
-plugin tasks. Plugin task registration is resolved against **each profile's own
-Hermes home** (a context-local Hermes instance, not one machine-global
-registry), so two profiles can legitimately show different plugin task rows.
-Vision is an auxiliary task, not a specialist speech backend.
-Pinning its backend while `agent.image_input_mode` is `auto` makes the main agent
-receive a text interpretation even if its main model supports images. Explicit
-native/text image modes are unchanged. The separate OpenRouter fallback override
-affects auxiliary auto-routing across tasks; it is not a per-task route.
-Unset speech backends follow the runtime defaults (local STT / Edge TTS in the
-tested runtime). The current Edge TTS backend carries **no configurable model
-field**, so its model slot shows no editable key — but the row still supports an
-**explicit switch to a supported model-bearing backend**, which then binds that
-backend's native model field. "No model key today" is scoped to that model slot;
-it is not a claim that every writable field on the row is uneditable.
-
-Apply and Undo refresh configured state automatically; **Refresh state** reloads
-external edits. **Last observed** shows **No recorded usage** until actual runtime usage
-evidence is available—it is never fabricated from configuration. Saved presets
-retain their exact reviewed slots, profiles and billing approval; an apply request
-cannot silently broaden that saved policy.
-
-Status and failures are shown beside the action controls as well as announced
-through the screen-reader status region. A refused apply preserves the server's
-reason, including FastAPI's nested `detail.error` and `detail.reasons`, rather
-than displaying only `HTTP 409`. A missing provider connection is a real refusal,
-not a successful model switch; connect that provider through Hermes or choose a
-connected route. A state-loading authentication failure is separate from a layout
-problem: the tab must use the host SDK transport even if the bundle renders.
+Favorites open a preset preview before application. **Refresh state** reloads external edits. Advanced controls cover inherited/default routing, ordered fallback sequences, and exact-model removal; see [advanced routing](docs/technical-reference.md).
 
 ## Limitations
 
-- **In-process Dashboard writes only.** Hosted-isolation mode is read-only
-  until a compatible coordinated writer is proven; the plugin never changes
-  your isolation setting automatically.
-- **Journalled application with compensation, not fleet-wide atomicity.**
-  Same-process Dashboard writes share Hermes locks; external CLI/editor
-  writers do not. An exclusive-writer requirement applies during Apply/Undo.
-- **Configured ≠ observed.** The plugin reports what was persisted and read
-  back. Existing chat sessions keep their old route until they start anew;
-  live switching of in-flight sessions is out of scope.
-- **Identity-guarded writes.** Apply and Undo refuse when a target profile
-  directory was recreated, moved, or restored from a backup after the review:
-  its directory identity changed, so the reviewed write is no longer provably
-  the same target. The refusal names the profile; re-review the change. This is
-  deliberate fail-closed behaviour, not a cached-state error.
-- **Unknown slots block completeness.** Auxiliary task discovery uses the
-  installed runtime defaults and registered task declarations, resolved against
-  the profile being inventoried (its own context-local Hermes home), not one
-  machine-global registry. Other selectors still require reviewed registry
-  coverage or typed descriptors; arbitrary model-looking config keys never gain
-  write access merely by existing.
-- **Protected by default:** identity, skills, memories, transcripts, auth
-  stores, schedules/delivery, judge thresholds, compression thresholds and
-  any slot not explicitly selected. Code constants (e.g. OMH shipped model
-  chains) are immutable and never patched.
-- Historical usage, transcripts and `.env`/auth stores are never rewritten.
+- Writes require an **in-process Dashboard**. Hosted isolation remains read-only; the plugin does not change that setting.
+- Changes update saved configuration. Existing chat sessions may keep their previous routing until a new session starts. Configured routing is not proof of inference or recorded usage.
+- Each operation validates profiles and revisions. Avoid concurrent CLI or editor changes during Apply or Undo. Multi-profile application uses a journal and compensation; it is not a single atomic transaction across all files.
+- Only supported, explicitly selected slots are writable. Unknown model-like keys and unsupported plugin selectors remain coverage gaps.
+- Credentials must already be connected through Hermes for each target profile. A missing connection blocks the change.
+
+## Privacy
+
+The plugin does not copy credentials between profiles or rewrite authentication stores, memories, skills, or transcripts. It uses the Dashboard's authenticated transport.
+
+Before writing, it saves private recovery snapshots in a local SQLite journal outside Git worktrees and browser assets. Snapshots can contain sensitive configuration; keep that journal private. Public operation responses expose status and outcomes without raw configurations, snapshots, store paths, or exception strings. Model catalog refresh can contact provider services; a catalog result is not an inference test.
 
 ## Recovery
 
-- Every apply operation journals an operation ID plus a private per-store
-  snapshot (outside the repository and outside browser-served assets) before
-  the first write.
-- On failure the rollout stops and completed writes are compensated in
-  reverse order, only when the current revision still matches the recorded
-  post-write state. A conflict becomes `recovery_required` — never a forced
-  restore.
-- After a crash or timeout, retry/undo first reconciles persisted intent
-  against the actual files; ambiguous commit state is reported, not guessed.
-- Repeating an operation ID returns the existing operation instead of
-  duplicating writes.
-- Undo is an explicit, revision-guarded action. Removing or disabling the
-  plugin does not silently undo already-applied model choices; use the
-  operation drawer's guarded Undo or restore from the private snapshots.
+**Undo is explicit and guarded.** It refuses to overwrite conflicting external edits. Failed operations attempt compensation in reverse order; unresolved conflicts report `recovery_required`. After a crash, recovery reconciles recorded intent with actual files. Disabling or uninstalling the plugin does not reverse previous changes. Keep recovery data until you have resolved any outstanding operation.
 
-## Privacy & local data handling
+## Develop and contribute
 
-- **The operation journal (SQLite) is private by construction.** It refuses
-  to be created inside ANY git worktree (including git-ignored directories —
-  ignore rules alone give no guarantee), refuses symlinked DB paths or
-  symlinked parent directories, and is created with `0600` permissions in a
-  `0700` parent directory.
-- **Recovery snapshots stay local.** Private per-store snapshots (the only
-  source for exact undo) live solely in the private journal DB — they are
-  never exported, logged, or returned by the public API.
-- **Public operations use a safe DTO.** `to_public_operation` /
-  `PublicOperationView` allowlist only operation status and per-step slot
-  outcomes (state, profile, store kind, revisions). Raw configs, store
-  paths, payloads, changes, snapshots and exception strings never cross the
-  boundary.
-- **Local privacy gate (no CI/CD).** `scripts/privacy_guard.py` scans
-  tracked and staged files by path AND content for full Hermes
-  configs/exports/snapshots and credentials, rejecting findings without
-  printing values. Install local hooks with:
+Use an isolated Hermes lab home for write tests. Do not point test seeding or installation scripts at active profiles.
 
-  ```sh
-  bash scripts/install_hooks.sh
-  ```
+```sh
+npm install
+npm run build
+python -m pytest tests/
+npm test
+python scripts/privacy_guard.py
+python scripts/build_package.py
+```
 
-  This installs `pre-commit` (staged files) and `pre-push` (full tree)
-  hooks into the repo's git hooks dir. `.gitignore` additionally blocks
-  `*.db`, `*.sqlite*`, `journals/`, `snapshots/`, `backups/`, `.env`,
-  credentials dumps and session transcripts — but the hooks, not ignore
-  rules, are the actual enforcement.
+Install Python test dependencies with `python -m pip install '.[test]'` in a dedicated environment compatible with your Hermes checkout. Runtime integration tests also need that checkout and its dependencies; fixture tests alone do not prove live compatibility.
 
-## Verified scope & known gaps
+The package builder refuses an existing destination unless you pass `--replace`; validate the destination before requesting replacement. Install/uninstall helpers are for disposable labs only. Installation refuses an existing plugin unless a third `--replace` argument is supplied. Replacement and uninstall preserve the old directory in a private backup under the lab plugins directory, including recovery data. The helpers always refuse the native live home and its descendants.
 
-Verified locally through Hermes for the usability-polish change; no hosted
-CI/CD or deployment workflow was added:
+Before sharing changes, run the [privacy guard](scripts/privacy_guard.py) and inspect your diff for private data. Optional local Git hooks are installed by `bash scripts/install_hooks.sh`. Report bugs with a minimal reproduction, Hermes version, and sanitized verification output; never attach credentials, full configurations, or recovery journals.
 
-- `npm run build` — shipped Dashboard JS/CSS regenerated successfully.
-- `env -u PYTHONPATH .venv/bin/python -m pytest -o addopts='' -q` —
-  **379 passed**. Includes runtime-derived auxiliary coverage, speech backend
-  defaults, provider gates, package discovery and canonical save/undo tests.
-- `env -u PYTHONPATH HMS_PYTHON="$PWD/.venv/bin/python" npm run test -- --workers=1`
-  — **69 passed**. Includes bulk selection, hidden-selection counts, preview
-  invalidation, model ID preservation, operation-drawer focus/Escape, and the
-  real FastAPI backend over isolated profiles with byte-exact guarded undo.
-- Compiled SDK/host-reset fixture captures at **1440, 768 and 375px**, in dark
-  and light themes, check long profile names, sticky identity, keyboard table
-  scrolling, no document overflow, and no page/console errors or failed requests.
-  The contrast check covers rendered input text in these fixture themes, not a
-  comprehensive WCAG audit or every possible custom host theme.
-- The browser harness checks Hermes' actual profile resolver before mounting
-  the API and refuses a lab whose default profile resolves outside its declared
-  root. The `--seed` CLI is fail-closed too: it resolves the **requested
-  target** with that same resolver and refuses any target that is not its own
-  isolated root — anything nested under the native home, and the native home
-  itself — before the first write, instead of trusting the inherited
-  `HERMES_HOME`. `--print-profiles` is a pure data dump that constructs no
-  router and needs no lab home. No discovery shim substitutes for the real
-  resolver.
-- Seeding also refuses existing profile data in custom/external homes; an
-  external path being its own runtime root is not permission to overwrite it.
-- Discovery warnings belong to one inventory build, and plugin registry scope
-  is consistent across State, Preview, Apply and removal preparation. Default
-  model-less speech rows expose backend-assignment capability separately from
-  current-field writability.
-- Speech assignments reject blank, non-string and untrimmed identifiers before
-  submitted-backend lookup. Valid native IDs are stored exactly; malformed
-  values are not silently repaired. HTTP Preview and direct Apply tests verify
-  refusals leave the original configuration bytes unchanged.
-- The OpenRouter scalar shares the literal model-string validator and exposes
-  its fixed implicit provider consistently for display and exact removal.
-- Unpinned registered tasks show declared inheritance, including a real base's
-  automatic routing without inventing a concrete model. Expanded inherited and
-  known runtime-default routes wrap visibly at mobile sizes instead of hiding
-  their effective provider/model beyond the table viewport.
-- Local pre-commit/pre-push privacy checks exclude real configs, auth data,
-  recovery snapshots, journals and transcripts from publication.
-
-See [the usability guide](docs/usability-polish.md) and
-[the design contract](DESIGN.md) for behavior and design intent. Visual fixtures
-are not evidence of authenticated live-Dashboard deployment or provider inference.
-
-Known gaps (not yet verified — do not assume them):
-
-- **No authenticated live-Dashboard verification for this polish pass.**
-  The full suite uses isolated profiles and fixture shells. Existing live
-  routes are not changed by these checks; deployment remains a separate step.
-- **No provider inference or recorded-usage proof.** The plugin does not
-  fabricate usage from configuration; real usage remains unobserved here.
-- **Local verification, not hosted CI/CD.** No hosted test or deployment result
-  is claimed, and no new automation workflow is introduced.
-- **Family coverage.** The reviewed registry covers main, delegation,
-  auxiliary, judge/reviewer, fallback, MoA, cron/automation, specialist
-  (STT/TTS and a read-only embedding placeholder), plus reviewed plugin
-  selectors. Registered auxiliary tasks are discovered through Hermes'
-  task registry; arbitrary config-schema model fields from other plugins
-  remain coverage gaps. `HERMES_MODEL_SWITCHER_PLUGINS_DIR` can surface those
-  gaps, but it does not grant write access.
-- **Hosted-isolation mode remains read-only**; coordinated-writer feasibility
-  is unproven.
+Read the [design contract](DESIGN.md), [usability notes](docs/usability-polish.md), [technical reference](docs/technical-reference.md), and [release findings](docs/release-readiness.md). Changes should preserve preview, apply, readback, and guarded Undo.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE). This is a community project, without a claim of official Hermes endorsement.
+
+Compatibility note: integration uses private Hermes APIs and can require updates for future Hermes releases. Large profile sets increase discovery time: the first request for 50 synthetic profiles took about seven seconds in the lab. See the release-readiness report for measurements and exact verification scope.

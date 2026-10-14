@@ -35,7 +35,7 @@ NAME = "hermes-model-switcher"
 # desktop/plugin.js or plugin.json beside it is rejected by
 # `hermes plugins validate`, and the agent loader records a load failure
 # ("No __init__.py in <dir>") for it at every startup.
-COPY_FILES = ["plugin.yaml", "__init__.py", "LICENSE", "README.md"]
+COPY_FILES = ["plugin.yaml", "__init__.py", "LICENSE", "README.md", "CHANGELOG.md", "DESIGN.md"]
 PY_MODULES = ["hermes_adapter.py", "route_inventory.py"]
 PY_PACKAGE = "model_switcher"
 DASHBOARD = ["manifest.json", "plugin_api.py", "model_catalog.py"]
@@ -51,10 +51,27 @@ def fail(msg: str) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(REPO / "dist-package"))
+    ap.add_argument("--replace", action="store_true",
+                    help="replace an existing assembled package directory")
     args = ap.parse_args()
-    out = Path(args.out) / NAME
-    if out.exists():
-        shutil.rmtree(out)
+    out = Path(args.out).absolute() / NAME
+    for candidate in (out, *out.parents):
+        if candidate.is_symlink():
+            fail("output path must not contain symlinks")
+    out = out.resolve()
+    if out == REPO or out in REPO.parents:
+        fail("output must not replace the source checkout or its ancestors")
+    if out.exists() and not args.replace:
+        fail("output already exists; use --replace to replace it explicitly")
+    inputs = [REPO / f for f in COPY_FILES + PY_MODULES + ["scripts/privacy_guard.py"]]
+    inputs += [REPO / "dashboard" / f for f in DASHBOARD + [BUNDLE, STYLES]]
+    for source in inputs:
+        if not source.is_file():
+            fail(f"missing {source.name}")
+    if not (REPO / "src" / PY_PACKAGE).is_dir():
+        fail("missing Python package source")
+    if not (REPO / "docs").is_dir():
+        fail("missing documentation")
 
     bundle = REPO / "dashboard" / BUNDLE
     if not bundle.is_file():
@@ -64,12 +81,20 @@ def main() -> None:
     if not stylesheet.is_file():
         fail(f"missing {stylesheet} — run `npm run build` first")
 
+    if out.exists():
+        shutil.rmtree(out)
+
     dash = out / "dashboard" / "dist"
     dash.mkdir(parents=True)
     for f in COPY_FILES:
         if not (REPO / f).is_file():
             fail(f"missing {f}")
         shutil.copy2(REPO / f, out / f)
+    shutil.copytree(REPO / "docs", out / "docs",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    # The README links to this contributor tool; ship it with the docs.
+    (out / "scripts").mkdir()
+    shutil.copy2(REPO / "scripts" / "privacy_guard.py", out / "scripts" / "privacy_guard.py")
     pydir = out / "python"
     pydir.mkdir()
     for f in PY_MODULES:

@@ -23,6 +23,48 @@
   font-size: 14px;
   line-height: 1.5;
   min-width: 0;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.hms-root .hms-page-header {
+  margin-bottom: 24px;
+}
+
+.hms-root .hms-page-header h2 {
+  margin-bottom: 8px;
+}
+
+.hms-root .hms-page-header p,
+.hms-root .hms-section-description {
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+  max-width: 70ch;
+  margin: 0 0 16px;
+}
+
+.hms-root .hms-workspace-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  padding: 12px 0 16px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--hms-border);
+}
+
+.hms-root [data-testid="selection-summary"] {
+  font-weight: 600;
+}
+
+.hms-root input,
+.hms-root textarea {
+  caret-color: var(--hms-accent);
+}
+
+.hms-root input::placeholder,
+.hms-root textarea::placeholder {
+  color: inherit;
+  opacity: 0.75;
 }
 
 /* Text-like fields and selects (NOT checkboxes — those stay natural below) */
@@ -67,6 +109,42 @@
 
 .hms-root button:hover:not(:disabled) {
   border-color: var(--hms-accent);
+}
+
+.hms-root button:active:not(:disabled) {
+  border-color: currentColor;
+}
+
+.hms-root .hms-preview,
+.hms-root .hms-apply:not(:disabled),
+.hms-root .hms-apply-preset:not(:disabled) {
+  border-color: var(--hms-accent);
+  font-weight: 600;
+}
+
+.hms-root [data-testid="model-picker"] li + li {
+  margin-top: 4px;
+}
+
+.hms-root [data-model-id] {
+  text-align: left;
+  width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.hms-root [data-testid="preview-panel"] ul {
+  padding-left: 20px;
+}
+
+.hms-root [data-testid="preview-panel"] > ul > li + li {
+  margin-top: 12px;
+}
+
+.hms-root [data-testid="preview-panel"] code,
+.hms-root [data-testid="operation-drawer"] code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* Keyboard focus must be visible even through the host reset */
@@ -133,6 +211,7 @@
   grid-column: 2;
   grid-row: 1;
   max-width: 372px;
+  margin-top: 0;
 }
 
 .hms-root .hms-workspace.hms-wide > section[aria-label="Profile model matrix"] {
@@ -237,6 +316,11 @@
   margin-top: 8px;
 }
 
+/* Preserve readable route columns while the narrow viewport scrolls the table. */
+.hms-root [data-testid="matrix-scroll"] table {
+  min-width: 850px;
+}
+
 .hms-root td,
 .hms-root th {
   padding: 8px;
@@ -275,4 +359,12 @@
 .hms-root .hms-expand {
   text-align: left;
   white-space: normal;
+}
+
+@media (max-width: 480px) {
+  .hms-root .hms-page-header { margin-bottom: 16px; }
+  .hms-root .hms-workspace-tools .hms-note { flex-basis: 100%; }
+  .hms-root .hms-filter { flex-basis: 100%; }
+  .hms-root .hms-preset { width: 100%; text-align: left; }
+  .hms-root [data-testid="action-surface"] { padding: 12px; }
 }

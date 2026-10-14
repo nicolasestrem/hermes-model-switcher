@@ -44,4 +44,4 @@ copyFileSync(
 console.log("built dashboard/dist/style.css + ui/dist/style.css");
 
 // Test-harness vendor bundle (host-like React globals) — test asset only.
-await import(new URL("../tests/build-vendor.mjs", import.meta.url).pathname);
+await import(new URL("../tests/build-vendor.mjs", import.meta.url));

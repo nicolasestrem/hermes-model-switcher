@@ -87,20 +87,23 @@ class OperationJournal:
         # Private DB and parent: group/other get no access. Private
         # recovery snapshots stay local — they are the only source for
         # exact undo, but they must never be readable beyond the user.
-        for d in (db_dir,):
-            try:
-                os.chmod(d, stat.S_IRWXU)
-            except OSError:
-                pass
+        os.chmod(db_dir, stat.S_IRWXU)
+        if os.name == "posix" and stat.S_IMODE(os.stat(db_dir).st_mode) != 0o700:
+            raise PermissionError("journal directory permissions must be private")
         if os.path.islink(db_dir):
-            raise ValueError(
-                "journal parent directory must not be a symlink: %r" % db_dir)
-        self.db_path = db_path
-        self._conn = sqlite3.connect(db_path, isolation_level=None)
+            raise ValueError("journal parent directory must not be a symlink")
+        # Create privately before SQLite opens the file, so permissive umasks
+        # cannot expose the initial database or its recovery snapshots.
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(raw, flags, 0o600)
         try:
-            os.chmod(db_path, stat.S_IRUSR | stat.S_IWUSR)  # 0600
-        except OSError:
-            pass
+            os.chmod(raw, stat.S_IRUSR | stat.S_IWUSR)
+            if os.name == "posix" and stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
+                raise PermissionError("journal database permissions must be private")
+        finally:
+            os.close(fd)
+        self.db_path = raw
+        self._conn = sqlite3.connect(raw, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(
             """

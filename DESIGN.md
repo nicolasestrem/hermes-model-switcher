@@ -3,6 +3,8 @@
 ## 1. Atmosphere & Identity
 Operational, legible, calm. This is a Hermes Dashboard configuration workspace, not a marketing page. The matrix is the primary workspace, the change rail is secondary. Signature: an explicit selection summary connecting exact profile/slot targets to reviewed changes. Preserve host theme and runtime protections.
 
+The page introduction states the practical benefit in one sentence. Task headings lead with actions: Select your targets, Choose your routing, Preview, Apply. Presets remain a compact reusable-setup strip. The refresh/recovery toolbar separates orientation from editing. Selection counts announce changes politely; model search explains zero matches and how to recover.
+
 ## 2. Color
 Use host semantic tokens, not a new brand palette: surface --background, text --midground, muted --text-muted-color, border --color-border, focus --color-ring, accent --accent-color. Preserve legacy aliases. Fallbacks: surface #16181d, text #e6e8ee, muted #9aa1ad, border #3a3f48, accent/focus #6f9bff, danger #e5534b, success #3fb950, warning #d29922. Accent is restricted to primary actions, focus and selection, not background floods. Text-backed semantic states; never color alone. Verify AA contrast for actual light/dark host token pairs. Sticky surfaces must resolve opaque colors and refresh with theme changes.
 

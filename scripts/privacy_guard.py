@@ -61,7 +61,6 @@ ALLOW_GLOB = [
     "scripts/privacy_guard.py",
     "tests/test_privacy.py",
     ".gitignore",
-    "README.md",
 ]
 
 
@@ -83,7 +82,7 @@ def tracked_files() -> list[str]:
 
 def staged_files() -> list[str]:
     out = set()
-    for l in git("diff", "--cached", "--name-only", "-z").split("\0"):
+    for l in git("diff", "--cached", "--name-only", "--diff-filter=ACMRT", "-z").split("\0"):
         if l:
             out.add(l)
     return sorted(out)
@@ -91,14 +90,16 @@ def staged_files() -> list[str]:
 
 def read_bytes(path: str, ref: str | None = None) -> bytes:
     if ref:
-        r = subprocess.run(["git", "show", f"{ref}:{path}"],
+        r = subprocess.run(["git", "show", f"{ref}{path}" if ref == ":" else f"{ref}:{path}"],
                            capture_output=True)
-        return r.stdout if r.returncode == 0 else b""
+        if r.returncode != 0:
+            raise OSError("cannot read Git blob")
+        return r.stdout
     try:
         with open(path, "rb") as f:
             return f.read()
     except OSError:
-        return b""
+        raise OSError("cannot read working-tree file") from None
 
 
 def scan(paths: list[str], blob_ref: str | None = None) -> list[str]:
@@ -113,7 +114,11 @@ def scan(paths: list[str], blob_ref: str | None = None) -> list[str]:
                 findings.append(f"{path}: PATH-RULE {name}")
         if _allowlisted(path):
             continue
-        data = read_bytes(path, blob_ref)
+        try:
+            data = read_bytes(path, blob_ref)
+        except OSError:
+            findings.append(f"{path}: READ-ERROR (content unavailable)")
+            continue
         try:
             text = data.decode("utf-8", errors="replace")
         except Exception:
@@ -136,9 +141,13 @@ def scan(paths: list[str], blob_ref: str | None = None) -> list[str]:
 
 def main(argv: list[str]) -> int:
     staged_only = "--staged-only" in argv
-    files = staged_files() if staged_only else sorted(
-        set(tracked_files()) | set(staged_files()))
-    findings = scan(files)
+    staged = staged_files()
+    files = staged if staged_only else tracked_files()
+    # Scan the index independently: unstaged edits must never hide staged secrets.
+    findings = scan(staged, blob_ref=":")
+    if not staged_only:
+        findings += scan(files)
+    findings = list(dict.fromkeys(findings))
     if findings:
         print("PRIVACY GUARD: private-looking data in tracked files\n"
               "(matched values are intentionally NOT printed):")
@@ -146,7 +155,7 @@ def main(argv: list[str]) -> int:
             print("  " + f)
         print("Refusing. Remove the private data or add an explicit "
               "allowlist entry if it is a false positive.")
-        return 1
+        return 2 if any("READ-ERROR" in f for f in findings) else 1
     print(f"privacy guard: clean ({len(files)} files scanned)")
     return 0
 
