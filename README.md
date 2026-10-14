@@ -239,7 +239,7 @@ CI/CD or deployment workflow was added:
 
 - `npm run build` — shipped Dashboard JS/CSS regenerated successfully.
 - `env -u PYTHONPATH .venv/bin/python -m pytest -o addopts='' -q` —
-  **285 passed**. Includes runtime-derived auxiliary coverage, speech backend
+  **334 passed**. Includes runtime-derived auxiliary coverage, speech backend
   defaults, provider gates, package discovery and canonical save/undo tests.
 - `env -u PYTHONPATH HMS_PYTHON="$PWD/.venv/bin/python" npm run test -- --workers=1`
   — **65 passed**. Includes bulk selection, hidden-selection counts, preview
@@ -265,6 +265,10 @@ CI/CD or deployment workflow was added:
   is consistent across State, Preview, Apply and removal preparation. Default
   model-less speech rows expose backend-assignment capability separately from
   current-field writability.
+- Speech assignments reject blank, non-string and untrimmed identifiers before
+  submitted-backend lookup. Valid native IDs are stored exactly; malformed
+  values are not silently repaired. HTTP Preview and direct Apply tests verify
+  refusals leave the original configuration bytes unchanged.
 - Local pre-commit/pre-push privacy checks exclude real configs, auth data,
   recovery snapshots, journals and transcripts from publication.
 

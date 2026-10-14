@@ -144,7 +144,7 @@ Local verification for this change completed with exit code 0:
 - `env -u PYTHONPATH HMS_PYTHON="$PWD/.venv/bin/python" npm run test -- --workers=1` →
   `65 passed`
 - `env -u PYTHONPATH .venv/bin/python -m pytest -o addopts='' -q` →
-  `285 passed, 5 warnings`
+  `334 passed, 5 warnings`
 
 ## Tests
 
@@ -178,3 +178,9 @@ Local verification for this change completed with exit code 0:
 - `tests/tts-assignment.spec.mjs` — Edge TTS selection, explicit backend/model
   intent, refusal of imaginary-field resets, and rendered desktop/mobile switch
   guidance.
+- `tests/test_pr9_speech_validation.py` — blank, non-string and untrimmed route
+  values are rejected before submitted-backend lookup; valid identifiers remain
+  byte-exact and supported model-only updates keep their established semantics.
+- `tests/test_pr9_speech_api_refusals.py` — both HTTP Preview and direct Apply
+  refuse malformed assignments and model-less reset/remove/chain attempts,
+  without changing the profile's configuration bytes.

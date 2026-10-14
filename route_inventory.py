@@ -513,6 +513,46 @@ def _speech_descriptor(cfg: Dict[str, Any], slot_id: str, provider: Optional[str
         f"backend {backend!r} declares no model config key — read-only, no "
         f"invented {section}.{backend}.model store key")
 
+
+def _speech_assignment_refusal(slot_id: str, value: Dict[str, Any]) -> Optional[str]:
+    """Refuse a speech SET that would persist an unusable model id.
+
+    Validate the submitted identifiers before backend lookup. The caller also
+    refuses a resolved model-less/voice-only section. An assignment must carry
+    a usable, LITERAL model id:
+
+      * ``provider`` (when the key is present) must be a string; ``""`` stays
+        the documented unset/unspecified sentinel resolved to the runtime
+        default backend, but an explicit invalid provider (``None``, a number,
+        a list) is REFUSED rather than allowed to fall back to the resolved
+        backend route, and a non-empty provider must be whitespace-clean;
+      * ``model`` must be a non-empty string.
+
+    Identifiers are stored byte-exact, so a provider/model id carrying leading
+    or trailing whitespace is REJECTED rather than silently canonicalized: the
+    value the client sent is the value that would be persisted, and a
+    ``" openai "`` provider must never be recognized-but-stored-untrimmed.
+    """
+    if "provider" in value:
+        provider = value["provider"]
+        if not isinstance(provider, str):
+            return (f"{slot_id}: 'provider' must be a string, not "
+                    f"{type(provider).__name__}")
+        if provider != provider.strip():
+            return (f"{slot_id}: provider has leading/trailing "
+                    "whitespace; refusing to store an untrimmed backend id")
+    model = value.get("model")
+    if not isinstance(model, str):
+        return (f"{slot_id}: model-bearing speech route requires a string "
+                f"'model', not {type(model).__name__}")
+    if not model.strip():
+        return f"{slot_id}: model-bearing speech route requires a non-empty 'model'"
+    if model != model.strip():
+        return (f"{slot_id}: model has leading/trailing whitespace; "
+                "refusing to store an untrimmed model id")
+    return None
+
+
 # Explicitly unsupported: there is no runtime-consumed embedding-model config key
 # (hermes_cli/config_defaults.py has no ``embedding`` section), so this row is
 # read-only rather than a fake editable route.
@@ -819,6 +859,10 @@ def preview_changes(cfg: Dict[str, Any], edits: List[RouteEdit],
             continue
         desc = obs.descriptor
         if edit.slot_id in ("specialist.stt", "specialist.tts") and isinstance(edit.value, dict):
+            refusal = _speech_assignment_refusal(edit.slot_id, edit.value)
+            if refusal is not None:
+                rejected.append(refusal)
+                continue
             desc = _speech_descriptor(cfg, edit.slot_id, edit.value.get("provider"))
             if not desc.writable:
                 backend = desc.storage_path.split(".")[1]
