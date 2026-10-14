@@ -239,10 +239,10 @@ CI/CD or deployment workflow was added:
 
 - `npm run build` — shipped Dashboard JS/CSS regenerated successfully.
 - `env -u PYTHONPATH .venv/bin/python -m pytest -o addopts='' -q` —
-  **334 passed**. Includes runtime-derived auxiliary coverage, speech backend
+  **379 passed**. Includes runtime-derived auxiliary coverage, speech backend
   defaults, provider gates, package discovery and canonical save/undo tests.
 - `env -u PYTHONPATH HMS_PYTHON="$PWD/.venv/bin/python" npm run test -- --workers=1`
-  — **65 passed**. Includes bulk selection, hidden-selection counts, preview
+  — **69 passed**. Includes bulk selection, hidden-selection counts, preview
   invalidation, model ID preservation, operation-drawer focus/Escape, and the
   real FastAPI backend over isolated profiles with byte-exact guarded undo.
 - Compiled SDK/host-reset fixture captures at **1440, 768 and 375px**, in dark
@@ -269,6 +269,12 @@ CI/CD or deployment workflow was added:
   submitted-backend lookup. Valid native IDs are stored exactly; malformed
   values are not silently repaired. HTTP Preview and direct Apply tests verify
   refusals leave the original configuration bytes unchanged.
+- The OpenRouter scalar shares the literal model-string validator and exposes
+  its fixed implicit provider consistently for display and exact removal.
+- Unpinned registered tasks show declared inheritance, including a real base's
+  automatic routing without inventing a concrete model. Expanded inherited and
+  known runtime-default routes wrap visibly at mobile sizes instead of hiding
+  their effective provider/model beyond the table viewport.
 - Local pre-commit/pre-push privacy checks exclude real configs, auth data,
   recovery snapshots, journals and transcripts from publication.
 

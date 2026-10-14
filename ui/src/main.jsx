@@ -401,11 +401,23 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
 
 function RoutingDetail({ slot }) {
   const st = normalizeState(slot.state);
+  const effective = slot.effectiveRoute;
+  const hasDefaultRoute = effective && (
+    (typeof effective.model === "string" && effective.model.trim()) ||
+    (typeof effective.provider === "string" && effective.provider.trim() && effective.provider.toLowerCase() !== "auto")
+  );
   return (
     <div>
       <div>Storage: <code>{slot.storagePath || "config.yaml"}</code> · state: <strong>{stateLabel(slot.state)}</strong>
-        {st === "inherited" && slot.effectiveRoute && <> (effective: <code>{routeText({ ...slot.effectiveRoute, state: "configured" })}</code>)</>}
       </div>
+      {effective && (st === "inherited" || (st === "unset" && hasDefaultRoute)) && (
+        <div data-testid="inherited-effective-route" style={{ maxWidth: "min(640px, calc(100vw - 72px))" }}>
+          {st === "inherited" ? "Inherited route" : "Runtime default"} — effective:
+          <code style={{ display: "block", whiteSpace: "normal", overflowWrap: "anywhere" }}>
+            {routeText({ ...effective, state: "configured" })}
+          </code>
+        </div>
+      )}
       {slot.protocol && <div>Protocol: <code>{slot.protocol}</code></div>}
       {slot.note && <div style={{ color: THEME.warn }}>{slot.note}</div>}
     </div>
