@@ -51,11 +51,25 @@ const FAMILIES = [
   { id: "cron", label: "Automation (cron)" },
   { id: "moa", label: "Mixture of Agents" },
   { id: "judges", label: "Judges / Reviewers" },
-  { id: "fallback", label: "Fallback / MoA" },
+  { id: "fallback", label: "Fallback" },
   { id: "automation", label: "Automation (cron/overrides)" },
-  { id: "specialist", label: "Specialist (vision/embeddings/speech)" },
+  { id: "specialist", label: "Specialist (speech / embeddings)" },
   { id: "plugin", label: "Plugin selectors" },
 ];
+
+function familyLabel(id) {
+  return (FAMILIES.find((f) => f.id === id) || { label: id }).label;
+}
+
+function taskLabel(slot) {
+  if (slot.metadata?.label) return slot.metadata.label;
+  const key = subfamilyOf(slot);
+  const labels = { stt: "Speech-to-text", tts: "Text-to-speech", mcp: "MCP",
+    moa_reference: "MoA reference fallback", moa_aggregator: "MoA aggregator fallback",
+    openrouter_model: "OpenRouter auxiliary fallback", model: "Model",
+    embedding: "Embedding (read-only)" };
+  return labels[key] || key.replaceAll("_", " ").replace(/^./, c => c.toUpperCase());
+}
 
 function scopeSummary(preset) {
   return `${preset.profileIds.length} profile${preset.profileIds.length === 1 ? "" : "s"} · ` +
@@ -173,12 +187,12 @@ function ProfileFilter({ profiles, value, onChange }) {
     <div data-testid="profile-filter"
       style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-start" }}>
       <button type="button" aria-pressed={!value.length} onClick={() => onChange([])}>
-        {value.length ? `${value.length} selected · show all` : "All profiles"}
+        All profiles
       </button>
       <input aria-label="Search profiles" placeholder="search profiles…" value={query}
         onChange={(e) => setQuery(e.target.value)} style={{ minWidth: 0 }} />
       <div role="group" aria-label="Profiles" data-testid="profile-options"
-        style={{ display: "flex", gap: 8, flexWrap: "wrap", alignSelf: "center" }}>
+        style={{ display: "flex", gap: 8, flexWrap: "wrap", alignSelf: "center", maxHeight: 112, overflow: "auto", width: "100%" }}>
         {visible.map((p) => (
           <label key={p.id} style={{ display: "inline-flex", gap: 4 }}>
             <input type="checkbox"
@@ -195,7 +209,7 @@ function ProfileFilter({ profiles, value, onChange }) {
   );
 }
 
-function Matrix({ profiles, slots, selection, onToggle, onExpand, expanded, filters, setFilters }) {
+function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSelection, onExpand, expanded, filters, setFilters }) {
   // Resolved per render-source and refreshed on host theme changes, never a
   // module-scope snapshot (see useOpaqueSurface).
   const stickyBg = useOpaqueSurface();
@@ -227,39 +241,70 @@ function Matrix({ profiles, slots, selection, onToggle, onExpand, expanded, filt
     });
   }, [scoped, filters]);
 
-  const rowKey = (s) => s.profileId + "/" + s.slotId;
-
   const setFilter = (patch) => setFilters({ ...filters, ...patch });
+
+  const rowKey = (s) => s.profileId + "/" + s.slotId;
+  const writableInView = filtered.filter((s) => s.writable);
+  const selectedInView = writableInView.filter((s) => selection.has(rowKey(s)));
+  const masterChecked = writableInView.length > 0 && selectedInView.length === writableInView.length;
+  const masterIndeterminate = !masterChecked && selectedInView.length > 0;
+  const masterRef = (el) => { if (el) el.indeterminate = masterIndeterminate; };
+  // Bulk select-all only ever targets the WRITABLE rows matching the current
+  // filters — a read-only row is never added, even from the header control.
+  const onMasterChange = () => {
+    const next = new Map(selection);
+    if (masterChecked) for (const s of writableInView) next.delete(rowKey(s));
+    else for (const s of writableInView) next.set(rowKey(s), s);
+    onToggleAll(next);
+  };
+  // Counts describe actual edit targets, never read-only profiles in the view.
+  const selCount = selection.size;
+  const selProfileCount = new Set([...selection.values()].map((s) => s.profileId)).size;
+  const inViewKeys = new Set(filtered.map(rowKey));
+  const hiddenCount = [...selection.keys()].filter((k) => !inViewKeys.has(k)).length;
+  const summaryText = `${selCount} slot${selCount === 1 ? "" : "s"} on ` +
+    `${selProfileCount} profile${selProfileCount === 1 ? "" : "s"} selected` +
+    (hiddenCount > 0 ? ` · ${hiddenCount} hidden by current filters` : "");
 
   return (
     <section aria-label="Profile model matrix">
       <h3 style={{ margin: "4px 0" }}>Profiles × model slots</h3>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "baseline", margin: "4px 0" }}>
+        <p data-testid="selection-summary" style={{ margin: 0 }}>{summaryText}</p>
+        <button type="button" data-testid="clear-selection" disabled={selection.size === 0}
+          title="Deselect every selected target, including ones hidden by the current filters"
+          onClick={() => onClearSelection()}>Clear selection</button>
+      </div>
       <div role="group" aria-label="Matrix filters"
         style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+        <div className="hms-profile-scope"><strong>Profiles shown</strong>
         <ProfileFilter profiles={profiles} value={filters.profileIds}
           onChange={(profileIds) => setFilter({ profileIds, subfamily: "all" })} />
-        <select aria-label="Filter by family" value={filters.family}
+        <span className="hms-note">{filters.profileIds.length || profiles.length} of {profiles.length} profiles shown. This filters the view; it does not select changes.</span>
+        </div>
+        <label className="hms-filter">Family<select aria-label="Filter by family" value={filters.family}
           onChange={(e) => setFilter({ family: e.target.value, subfamily: "all" })}>
           <option value="all">All families</option>
           {FAMILIES.filter((family) => slots.some((slot) => slot.family === family.id)).map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
-        </select>
-        <select aria-label="Filter by subfamily" data-testid="filter-subfamily" value={filters.subfamily}
+        </select></label>
+        <label className="hms-filter">Task<select aria-label="Filter by subfamily" data-testid="filter-subfamily" value={filters.subfamily}
           onChange={(e) => setFilter({ subfamily: e.target.value })}>
           <option value="all">All subfamilies</option>
-          {subfamilies.map((sf) => <option key={sf} value={sf}>{sf}</option>)}
-        </select>
-        <input aria-label="Filter by provider" placeholder="provider…" value={filters.provider}
-          onChange={(e) => setFilter({ provider: e.target.value })} />
-        <input aria-label="Filter by model" placeholder="model…" value={filters.model}
-          onChange={(e) => setFilter({ model: e.target.value })} />
-        <select aria-label="Filter by state" value={filters.state}
+          {subfamilies.map((sf) => <option key={sf} value={sf}>{taskLabel(scoped.find(s => subfamilyOf(s) === sf) || { slotId: sf })}</option>)}
+        </select></label>
+        <label className="hms-filter">Provider<input aria-label="Filter by provider" placeholder="provider…" value={filters.provider}
+          onChange={(e) => setFilter({ provider: e.target.value })} /></label>
+        <label className="hms-filter">Model<input aria-label="Filter by model" placeholder="model…" value={filters.model}
+          onChange={(e) => setFilter({ model: e.target.value })} /></label>
+        <label className="hms-filter">State<select aria-label="Filter by state" value={filters.state}
           onChange={(e) => setFilter({ state: e.target.value })}>
           <option value="all">All states</option>
           {STATE_ORDER.map((s) => <option key={s} value={s}>{STATE_LABELS[s]}</option>)}
-        </select>
+        </select></label>
+        <button type="button" onClick={() => setFilter({ profileIds: [], family: "all", subfamily: "all", provider: "", model: "", state: "all" })}>Reset filters</button>
       </div>
-      <p style={{ color: THEME.muted, fontSize: "0.85em", margin: "4px 0" }}>Scroll the table horizontally to inspect routes on narrow screens.</p>
-      <div data-testid="matrix-scroll" role="region" aria-label="Scrollable model slots" tabIndex={0} style={{ maxHeight: "55vh", overflow: "auto" }}>
+      <p style={{ color: THEME.muted, fontSize: "0.85em", margin: "4px 0" }}>{filtered.length} matching slots · {filtered.filter(s => !s.writable).length} read-only. Scroll horizontally to inspect routes on narrow screens.</p>
+      <div data-testid="matrix-scroll" role="region" aria-label="Scrollable model slots" tabIndex={0} style={{ maxHeight: "70vh", overflow: "auto" }}>
       <table style={{ borderCollapse: "collapse", width: "100%" }}>
         {/* Screen-reader-only caption. The hidden styles are INLINE: the host
             Dashboard does not define `.visually-hidden`, so a class-based hide
@@ -271,10 +316,20 @@ function Matrix({ profiles, slots, selection, onToggle, onExpand, expanded, filt
         </caption>
         <thead>
           <tr>
-            {["", "Profile", "Slot", "Family", "Configured route", "Last observed"].map((h) => (
+            <th scope="col" style={{
+              textAlign: "left", borderBottom: `1px solid ${THEME.border}`, padding: 4,
+              position: "sticky", top: 0, left: 0, background: stickyBg, zIndex: 3, width: 32, minWidth: 32,
+            }}>
+              <input ref={masterRef} type="checkbox" data-testid="select-all"
+                aria-label="Select all matching writable slots" checked={masterChecked}
+                disabled={!writableInView.length}
+                onChange={onMasterChange} />
+            </th>
+            {["Profile", "Slot", "Family", "State", "Configured route", "Last observed"].map((h) => (
               <th key={h} scope="col" style={{
                 textAlign: "left", borderBottom: `1px solid ${THEME.border}`, padding: 4,
-                position: "sticky", top: 0, background: stickyBg, zIndex: 1,
+                position: "sticky", top: 0, left: h === "Profile" ? 40 : undefined,
+                background: stickyBg, zIndex: h === "Profile" ? 3 : 2,
               }}>{h}</th>
             ))}
           </tr>
@@ -285,8 +340,9 @@ function Matrix({ profiles, slots, selection, onToggle, onExpand, expanded, filt
             const checked = selection.has(key);
             return (
               <React.Fragment key={key}>
-                <tr data-row={key} style={{ borderBottom: `1px solid ${THEME.border}` }}>
-                  <td>
+                <tr data-row={key} data-selected={checked}
+                  style={{ borderBottom: `1px solid ${THEME.border}` }}>
+                  <td data-column="select" style={{ position: "sticky", left: 0, background: stickyBg, zIndex: 1, minWidth: 32 }}>
                     <input
                       type="checkbox"
                       aria-label={`Select ${s.profileId} ${s.slotId}`}
@@ -295,19 +351,28 @@ function Matrix({ profiles, slots, selection, onToggle, onExpand, expanded, filt
                       onChange={() => onToggle(key, s)}
                     />
                   </td>
-                  <td>{profiles.find((p) => p.id === s.profileId)?.name || s.profileId}
-                    {!s.writable && <em style={{ color: THEME.muted }}> (read-only)</em>}
+                  <td data-column="profile" data-profile-id={s.profileId} style={{ position: "sticky", left: 40, background: stickyBg, zIndex: 1 }}>
+                    {profiles.find((p) => p.id === s.profileId)?.name || s.profileId}
+                    {!s.writable && (
+                      <span className="hms-note" data-testid="readonly-reason">
+                        {" "}{s.note ? s.note : "Profile is read-only — routing can not be changed on this profile."}
+                      </span>
+                    )}
                   </td>
-                  <td><button className="hms-expand" aria-expanded={!!expanded[key]} onClick={() => onExpand(key)}>{s.slotId}</button></td>
-                  <td>{s.family}</td>
+                  <td><button className="hms-expand" title={s.slotId} aria-label={`Details for ${s.profileId} ${s.slotId}`} aria-expanded={!!expanded[key]} onClick={() => onExpand(key)}>{taskLabel(s)}</button></td>
+                  <td data-column="family" data-family-id={s.family}>{familyLabel(s.family)}</td>
+                  <td data-column="state">
+                    <span className="hms-badge" data-state={normalizeState(s.state)}>{stateLabel(s.state)}</span>
+                  </td>
                   <td data-column="configured">{routeText(s)}</td>
-                  <td style={{ color: THEME.muted }} data-column="observed">
-                    {s.lastObserved ? `${s.lastObserved.provider}/${s.lastObserved.model}` : "unobserved"}
+                  <td style={{ color: THEME.muted }} data-column="observed" data-provider={s.provider}
+                    data-model={s.model}>
+                    {s.lastObserved ? `${s.lastObserved.provider}/${s.lastObserved.model}` : "No recorded usage"}
                   </td>
                 </tr>
                 {expanded[key] && (
                   <tr data-detail={key}>
-                    <td colSpan={6} style={{ padding: "6px 12px", background: THEME.bg }}>
+                    <td colSpan={8} style={{ padding: "6px 12px", background: THEME.bg }}>
                       <RoutingDetail slot={s} />
                     </td>
                   </tr>
@@ -316,7 +381,7 @@ function Matrix({ profiles, slots, selection, onToggle, onExpand, expanded, filt
             );
           })}
           {filtered.length === 0 && (
-            <tr><td colSpan={6} style={{ color: THEME.muted, padding: 8 }}>No slots match the current filters.</td></tr>
+            <tr><td colSpan={8} style={{ color: THEME.muted, padding: 8 }}>No slots match the current filters.</td></tr>
           )}
         </tbody>
       </table>
@@ -375,25 +440,61 @@ function ChangeEditor({
   const chainEntries = parseChain(editor.chainText);
   const chainBad = editor.changeType === "chain" && chainInvalid(chainEntries);
   const writableSelected = selectedSlots.filter((s) => s.writable);
+  // Applicability is stated in words: a change type that cannot reach every
+  // selected target names the excluded ones instead of silently dropping them
+  // from the review.
+  const disableApplicable = writableSelected.filter(isChainSlot);
+  const disableExcluded = writableSelected.length - disableApplicable.length;
+  const scalarSelected = writableSelected.filter(isScalarSlot);
+  const scalarOnly = writableSelected.length > 0 && scalarSelected.length === writableSelected.length;
+  const mixedScalar = editor.changeType === "set" && scalarSelected.length > 0 && !scalarOnly && editor.provider.trim() !== "openrouter";
+  const incompatibleChain = ["chain", "disable"].includes(editor.changeType) && disableExcluded > 0;
+  const applicability = (() => {
+    if (!writableSelected.length) {
+      return "No writable slot selected — select rows in the matrix to build a change.";
+    }
+    if (editor.changeType === "set") {
+      if (scalarOnly) return "OpenRouter auxiliary fallback — enter the exact model ID only. OpenRouter is implicit; this setting affects the auxiliary auto-chain across tasks.";
+      if (mixedScalar) return "The OpenRouter auxiliary fallback can only be combined with routes to OpenRouter. Choose OpenRouter or select these targets separately.";
+      return `Applies to ${writableSelected.length} of ${writableSelected.length} selected slots — sets provider and model. Enter New provider and New model, then Preview changes.`;
+    }
+    if (editor.changeType === "chain") {
+      return `Applies to ${disableApplicable.length} of ${writableSelected.length} selected slots — fallback chain slots only; tried in order when earlier routes fail.` + (disableExcluded ? " Deselect non-chain targets to continue; no targets will be silently skipped." : "");
+    }
+    if (editor.changeType === "unset") {
+      return `Applies to ${writableSelected.length} of ${writableSelected.length} selected slots — removes the explicit override. Each slot returns to its runtime default or inherited routing.`;
+    }
+    // disable: only fallback-chain slots can receive to:[]
+    return `Applies to ${disableApplicable.length} of ${writableSelected.length} selected slots — fallback chain slots only.` +
+      (disableExcluded > 0
+        ? " Deselect non-chain targets to continue; no targets will be silently skipped."
+        : "");
+  })();
 
   return (
     <section aria-label="Custom change editor" data-testid="change-editor"
       style={{ marginTop: 16, borderTop: `1px solid ${THEME.border}`, paddingTop: 8 }}>
-      <h3 style={{ margin: "4px 0" }}>Custom change / exact-model removal</h3>
+      <h3 style={{ margin: "4px 0" }}>Change selected models</h3>
       {!hasSelection && <p style={{ color: THEME.muted }}>Select slots in the matrix to build a change.</p>}
-      <div style={{ display: "grid", gap: 6, maxWidth: 640 }}>
+      <p data-testid="editor-applicability" style={{ color: THEME.muted, margin: "0 0 4px" }}>{applicability}</p>
+      {selectedSlots.some(s => s.note || s.metadata?.description) && <ul data-testid="selected-route-notes" className="hms-note">
+        {[...new Set(selectedSlots.map(s => s.note || s.metadata?.description).filter(Boolean))].map(note => <li key={note}>{note}</li>)}
+      </ul>}
+      {selectedSlots.some(s => String(s.protocol).replaceAll("-", "_") === "typed_decision") &&
+        <p className="hms-note">These targets require a compatible typed-decision route. Preview validates compatibility; a plain chat model is not interchangeable.</p>}
+      <div style={{ display: "grid", gap: 6, maxWidth: "min(640px, 100%)" }}>
         <label>Change type
-          <select aria-label="Change type" value={editor.changeType}
+          <select data-testid="change-type" aria-label="Change type" value={editor.changeType}
             onChange={(e) => set({ changeType: e.target.value })}>
-            <option value="set">Set route (provider + model)</option>
-            <option value="chain">Set typed chain</option>
-            <option value="unset">Unset (inherit)</option>
-            <option value="disable">Disable (empty chain)</option>
+            <option value="set">Choose a model</option>
+            <option value="chain">Set fallback sequence</option>
+            <option value="unset">Reset to default or inherited routing</option>
+            <option value="disable">Turn off fallback</option>
           </select></label>
 
         {editor.changeType === "set" && (
           <>
-            <label>New provider <input value={editor.provider}
+            <label>New provider <input value={scalarOnly ? "openrouter" : editor.provider} disabled={scalarOnly}
               onChange={(e) => set({ provider: e.target.value })} aria-label="New provider" /></label>
             <label>New model <input value={editor.model}
               onChange={(e) => set({ model: e.target.value })} aria-label="New model" /></label>
@@ -417,22 +518,28 @@ function ChangeEditor({
         {(editor.changeType === "unset" || editor.changeType === "disable") && (
           <p data-testid="typed-intent-note" style={{ color: THEME.muted, margin: 0 }}>
             {editor.changeType === "unset"
-              ? "Sends to:null — the slot inherits its parent (never a disabled chain)."
-              : "Sends to:[] — the slot's chain is explicitly disabled (distinct from inherit)."}
+              ? "Remove the override, not the feature. Runtime defaults or inherited routing apply."
+              : "Disable only this fallback sequence. The main model remains enabled."}
           </p>
         )}
 
-        <label>Exact route to remove (<code>provider/model</code>, matches exact identity only)
-          <input value={editor.removeExact} onChange={(e) => set({ removeExact: e.target.value })}
-            aria-label="Exact provider/model to remove" placeholder="e.g. openai/gpt-4o" /></label>
-        {removal && removalTargets.length === 0 && (
-          <div role="note" style={{ color: THEME.warn }}>
-            No selected configured slot matches exactly “{removal}”. Nothing will be removed.
-          </div>
-        )}
+        {/* Advanced actions are collapsed until requested. */}
+        <details data-testid="removal-advanced">
+          <summary style={{ cursor: "pointer" }}>Advanced — remove an exact provider/model</summary>
+          <label>Exact route to remove (<code>provider/model</code>, matches exact identity only)
+            <input value={editor.removeExact} onChange={(e) => set({ removeExact: e.target.value })}
+              aria-label="Exact provider/model to remove" placeholder="e.g. openai/gpt-4o" /></label>
+          {removal && removalTargets.length === 0 && (
+            <div role="note" style={{ color: THEME.warn }}>
+              No selected configured slot matches exactly “{removal}”. Nothing will be removed.
+            </div>
+          )}
+          {removalTargets.length > 0 && <p role="note">Remove this exact route from {removalTargets.length} selected configured slot(s). Removal takes precedence over a model change for these targets.</p>}
+        </details>
 
         {/* Provider-native model picker: exact ids from the installed catalog,
             never a guessed list. Manual entry stays available above. */}
+        <details data-testid="picker-advanced"><summary>Browse provider models</summary>
         <fieldset data-testid="model-picker-controls"
           style={{ border: `1px solid ${THEME.border}`, borderRadius: 6, padding: 8 }}>
           <legend>Model picker (exact catalog ids)</legend>
@@ -478,6 +585,7 @@ function ChangeEditor({
             </div>
           )}
         </fieldset>
+        </details>
 
         <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
           <input type="checkbox" checked={editor.ackUnknownCost}
@@ -485,7 +593,7 @@ function ChangeEditor({
           I acknowledge unknown-cost routes are never treated as free
         </label>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <button className="hms-preview" disabled={!writableSelected.length || busy || chainBad || !buildCustomChanges(editor, selectedSlots).length}
+          <button className="hms-preview" disabled={!writableSelected.length || busy || chainBad || incompatibleChain || mixedScalar || !buildCustomChanges(editor, selectedSlots).length}
             onClick={() => onPreview()}>
             Preview changes
           </button>
@@ -496,10 +604,11 @@ function ChangeEditor({
             Apply
           </button>
           <span style={{ color: THEME.muted, alignSelf: "center" }}>
-            {preview
+            {busy ? "Request in progress…" : preview
               ? previewInvalid ? "Preview stale — re-run preview" : `${preview.changes.length} change(s) reviewed`
-              : "Preview required"}
+              : !hasSelection ? "Select writable targets first" : incompatibleChain || mixedScalar ? "Resolve the selection mismatch first" : "Preview required"}
           </span>
+          {preview && !editor.ackUnknownCost && <span className="hms-note">Acknowledge the cost policy before applying.</span>}
         </div>
       </div>
     </section>
@@ -507,18 +616,18 @@ function ChangeEditor({
 }
 
 function changeHeadline(c) {
-  if (c.action === "remove") return `remove ${c.from ? `${c.from.provider}/${c.from.model}` : ""}`;
+  const from = c.from ? `${c.from.provider || "default"}/${c.from.model || "automatic"}` : "unset";
+  if (c.action === "remove") return `remove ${from}`;
   const to = c.to;
-  if (to === null) return `unset (inherit) — was ${c.from ? `${c.from.provider}/${c.from.model}` : "unset"}`;
-  if (Array.isArray(to)) return `disable chain (to:[]) — was ${c.from ? `${c.from.provider}/${c.from.model}` : "unset"}`;
+  if (to === null) return `reset to default / inherited routing — was ${from}`;
+  if (Array.isArray(to)) return `turn off fallback — was ${from}`;
   if (to && Array.isArray(to.chain)) {
     if (!to.chain.length) return "disable chain (explicit empty list)";
     const chain = to.chain.map((e) => `${e.provider}/${e.model}`).join(" → ");
     return `set chain [${chain}]`;
   }
   if (to && Object.hasOwn(to, "chain") && to.chain === null) return "unset chain (inherit)";
-  const from = c.from ? `${c.from.provider || "unset"}/${c.from.model || "auto"}` : "unset";
-  return `${from} → ${to ? `${to.provider}/${to.model}` : "?"}`;
+  return `${from} → ${to ? `${to.provider || (c.slotId === "auxiliary.openrouter_model" ? "openrouter" : "default")}/${to.model || "automatic"}` : "?"}`;
 }
 
 function PreviewPanel({ preview }) {
@@ -551,7 +660,7 @@ function PreviewPanel({ preview }) {
       </ul>
       {preview.blocked && preview.blocked.length > 0 && (
         <div role="alert" style={{ color: THEME.danger }}>
-          Blocked: {preview.blocked.map((b) => `${b.profileId}: ${b.reason}`).join("; ")}
+          Blocked: {preview.blocked.map((b) => `${b.profileId}${b.slotId ? "/" + b.slotId : ""}: ${b.reason}`).join("; ")}
         </div>
       )}
     </section>
@@ -566,13 +675,49 @@ const RESULT_LABEL = {
   conflict: { text: "Conflict — recovery required", color: THEME.warn },
 };
 
-function OperationDrawer({ operation, onUndo, onClose, undoGuarded, setUndoGuarded, busy }) {
-  if (!operation) return null;
+function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUndoGuarded, busy }) {
+  const ref = useRef(null);
+  React.useEffect(() => {
+    if (open && ref.current) ref.current.focus();
+  }, [open]);
+  // Focus trap (dialog pattern): document-level CAPTURE listener so the trap
+  // holds even if focus escaped the drawer (e.g. browser-default Tab wrap).
+  // Escape closes; Tab/Shift+Tab cycle inside the drawer only.
+  React.useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => {
+      const el = ref.current;
+      if (!el) return;
+      if (e.key === "Escape") { e.preventDefault(); onClose(); return; }
+      if (e.key !== "Tab") return;
+      const focusables = Array.from(el.querySelectorAll("button, input, select, textarea, a[href], [tabindex]:not([tabindex=\"-1\"])"))
+        .filter((n) => !n.disabled && n.offsetParent !== null);
+      if (!focusables.length) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement;
+      if (!active || !el.contains(active)) {
+        e.preventDefault();
+        first.focus();
+        return;
+      }
+      if ((!e.shiftKey && active === last) || (e.shiftKey && active === first)) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+  }, [open]);
+  if (!open || !operation) return null;
   return (
-    <aside aria-label="Operation drawer" data-testid="operation-drawer"
+    <aside ref={ref} tabIndex={-1} role="dialog" aria-modal="true"
+      aria-label="Operation drawer" data-testid="operation-drawer"
       style={{ position: "fixed", right: 0, top: 0, bottom: 0, width: "min(380px, 100vw)", boxSizing: "border-box", overflow: "auto",
-        background: THEME.bg, borderLeft: `1px solid ${THEME.border}`, padding: 12, zIndex: 50 }}>
-      <h3>Operation {operation.id}</h3>
+        background: THEME.bg, borderLeft: `1px solid ${THEME.border}`, padding: 12, zIndex: 50, outline: "none" }}>
+      <h3>Operation results</h3>
+      <p>{operation.results.filter(r => r.status === "applied" && r.readback?.ok !== false).length} profiles applied · {operation.results.filter(r => ["failed", "conflict"].includes(r.status) || r.readback?.ok === false).length} need attention</p>
+      <p className="hms-note">Reference: {operation.id}</p>
       <button type="button" onClick={onClose} aria-label="Close operation drawer">Close</button>
       <p style={{ color: THEME.muted }}>Configured ≠ live: existing sessions may keep their old route.</p>
       <ul style={{ listStyle: "none", padding: 0 }}>
@@ -633,6 +778,7 @@ export function buildCustomChanges(editor, selectedSlots) {
   const removalKeys = new Set(removalTargets.map((s) => s.profileId + "/" + s.slotId));
   const settable = writable.filter((s) => !removalKeys.has(s.profileId + "/" + s.slotId));
   const type = editor.changeType;
+  if (["chain", "disable"].includes(type) && settable.some(s => !isChainSlot(s))) return [];
   let setPart = [];
   if (type === "chain") {
     const entries = parseChain(editor.chainText);
@@ -644,9 +790,10 @@ export function buildCustomChanges(editor, selectedSlots) {
     setPart = settable.map((s) => isChainSlot(s) ? mkChange(s, { chain: null }) : mkChange(s, null, "remove"));
   } else if (type === "disable") {
     setPart = settable.filter(isChainSlot).map((s) => mkChange(s, { chain: [] }));
-  } else if (editor.provider && editor.model) {
-    const route = { provider: editor.provider, model: editor.model };
-    setPart = settable.map((s) => mkChange(s, isChainSlot(s) ? { chain: [route] } : route));
+  } else if (editor.model.trim() && (editor.provider.trim() || settable.every(isScalarSlot))) {
+    if (settable.some(isScalarSlot) && settable.some(s => !isScalarSlot(s)) && editor.provider.trim() !== "openrouter") return [];
+    const route = { provider: editor.provider.trim(), model: editor.model.trim() };
+    setPart = settable.map((s) => mkChange(s, isScalarSlot(s) ? { model: route.model } : isChainSlot(s) ? { chain: [route] } : route));
   }
   const removalPart = removal ? removalTargets.map((s) => mkChange(s, null, "remove")) : [];
   return [...setPart, ...removalPart];
@@ -654,6 +801,10 @@ export function buildCustomChanges(editor, selectedSlots) {
 
 function isChainSlot(slot) {
   return /fallback_(chain|providers)$|main_chain$/.test(slot.slotId);
+}
+
+function isScalarSlot(slot) {
+  return slot.slotId === "auxiliary.openrouter_model";
 }
 
 // Preset scope: exact reviewed slot intents in `preset.changes` when the planned
@@ -683,6 +834,15 @@ const EMPTY_EDITOR = {
 function App() {
   const [state, setState] = useState(null);
   const [loadError, setLoadError] = useState(null);
+  // Measure the actual host pane, not the browser including its sidebar.
+  const rootRef = useRef(null);
+  const [wideViewport, setWideViewport] = useState(false);
+  React.useEffect(() => {
+    if (!rootRef.current || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(([entry]) => setWideViewport(entry.contentRect.width >= 1100));
+    observer.observe(rootRef.current);
+    return () => observer.disconnect();
+  }, [Boolean(state)]);
   // {text, kind}. Severity is explicit, never inferred from the message text:
   // a success line that merely contains the word "failed" must stay neutral.
   const [status, setStatus] = useState({ text: "", kind: "info" });
@@ -704,6 +864,28 @@ function App() {
   const loadSeq = useRef(0);
 
   const announce = (msg, kind = "info") => setStatus({ text: msg, kind });
+  // Keep the preset action mounted for focus return, but consume its preview.
+  // Applying or undoing must never leave an old review ready to apply again.
+  const refreshSilently = async () => {
+    reviewSeq.current += 1;
+    setPreview(null);
+    setPreviewFor("");
+    const seq = ++loadSeq.current;
+    try {
+      const s = await api.loadState();
+      if (seq !== loadSeq.current) return;
+      setState(s);
+      setLoadError(null);
+      setSelection((old) => new Map(s.slots.filter((slot) =>
+        old.has(slot.profileId + "/" + slot.slotId)).map((slot) =>
+        [slot.profileId + "/" + slot.slotId, slot])));
+    } catch (e) {
+      if (seq !== loadSeq.current) return;
+      setState(null);
+      setLoadError(e instanceof ApiError ? e.message : String(e));
+      announce("Load failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
+    }
+  };
   const invalidateReviews = () => {
     reviewSeq.current += 1;
     setPreview(null);
@@ -816,9 +998,9 @@ function App() {
         : { previewId: activePreview.id, allowUnknownCost: editor.ackUnknownCost };
       const op = await api.apply(payload);
       setOperation(op.operation);
-      setShowOperation(true);
+      openDrawer();
       setUndoGuarded(false);
-      await load({ silent: true });
+      await refreshSilently();
       announce(`Operation ${op.operation.id} finished: ` +
         op.operation.results.map((r) => `${r.profileId} ${r.status}`).join(", "));
     } catch (e) {
@@ -849,9 +1031,8 @@ function App() {
     try {
       const op = await api.undo(operation.id);
       setOperation(op.operation);
-      setShowOperation(true);
       setUndoGuarded(false);
-      await load({ silent: true });
+      await refreshSilently();
       announce("Undo finished: " + op.operation.results.map((r) => `${r.profileId} ${r.status}`).join(", "));
     } catch (e) {
       announce("Undo failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
@@ -865,6 +1046,28 @@ function App() {
     if (next.has(key)) next.delete(key); else next.set(key, slot);
     setSelection(next);
     invalidateReviews();
+  };
+  const toggleAll = (next) => {
+    setSelection(next);
+    invalidateReviews();
+  };
+  const clearSelection = () => {
+    setSelection(new Map());
+    invalidateReviews();
+  };
+  // Drawer focus management: remember who opened it so Escape/Close can hand
+  // focus back (dialog pattern), and reuse the same entry point for undo.
+  const drawerOpener = useRef(null);
+  const openDrawer = () => {
+    drawerOpener.current = document.activeElement;
+    setShowOperation(true);
+  };
+  const closeDrawer = () => {
+    setShowOperation(false);
+    const el = drawerOpener.current;
+    drawerOpener.current = null;
+    const target = el?.isConnected && !el.disabled ? el : rootRef.current?.querySelector('[data-testid="refresh-state"]');
+    target?.focus();
   };
 
   if (loadError) {
@@ -887,16 +1090,21 @@ function App() {
   );
 
   return (
-    <div className="hms-root" style={{ color: THEME.fg, padding: 12, fontFamily: "inherit" }}>
+    <div ref={rootRef} className="hms-root" style={{ color: THEME.fg, padding: 12, fontFamily: "inherit" }}>
       <div aria-live="polite" role="status" data-testid="live-status"
         style={{ position: "absolute", left: -9999 }}>{status.text}</div>
       <h2>Model Switcher</h2>
       {state.presetsCorrupt && <p role="alert" style={{ color: THEME.warn }}>
         A damaged preset store was saved aside for recovery. Its presets are not loaded; recover them before replacing saved presets.
       </p>}
+      {state.profiles.some(p => p.inventoryWarnings?.length) && <div role="alert" data-testid="inventory-warnings" className="hms-note">
+        <strong>Some runtime selectors could not be discovered.</strong>
+        <ul>{state.profiles.flatMap(p => (p.inventoryWarnings || []).map((warning, i) => <li key={`${p.id}/${i}`}>{p.name || p.id}: {warning}</li>))}</ul>
+      </div>}
       <PresetsBar presets={state.presets} onReview={reviewPreset} busy={busy} />
       <button data-testid="refresh-state" disabled={busy} onClick={() => load()}>Refresh state</button>
-      {operation && !showOperation && <button onClick={() => setShowOperation(true)}>Show last operation</button>}
+      {" "}
+      {operation && !showOperation && <button onClick={openDrawer}>Show last operation</button>}
 
       {reviewedPreset && (
         <section aria-label="Preset review" data-testid="preset-review"
@@ -907,15 +1115,19 @@ function App() {
             <button className="hms-apply-preset" data-testid="apply-preset"
               disabled={!canApply || previewFor !== "preset:" + reviewedPreset.id}
               onClick={applyPreview}>Apply preset</button>
-            <span style={{ color: THEME.muted }}>{preview ? "reviewed — one click applies exactly this" : "previewing…"}</span>
+            <span style={{ color: THEME.muted }}>{activePreview ? "reviewed — one click applies exactly this" : busy ? "previewing…" : "Review this preset again before applying"}</span>
           </div>
         </section>
       )}
 
-      {/* Action surface: the only click targets the user needs sit above the
-          fold, BEFORE the (potentially ~130-row) profile matrix, so the table
-          can never push the flow controls off-screen. */}
-      <div data-testid="action-surface">
+      {/* Wide view: matrix + bounded editor rail in one workspace; below the
+          breakpoint it stacks (rail above matrix). The rail stays BEFORE the
+          matrix in the DOM for action discoverability (DESIGN §4). */}
+      <div className={`hms-workspace${wideViewport ? " hms-wide" : ""}`}>
+        {/* Action surface: the only click targets the user needs sit above the
+            fold, BEFORE the (potentially ~130-row) profile matrix, so the table
+            can never push the flow controls off-screen. */}
+        <div data-testid="action-surface">
         {/* The aria-live region above is screen-reader only. Every action here
             reports through it — so a refused apply (409 from the canonical
             seam) or a failed preview used to be silent on screen: the button
@@ -956,15 +1168,18 @@ function App() {
 
       <Matrix
         profiles={state.profiles} slots={slots} selection={selection} onToggle={toggle}
+        onToggleAll={toggleAll} onClearSelection={clearSelection}
         expanded={expanded} onExpand={(k) => setExpanded({ ...expanded, [k]: !expanded[k] })}
         filters={filters} setFilters={(next) => {
+          // Filters change the VIEW only: selection survives (hidden targets
+          // stay selected and are counted), but a stale review is invalidated.
           invalidateReviews();
-          setSelection(new Map());
           setFilters(next);
         }}
       />
+      </div>
 
-      <OperationDrawer operation={showOperation ? operation : null} onClose={() => setShowOperation(false)} onUndo={undo} undoGuarded={undoGuarded}
+      <OperationDrawer open={showOperation} operation={operation} onClose={closeDrawer} onUndo={undo} undoGuarded={undoGuarded}
         setUndoGuarded={setUndoGuarded} busy={busy} />
     </div>
   );

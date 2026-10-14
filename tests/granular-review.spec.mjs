@@ -51,7 +51,7 @@ test('real API: edits invalidate review and refresh after mutation reveals confi
   await page.getByTestId('apply-custom').click();
   await expect(page.getByTestId('result-research')).toContainText('Applied + read back');
   await expect(page.locator('tr[data-row="research/delegation.model"] [data-column="configured"]')).toContainText('zhipu/glm-5.3-flash');
-  await expect(page.locator('tr[data-row="research/delegation.model"] [data-column="observed"]')).toHaveText('unobserved');
+  await expect(page.locator('tr[data-row="research/delegation.model"] [data-column="observed"]')).toHaveText('No recorded usage');
   await expect(page.getByTestId('preview-panel')).toHaveCount(0);
   await page.getByTestId('undo-guard').check();
   await page.getByTestId('undo-button').click();
@@ -78,6 +78,7 @@ test('real API: disabled chain preview and configured disabled state survive rea
 
 test('real API: unavailable catalog is visible and manual exact ID stays usable', async ({ page }) => {
   await open(page);
+  await page.getByTestId('picker-advanced').locator('summary').click();
   await page.getByLabel('Picker provider', { exact: true }).fill('provider-not-configured');
   await page.getByTestId('fetch-models').click();
   await expect(page.getByTestId('picker-error')).toContainText('not available');
@@ -115,6 +116,7 @@ test('picker contract fixture: search and selection preserve provider-native IDs
       source: 'contract-fixture', stale: true, fetchedAt: null, error: null } });
   });
   await open(page);
+  await page.getByTestId('picker-advanced').locator('summary').click();
   for (const [provider, id] of [['nous', 'deepseek/deepseek-v4.1-flash'], ['opencode-go', 'deepseek-v4.1-flash']]) {
     await page.getByLabel('Picker provider', { exact: true }).fill(provider);
     await page.getByTestId('fetch-models').click();
@@ -146,6 +148,7 @@ test('real API: one slot carries either a set or a removal — never both', asyn
   await page.getByLabel('Select default main', { exact: true }).check();
   await page.getByLabel('New provider', { exact: true }).fill('zhipu');
   await page.getByLabel('New model', { exact: true }).fill('glm-5.3-flash');
+  await page.getByTestId('removal-advanced').locator('summary').click();
   await page.getByLabel('Exact provider/model to remove', { exact: true })
     .fill('anthropic/claude-sonnet-4-6');
   await page.getByLabel('I acknowledge unknown-cost routes').check();

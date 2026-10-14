@@ -98,6 +98,26 @@ def create_lab_home() -> Path:
 
 
 # -- app (module-level; uvicorn imports it with HERMES_HOME in the env) ------
+# Check the real runtime resolver before importing/mounting the API. A lab
+# beneath ~/.hermes is not isolated just because HERMES_HOME points there.
+def assert_lab_isolation() -> None:
+    from hermes_cli.profiles import get_profile_dir, list_profile_names
+    declared = os.environ.get("HERMES_HOME")
+    if not declared:
+        raise RuntimeError("lab profile discovery escaped declared home")
+    root = Path(declared).resolve()
+    if get_profile_dir("default").resolve() != root:
+        raise RuntimeError("lab profile discovery escaped declared home")
+    for name in list_profile_names():
+        resolved = get_profile_dir(name).resolve()
+        expected = root if name == "default" else root / "profiles" / name
+        if resolved != expected or not resolved.is_relative_to(root):
+            raise RuntimeError("lab profile discovery escaped declared home")
+
+
+if __name__ != "__main__":
+    assert_lab_isolation()
+
 from fastapi import FastAPI  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
 
@@ -135,11 +155,21 @@ async def _bundle():
     return _repo_file("ui/dist/plugin.js")
 
 
+@app.get("/dashboard/dist/style.css")
+async def _stylesheet():
+    return _repo_file("dashboard/dist/style.css")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", help="seed a lab home at this path (or 'auto')")
     ap.add_argument("--home-file", default=str(REPO / "tests" / "real-home.json"))
+    ap.add_argument("--print-profiles", action="store_true",
+                    help="print the seed documents as JSON and exit")
     args = ap.parse_args()
+    if args.print_profiles:
+        print(json.dumps(PROFILES))
+        raise SystemExit(0)
     if args.seed:
         home = create_lab_home() if args.seed == "auto" else seed_home(Path(args.seed))
         Path(args.home_file).write_text(json.dumps({"home": str(home)}))

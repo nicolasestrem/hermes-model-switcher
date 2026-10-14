@@ -48,7 +48,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       await expect.poll(() => table.evaluate(node => node.scrollLeft)).toBeGreaterThan(0);
       await table.evaluate(node => { node.scrollLeft = 0; });
     }
-    await page.getByRole('button', { name: '1 selected · show all' }).click();
+    await page.getByRole('button', { name: 'All profiles', exact: true }).click();
     await page.getByLabel('Select default main', { exact: true }).check();
     await page.getByLabel('New provider', { exact: true }).fill('zhipu');
     await page.getByLabel('New model', { exact: true }).fill('glm-5.3-flash');
