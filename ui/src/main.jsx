@@ -732,6 +732,11 @@ const RESULT_LABEL = {
 
 // Same status, opposite meaning: an apply that rolled back mid-operation.
 const ROLLBACK_LABEL = { text: "Rolled back after failed apply", color: THEME.warn };
+// A compensated/restored step seen with NO recorded client action context (e.g.
+// an operation rehydrated from a GET): a user-requested undo and a rollback
+// after a failed apply are indistinguishable here, so we never invent "apply" —
+// a neutral, non-success label is the only truthful render.
+const UNKNOWN_RESTORE_LABEL = { text: "Restored — action context unknown", color: THEME.warn };
 const COMPENSATED_STATUSES = ["restored", "compensated"];
 
 // The backend sends a SAFE failure category, never an exception string. Render
@@ -765,7 +770,7 @@ function scalarText(v) {
   return null;
 }
 
-function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUndoGuarded, busy }) {
+function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUndoGuarded, busy, action }) {
   const ref = useRef(null);
   React.useEffect(() => {
     if (open && ref.current) ref.current.focus();
@@ -812,15 +817,28 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
   // verified user-requested undo. Every other non-committed state is a failed
   // apply whose rollback must NOT be dressed as success.
   const undoVerified = finalState === "undone";
+  // ``action`` is LOCAL UI context recorded at the client mutation that produced
+  // this DTO (``apply`` vs ``undo``). The DTO alone cannot distinguish a
+  // user-requested undo from a rollback after a failed apply — both surface as
+  // per-step ``compensated``/``restored``. Trust the recorded action, and fall
+  // back to the operation's own ``undone`` state when no local context exists
+  // (e.g. an operation rehydrated from a GET).
+  const undoContext = action === "undo" || undoVerified;
+  // In an UNDO context every compensated/restored step is a verified restore of
+  // THAT profile — even when the whole operation is incomplete (another profile
+  // hit a conflict). Per-profile bytes are verified independently of the op.
+  const isRestored = (status) => COMPENSATED_STATUSES.includes(status) && undoContext;
   const appliedCount = results.filter((r) => r.status === "applied").length;
+  const restoredCount = results.filter((r) => isRestored(r.status)).length;
+  const conflictCount = results.filter((r) => r.status === "conflict").length;
   // Any step that is not a verified ``applied`` needs attention — UNLESS it is a
-  // compensated/restored step of a user-requested undo (state ``undone``). A
-  // fully-compensated failed apply therefore reads "0 applied · N need
-  // attention" instead of the old, dangerously clean "0 · 0"; an unrecognised
-  // future status is counted too rather than silently ignored.
+  // compensated/restored step of a user-requested undo. A fully-compensated
+  // failed apply therefore reads "0 applied · N need attention" instead of the
+  // old, dangerously clean "0 · 0"; a partial undo counts only the conflicted
+  // profile (the restored one is genuinely back); an unrecognised future status
+  // is counted too rather than silently ignored.
   const attentionCount = results.filter((r) =>
-    r.status !== "applied" &&
-    !(COMPENSATED_STATUSES.includes(r.status) && undoVerified)
+    r.status !== "applied" && !isRestored(r.status)
   ).length;
   const failure = scalarText(operation.failure) || results.map((r) => scalarText(r.failure)).find(Boolean) || null;
   const failureCopy = failure ? FAILURE_COPY[failure] || failure : null;
@@ -839,6 +857,7 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
         background: THEME.bg, borderLeft: `1px solid ${THEME.border}`, padding: 12, zIndex: 50, outline: "none" }}>
       <h3>Operation results</h3>
       <p data-testid="operation-summary" data-attention={attentionCount > 0 ? "true" : "false"}
+        data-restored={restoredCount} data-conflict={conflictCount}
         style={{ color: attentionCount > 0 ? THEME.warn : THEME.muted }}>
         {appliedCount} profiles applied · {attentionCount} need attention
       </p>
@@ -853,7 +872,7 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
       )}
       {showStateLine && (
         <p data-testid="operation-state" data-state={finalState} style={{ color: THEME.warn }}>
-          Apply did not commit — {STATE_COPY[finalState] || finalState}
+          {undoContext ? "Undo incomplete" : "Apply did not commit"} — {STATE_COPY[finalState] || finalState}
         </p>
       )}
       {undoVerified && (
@@ -864,8 +883,12 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
       <ul style={{ listStyle: "none", padding: 0 }}>
         {results.map((r) => {
           const isCompensated = COMPENSATED_STATUSES.includes(r.status);
-          const label = isCompensated && !undoVerified
-            ? ROLLBACK_LABEL
+          const label = isCompensated
+            ? (undoContext
+                ? RESULT_LABEL[r.status]   // verified restore of this profile (green)
+                : action === "apply"
+                  ? ROLLBACK_LABEL         // rollback after a failed apply (warn)
+                  : UNKNOWN_RESTORE_LABEL) // no context: never invent "apply"
             : RESULT_LABEL[r.status] || { text: r.status, color: THEME.fg };
           return (
             <li key={r.profileId} data-testid={`result-${r.profileId}`}
@@ -995,6 +1018,10 @@ function App() {
   const [preview, setPreview] = useState(null);
   const [previewFor, setPreviewFor] = useState(""); // fingerprint of change-set the preview belongs to
   const [operation, setOperation] = useState(null);
+  // Local UI-only context for the operation DTO on screen: which client mutation
+  // produced it. Never sent to the backend; the DTO itself cannot tell a
+  // user-requested undo from a rollback after a failed apply.
+  const [opAction, setOpAction] = useState(null);
   const [showOperation, setShowOperation] = useState(false);
   const [undoGuarded, setUndoGuarded] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1144,6 +1171,7 @@ function App() {
         : { previewId: activePreview.id, allowUnknownCost: editor.ackUnknownCost };
       const op = await api.apply(payload);
       setOperation(op.operation);
+      setOpAction("apply");
       openDrawer();
       setUndoGuarded(false);
       await refreshSilently();
@@ -1184,6 +1212,9 @@ function App() {
     try {
       const op = await api.undo(operation.id);
       setOperation(op.operation);
+      // Tag the undo action even on ok:false (HTTP 200 with the operation DTO):
+      // the drawer must read the per-profile outcome as an undo, not an apply.
+      setOpAction("undo");
       setUndoGuarded(false);
       await refreshSilently();
       // A conflicted undo returns ok:false WITH the operation DTO
@@ -1344,7 +1375,7 @@ function App() {
       </div>
 
       <OperationDrawer open={showOperation} operation={operation} onClose={closeDrawer} onUndo={undo} undoGuarded={undoGuarded}
-        setUndoGuarded={setUndoGuarded} busy={busy} />
+        setUndoGuarded={setUndoGuarded} busy={busy} action={opAction} />
     </div>
   );
 }

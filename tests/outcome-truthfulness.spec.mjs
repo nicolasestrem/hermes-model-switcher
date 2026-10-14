@@ -118,6 +118,49 @@ test("a recovery_required apply shows descriptive failure copy, not a raw catego
   });
 });
 
+// NEW (Codex partial-undo finding): a user-requested UNDO where one profile's
+// bytes are restored but another hits a revision conflict. The DTO alone is
+// state/final_state ``recovery_required`` with a ``compensated`` step — which
+// the drawer used to misread as a rollback-after-failed-apply ("Rolled back
+// after failed apply" + "Apply did not commit"). The client records the undo
+// action locally, so the restored profile is labelled a verified restore and
+// only the conflicted profile is flagged.
+test("a partial undo restores the verified profile and flags only the conflict", async ({ page }) => {
+  await withFlags(page, { undoPartial: true }, async () => {
+    await open(page);
+    await applyFastLane(page);
+    // Successful apply first: both profiles green.
+    await expect(page.getByTestId("result-default")).toContainText("Applied + read back");
+
+    // The undo attempt returns ok:false WITH the operation DTO; the drawer must
+    // render the real per-profile outcome, not discard it.
+    await page.getByTestId("undo-guard").check();
+    await page.getByTestId("undo-button").click();
+    await expect(page.getByTestId("live-status")).toContainText("Undo finished");
+
+    const drawer = page.getByTestId("operation-drawer");
+    // The restored profile: green verified restore — even though the WHOLE
+    // operation is recovery_required.
+    await expect(page.getByTestId("result-default")).toContainText("Restored (undo verified)");
+    expect(await colorOf(drawer.locator("[data-status='compensated']").first())).toBe(OK);
+    // The conflicted profile: warning, still needs attention.
+    await expect(page.getByTestId("result-research")).toContainText("Conflict — recovery required");
+    expect(await colorOf(drawer.locator("[data-status='conflict']").first())).toBe(WARN);
+
+    // No failed-apply wording anywhere: this was a user-requested undo.
+    await expect(drawer).not.toContainText("Rolled back after failed apply");
+    await expect(drawer).not.toContainText("Apply did not commit");
+    await expect(page.getByTestId("operation-state")).toContainText("Undo incomplete");
+    await expect(page.getByTestId("operation-state")).toHaveAttribute("data-state", "recovery_required");
+
+    // Summary distinguishes the restored profile from the conflicted one: only
+    // the conflict needs attention.
+    await expect(page.getByTestId("operation-summary")).toContainText("0 profiles applied · 1 need attention");
+    await expect(page.getByTestId("operation-summary")).toHaveAttribute("data-restored", "1");
+    await expect(page.getByTestId("operation-summary")).toHaveAttribute("data-conflict", "1");
+  });
+});
+
 test("a verified undo still reads as a green restore with zero attention", async ({ page }) => {
   await open(page);
   await applyFastLane(page);
