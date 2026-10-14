@@ -364,7 +364,9 @@ class CanonicalConfigStoreAdapter(YamlFileStoreAdapter):
         # the lock: the check-then-save race is closed there, not here.
         # Raises ReadOnlyRuntime / UnknownProfile / ProfileIdentityChanged on
         # any violation — never a raw file write. Hermes' StoreConflict is
-        # translated to the adapter-set StoreConflict the engine catches.
+        # raised ONLY at its locked fresh-revision guard, BEFORE the save, so
+        # it is translated to the pre-write-tagged StorePreWriteConflict;
+        # identity/scope violations keep the ordinary (untagged) StoreConflict.
         from hermes_adapter import (
             StoreConflict as _CanonSegmentConflict,
             ProfileIdentityChanged,
@@ -379,7 +381,17 @@ class CanonicalConfigStoreAdapter(YamlFileStoreAdapter):
             with expected_revision_scope(expected_revision):
                 result = self._adapter().apply_canonical_save(
                     self.profile, data, identity=self._identity)
-        except (_CanonSegmentConflict, ProfileIdentityChanged, UnknownProfile) as exc:
+        except _CanonSegmentConflict as exc:
+            # Hermes' canonical save raises its StoreConflict ONLY at the
+            # locked fresh-revision guard, BEFORE config_mod.save_config —
+            # provably no write was attempted. Tag it pre-write so the engine
+            # records a known no-write step instead of escalating to
+            # recovery_required. (Post-write ambiguity keeps failing closed
+            # via StoreWriteAmbiguous, which is never tagged here.)
+            raise StorePreWriteConflict(str(exc)) from exc
+        except (ProfileIdentityChanged, UnknownProfile) as exc:
+            # identity/scope violations keep the conservative ordinary
+            # conflict contract (no pre-write tag).
             raise StoreConflict(str(exc)) from exc
         self.last_canonical_result = result
         # authoritative post-write revision reported by the save under its lock

@@ -33,7 +33,12 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO))
 
-from model_switcher.adapters import JsonConfigStoreAdapter  # noqa: E402
+from model_switcher.adapters import (  # noqa: E402
+    JsonConfigStoreAdapter,
+    StoreConflict,
+    StorePreWriteConflict,
+    adapter_for,
+)
 from model_switcher.engine import (  # noqa: E402
     apply_operation,
     plan_operation,
@@ -134,3 +139,47 @@ def test_guarded_prewrite_conflict_is_known_no_write(lab, monkeypatch):
         assert _model(lab, "default") == "m/external"
     finally:
         journal.close()
+
+
+def test_canonical_locked_prewrite_guard_is_known_no_write(hermes_home):
+    """The CANONICAL save's locked pre-save guard is also a known no-write.
+
+    ``HermesAdapter.apply_canonical_save`` raises its ``StoreConflict`` ONLY at
+    the fresh-revision guard, BEFORE ``config_mod.save_config`` — i.e. inside
+    the lock, with nothing written. ``CanonicalConfigStoreAdapter.write`` must
+    translate that into the pre-write-tagged ``StorePreWriteConflict`` (so the
+    engine records a known no-write step), NOT the untagged ``StoreConflict``
+    the engine would classify as ambiguous and escalate to recovery_required.
+
+    The refusal is decided by the REAL guard: an actual on-disk external edit
+    lands after the revision is taken, and the real ``apply_canonical_save``
+    re-reads under its lock and refuses.
+    """
+    import yaml
+
+    home = hermes_home.path
+    a = adapter_for("canonical_config", str(home / "config.yaml"), "default")
+    stale = a.revision()
+
+    # a real external writer lands AFTER the revision was taken, so the locked
+    # pre-save guard (the genuine guard, not a fake) must refuse.
+    (home / "config.yaml").write_text(
+        "model:\n  provider: openai\n  default: gpt-4o-mini\n"
+        "external:\n  edit: yes\n")
+
+    with pytest.raises(StorePreWriteConflict) as exc:
+        a.write({"model": {"provider": "openai", "default": "m-new"}},
+                expected_revision=stale)
+
+    # tagged pre-write (known no-write), never the post-write ambiguity that
+    # must keep failing closed to recovery_required
+    assert exc.value.write_phase == WRITE_PHASE_PRE
+    assert exc.value.write_phase != WRITE_PHASE_AMBIGUOUS
+    # still an ordinary StoreConflict subclass so the engine's existing catch
+    # and the conservative contract are preserved
+    assert isinstance(exc.value, StoreConflict)
+
+    # nothing of ours landed; the external edit is intact
+    after = yaml.safe_load((home / "config.yaml").read_text())
+    assert after.get("external") == {"edit": True}
+    assert after["model"]["default"] == "gpt-4o-mini"
