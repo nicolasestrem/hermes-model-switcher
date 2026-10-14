@@ -119,7 +119,12 @@ class OperationJournal:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=%d" % int(_BUSY_TIMEOUT_S * 1000))
-            conn.execute("PRAGMA synchronous=NORMAL")
+            # FULL, not NORMAL: the engine commits journal intent/snapshots
+            # BEFORE any external config write, so the journal is the recovery
+            # source of truth. NORMAL WAL may drop a committed journal write on
+            # power failure, silently weakening that guarantee; FULL syncs the
+            # WAL on every commit. Correctness over throughput for the journal.
+            conn.execute("PRAGMA synchronous=FULL")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS operations (
@@ -261,16 +266,32 @@ _PUBLIC_OP_FIELDS = ("op_id", "state", "created_at", "updated_at",
 _PUBLIC_STEP_FIELDS = ("seq", "profile", "store_kind", "state",
                        "pre_revision", "post_revision")
 
+# Fixed, non-sensitive failure categories the engine may persist. Anything else
+# found in the column (a malformed or foreign journal written outside the
+# engine's contract) is projected as null, so an arbitrary/unknown string can
+# never leak through the public DTO.
+_PUBLIC_FAILURE_CATEGORIES = frozenset({
+    "revision_conflict", "store_unreadable", "write_verification_failed",
+    "io_error", "step_failed",
+})
+
 
 def to_public_operation(op: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Project an internal journal operation into a safe public DTO.
 
     Allowlist-only: anything not explicitly listed below (payload, step
-    paths, changes, snapshots, error strings) is dropped.
+    paths, changes, snapshots, error strings) is dropped. ``failure_category``
+    is additionally validated against the fixed category allowlist — an
+    unknown value (e.g. from a malformed journal) projects as ``None``.
     """
     if op is None:
         return None
     pub: Dict[str, Any] = {k: op[k] for k in _PUBLIC_OP_FIELDS if k in op}
+    if "failure_category" in pub:
+        cat = pub["failure_category"]
+        pub["failure_category"] = (
+            cat if isinstance(cat, str) and cat in _PUBLIC_FAILURE_CATEGORIES
+            else None)
     pub["steps"] = [
         {k: s[k] for k in _PUBLIC_STEP_FIELDS if k in s}
         for s in op.get("steps", [])

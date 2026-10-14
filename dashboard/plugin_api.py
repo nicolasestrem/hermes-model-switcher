@@ -272,6 +272,7 @@ def _preset_store() -> PresetStore:
     path = _state_dir() / "presets.json"
     _PRESET_CORRUPT = bool(next(path.parent.glob("presets.json.corrupt-*"), None))
     if path.exists():
+        persist_cleaned = False
         try:
             salvaged, dropped = _salvage_presets(path)
         except Exception:
@@ -286,8 +287,17 @@ def _preset_store() -> PresetStore:
                 # operator) and salvage what still parses. A failed rename
                 # raises rather than authorizing silent data loss.
                 _quarantine_presets(path)
+                persist_cleaned = True
         for preset in salvaged:
             store.save(preset)
+        if persist_cleaned:
+            # Only the valid records survived and the quarantined ORIGINAL is
+            # already preserved above, so rewrite the ACTIVE store. Skipping
+            # this left presets.json absent: a later read (a second /state or a
+            # one-click apply) then saw no file and silently returned an EMPTY
+            # store. A failed persist raises — the quarantine still holds the
+            # recovery bytes, so this is never a false successful save.
+            _persist_presets(store)
     return store
 
 
