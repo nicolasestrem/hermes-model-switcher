@@ -361,6 +361,204 @@
   white-space: normal;
 }
 
+/* ---------- Catalog combobox (ARIA 1.2) ----------
+ * The popup is position:fixed and rendered inside .hms-root: fixed positioning
+ * escapes the 360px rail and the matrix scroll box (overflow:auto) without a
+ * document.body portal, so the plugin's scoped tokens still apply. */
+.hms-root .hms-combo {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.hms-root .hms-combo > label {
+  min-width: 0;
+}
+
+.hms-root .hms-combo-popup {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  min-width: 360px;
+  max-width: min(560px, calc(100vw - 8px));
+  max-height: 320px;
+  overflow: hidden;
+  border: 1px solid var(--hms-border);
+  border-radius: var(--hms-radius);
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.38);
+}
+
+.hms-root .hms-combo-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: inherit;
+  overflow: auto;
+  padding: 4px;
+  overscroll-behavior: contain;
+}
+
+.hms-root .hms-combo-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 10px;
+  align-items: center;
+  min-height: 38px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.hms-root .hms-combo-option + .hms-combo-option {
+  margin-top: 2px;
+}
+
+.hms-root .hms-combo-option[data-active="true"] {
+  box-shadow: inset 0 0 0 2px var(--hms-accent);
+  background: var(--hms-surface);
+}
+
+.hms-root .hms-combo-option[data-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.hms-root .hms-opt-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.hms-root .hms-opt-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.hms-root .hms-opt-slug,
+.hms-root .hms-opt-id {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+  overflow-wrap: anywhere;
+}
+
+.hms-root .hms-opt-status {
+  justify-self: end;
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+.hms-root .hms-opt-status[data-status="priced"],
+.hms-root .hms-opt-status[data-status="no list price"] {
+  color: inherit;
+}
+
+.hms-root .hms-opt-reason {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+.hms-root .hms-price {
+  justify-self: end;
+  font-size: 12px;
+  white-space: nowrap;
+  color: inherit;
+}
+
+.hms-root .hms-price-unknown {
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+.hms-root .hms-badge {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid var(--hms-border);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.hms-root .hms-combo-loading,
+.hms-root .hms-combo-empty,
+.hms-root .hms-combo-note,
+.hms-root .hms-combo-error {
+  padding: 8px;
+  font-size: 13px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+.hms-root .hms-combo-error {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  color: inherit;
+}
+
+.hms-root .hms-combo-retry {
+  min-height: 38px;
+}
+
+.hms-root .hms-combo-skeleton {
+  height: 34px;
+  margin: 4px;
+  border-radius: 4px;
+  background: var(--hms-border);
+  opacity: 0.35;
+}
+
+.hms-root .hms-catalog-tools {
+  display: grid;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--hms-border);
+}
+
+.hms-root .hms-catalog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.hms-root .hms-catalog-freshness {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+.hms-root .hms-catalog-freshness [data-testid="catalog-inline-error"] {
+  color: inherit;
+  font-weight: 600;
+}
+
+.hms-root .hms-freshness-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 84px;
+  overflow: auto;
+  display: grid;
+  gap: 2px;
+  overscroll-behavior: contain;
+}
+
+.hms-root .hms-freshness-list li {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1099px) {
+  .hms-root .hms-combo-popup {
+    max-height: 50vh;
+  }
+}
+
 @media (max-width: 480px) {
   .hms-root .hms-page-header { margin-bottom: 16px; }
   .hms-root .hms-workspace-tools .hms-note { flex-basis: 100%; }
@@ -368,3 +566,361 @@
   .hms-root .hms-preset { width: 100%; text-align: left; }
   .hms-root [data-testid="action-surface"] { padding: 12px; }
 }
+
+/* ---------- Bird's-eye model catalog section ---------- */
+/* Full-width, below the tools row and above the workspace grid. The table
+   owns BOTH scroll axes (max-height ~60vh) so the page never grows a second
+   vertical scrollbar for a 9k-model catalog. */
+.hms-root .hms-catalog {
+  min-width: 0;
+  margin: 0 0 16px;
+  border: 1px solid var(--hms-border);
+  border-radius: var(--hms-radius);
+  padding: 12px;
+  overflow: hidden;
+}
+
+.hms-root .hms-catalog[hidden] {
+  display: none;
+}
+
+.hms-root .hms-catalog-view {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.hms-root .hms-catalog-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.hms-root .hms-catalog-heading {
+  min-width: 0;
+  flex: 1 1 320px;
+}
+
+.hms-root .hms-catalog-heading h3 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+
+.hms-root .hms-catalog-heading .hms-note {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+
+.hms-root .hms-catalog-actions {
+  flex: 0 0 auto;
+}
+
+.hms-root .hms-catalog-provenance {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+.hms-root .hms-catalog-freshness summary {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.hms-root .hms-catalog-freshness ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 120px;
+  overflow: auto;
+  display: grid;
+  gap: 2px;
+  overscroll-behavior: contain;
+}
+
+.hms-root .hms-catalog-freshness li {
+  overflow-wrap: anywhere;
+}
+
+.hms-root .hms-catalog-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 8px;
+  margin: 4px 0;
+}
+
+.hms-root .hms-catalog-summary > div {
+  min-width: 0;
+  border: 1px solid var(--hms-border);
+  border-radius: var(--hms-radius);
+  padding: 8px 10px;
+}
+
+.hms-root .hms-catalog-summary dt {
+  font-size: 12px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+.hms-root .hms-catalog-summary dd {
+  margin: 2px 0 0;
+  font-size: 18px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.hms-root .hms-catalog-summary dd span {
+  display: block;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+.hms-root .hms-catalog-pending-note,
+.hms-root .hms-catalog-notices p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+.hms-root .hms-catalog-notices {
+  display: grid;
+  gap: 2px;
+  border-left: 3px solid var(--hms-border);
+  padding-left: 8px;
+}
+
+.hms-root .hms-catalog-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: flex-end;
+}
+
+.hms-root .hms-catalog-controls > * {
+  min-width: 0;
+}
+
+.hms-root .hms-catalog-search {
+  flex: 1 1 260px;
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.hms-root .hms-catalog-search input {
+  width: 100%;
+  min-height: 38px;
+}
+
+.hms-root .hms-catalog-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.hms-root .hms-catalog-toggles button[aria-pressed="true"] {
+  border-color: var(--hms-accent);
+  box-shadow: inset 0 0 0 1px var(--hms-accent);
+}
+
+.hms-root .hms-catalog-sort {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.hms-root .hms-catalog-sort select {
+  min-height: 38px;
+}
+
+.hms-root .hms-catalog-scroll {
+  max-height: 60vh;
+  overflow: auto;
+  border: 1px solid var(--hms-border);
+  border-radius: var(--hms-radius);
+  overscroll-behavior: contain;
+  scroll-behavior: smooth;
+}
+
+.hms-root .hms-catalog-scroll:focus-visible {
+  outline: 2px solid var(--hms-accent);
+  outline-offset: 2px;
+}
+
+.hms-root .hms-catalog-table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 780px;
+  font-size: 13px;
+}
+
+.hms-root .hms-catalog-table th,
+.hms-root .hms-catalog-table td {
+  padding: 6px 8px;
+  vertical-align: top;
+  text-align: left;
+  border-bottom: 1px solid var(--hms-border);
+}
+
+.hms-root .hms-catalog-table thead th {
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.hms-root .hms-catalog-table tbody tr:hover td {
+  background: rgba(127, 127, 127, 0.08);
+}
+
+.hms-root .hms-catalog-price {
+  text-align: right !important;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.hms-root .hms-catalog-model-label {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.hms-root .hms-catalog-model-id {
+  display: block;
+  font-size: 11px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+  overflow-wrap: anywhere;
+}
+
+.hms-root .hms-catalog-provider-tag {
+  display: inline-block;
+  margin-top: 2px;
+  padding: 0 6px;
+  border: 1px solid var(--hms-border);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+.hms-root .hms-catalog-group th {
+  padding-top: 14px;
+  font-weight: 400;
+  border-top: 2px solid var(--hms-border);
+}
+
+.hms-root .hms-catalog-group:first-child th {
+  border-top: 0;
+}
+
+.hms-root .hms-catalog-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  align-items: baseline;
+}
+
+.hms-root .hms-catalog-group-head strong {
+  font-size: 14px;
+}
+
+.hms-root .hms-catalog-group-head code {
+  font-size: 11px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+.hms-root .hms-catalog-group-head > span {
+  font-size: 12px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+.hms-root .hms-catalog-warning,
+.hms-root .hms-catalog-unavailable {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+  overflow-wrap: anywhere;
+}
+
+.hms-root .hms-catalog-warning::before {
+  content: "Warning: ";
+  font-weight: 600;
+}
+
+.hms-root .hms-catalog-unavailable::before {
+  content: "Cost: ";
+  font-weight: 600;
+}
+
+.hms-root .hms-catalog-included {
+  font-size: 12px;
+}
+
+.hms-root .hms-catalog-unknown {
+  font-weight: 600;
+  cursor: help;
+}
+
+.hms-root .hms-catalog-use-reason {
+  display: block;
+  margin-top: 4px;
+  max-width: 190px;
+  font-size: 11px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+.hms-root .hms-catalog-no-models {
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+  font-size: 12px;
+}
+
+.hms-root .hms-catalog-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  border: 1px solid var(--hms-border);
+  border-radius: var(--hms-radius);
+  padding: 12px;
+  font-size: 13px;
+}
+
+.hms-root .hms-catalog-panel[data-kind="error"] {
+  border-left: 4px solid var(--hms-accent);
+}
+
+@media (max-width: 768px) {
+  .hms-root .hms-catalog-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .hms-root .hms-catalog-search {
+    flex-basis: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .hms-root .hms-catalog {
+    padding: 8px;
+  }
+  .hms-root .hms-catalog-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .hms-root .hms-catalog-toggles {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+  .hms-root .hms-catalog-toggles button {
+    width: 100%;
+  }
+  .hms-root .hms-catalog-sort {
+    flex: 1 1 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hms-root .hms-catalog-scroll {
+    scroll-behavior: auto;
+  }
+}
+
