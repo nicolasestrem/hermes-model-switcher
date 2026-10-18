@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Native route dropdowns
+
+- Replace the provider/model comboboxes with native `<select>` dropdowns. Provider
+  entries read "Label (slug)", authenticated providers first; providers needing
+  sign-in are listed but disabled. Model entries show the id, name and catalog
+  price per 1M tokens; a missing price reads "price not published", never free.
+- An explicit "Other — type an exact…" entry reveals an exact-id field, so custom
+  endpoints and uncatalogued routes remain first-class.
+- Model rows come from the cached `/catalog`; `GET /models` is used only for a
+  provider the catalog does not list. The catalog still loads lazily, on first
+  hover/focus of the provider dropdown.
+- Matrix provider/model filters are native dropdowns of values present in the
+  matrix, with exact matching; the model filter narrows to the chosen provider.
+- The editor's per-provider freshness list collapses into "Catalog details" under
+  a one-line summary (providers · models · stale · scope) with Refresh.
+- Remove the hand-rolled ARIA combobox and its styles; browser specs drive the
+  selects through `tests/route-helpers.mjs`.
+
 ### Model catalog and dropdowns
 
 - Add a read-only `GET /catalog` route aggregating every provider's models with

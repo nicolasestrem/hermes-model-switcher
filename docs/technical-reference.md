@@ -57,8 +57,8 @@ aggregates every provider row in one call. The response is never cached, perform
 no journal, preset or configuration writes, and keeps working on a read-only
 runtime. Unknown profiles and lookup failures return a visible `ok:false` error
 instead of an empty success; per-provider failures degrade that provider only.
-The provider and model dropdowns reuse the same catalog data and keep exact-ID
-typing for custom routes.
+The provider and model dropdowns are native selects fed by the same catalog
+data; an "Other" entry reveals an exact-ID field for custom routes.
 
 The catalog is informational only: it never widens what Preview/Apply will write,
 and a listed model is not proof it is routable — credentials are still validated
@@ -66,12 +66,13 @@ per profile, and billing approval is re-derived server-side.
 
 ## Advanced routing
 
-The provider and model dropdowns search Hermes' provider-scoped catalog, keeping
+The provider and model dropdowns list Hermes' provider-scoped catalog, keeping
 the exact model ID alongside its provider. IDs are not portable across providers:
 Nous may use `deepseek/deepseek-v4.1-flash` while OpenCode Go uses
 `deepseek-v4.1-flash`. **Refresh catalog** requests live discovery, but failed
 probes and curated/cache fallbacks remain visibly unproven-fresh. Manual entry
-stays available for custom routes.
+stays available through each dropdown's "Other" entry. A provider the catalog
+does not list falls back to `GET /models` for its model list.
 
 **Choose a model** assigns a provider and model. On a fallback slot, that is an
 explicit one-entry chain. **Set fallback sequence** supports several
