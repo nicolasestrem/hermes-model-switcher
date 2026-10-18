@@ -401,8 +401,10 @@ function ComboBox({
   );
 }
 
-// Price hint for one model from the aggregate /catalog row. `unknown` MUST
-// never look free: no "$0.00", no "free" badge — a dash plus an explicit
+// Price hint for one model from the aggregate /catalog row. Provider display
+// strings are rendered verbatim, including a real "$0.00" or "free" for one
+// token direction — that is a zero rate for that direction, not a free model.
+// Only an absent/null display is unknown: a dash plus an explicit
 // screen-reader sentence. Only pricingStatus === "free" earns the badge.
 const CATALOG_UNKNOWN_TITLE = "no list price in the installed catalog; never treated as free";
 const CATALOG_PENDING_TEXT = "prices still loading";
@@ -422,11 +424,11 @@ function priceHint(catalogModel) {
   }
   if (status === "priced" && catalogModel.cost) {
     const out = catalogModel.cost.display?.output;
-    if (out && out !== "$0.00") {
+    if (out) {
       return { text: `→ ${out} out`, kind: "priced", title: `${out} per 1M output tokens` };
     }
     const inp = catalogModel.cost.display?.input;
-    if (inp && inp !== "$0.00") {
+    if (inp) {
       return { text: `→ ${inp} in`, kind: "priced", title: `${inp} per 1M input tokens` };
     }
   }
@@ -464,14 +466,18 @@ function catalogModelsOf(provider) {
 
 function catalogPriceValue(model) {
   const v = model && model.cost ? model.cost.input : null;
-  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null;
+  // A provider-stated 0 is a real (cheapest) rate, not unknown; only an
+  // absent or non-numeric input has no comparable numeric price.
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
 }
 
 function catalogDisplay(model, field) {
   const value = model && model.cost && model.cost.display ? model.cost.display[field] : null;
-  // A "$0.00" display is only ever attached to a free route, which renders a
-  // free badge instead. Never let the literal reach the page.
-  return value && value !== "$0.00" ? value : null;
+  // Provider display strings are provider-stated data: render them verbatim,
+  // including "$0.00" (a real zero rate for this direction) and "free" in one
+  // direction. Only an absent/null display is unknown — absent data is never
+  // coerced to a fabricated zero here.
+  return value ? value : null;
 }
 
 function catalogCheapestInput(models) {
@@ -494,8 +500,9 @@ function catalogPriceRange(models) {
 }
 
 // Price cells are deliberately status-first: free/included/unknown come from
-// the catalog's own classification, never from a numeric guess. A missing
-// display string for a priced row is still unknown, never zero.
+// the catalog's own classification, never from a numeric guess. A present
+// display string — including "$0.00" or "free" for one direction — is rendered
+// verbatim; only a missing display for a priced row is unknown, never zero.
 function CatalogPriceCell({ model, field, pending }) {
   if (pending) return <span className="hms-catalog-pending">{CATALOG_PENDING_TEXT}</span>;
   const status = model.pricingStatus;

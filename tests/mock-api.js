@@ -14,7 +14,7 @@
       // unauthenticated provider, and /state slots that join to catalog rows.
       catalogPending: false, catalogEmpty: false, catalogDuplicateModel: false,
       catalogManyModels: false, catalogPortalModels: false, catalogLinkedSlots: false,
-      catalogNoPrices: false },
+      catalogNoPrices: false, catalogZeroPriced: false },
     JSON.parse(sessionStorage.getItem("hms-mock-flags") || "{}"),
   );
   // Recorded API calls: [{ path, search, method, body }] — lets specs assert
@@ -63,6 +63,19 @@
     unit: "USD_per_1M_tokens", input: 0, output: 0, cacheRead: 0,
     display: { input: "$0.00", output: "$0.00", cache: "$0.00" },
     free: true, source: "subscription_route", pricingVersion: null,
+  });
+  // A priced route may legitimately state a zero (or "free") rate for ONE
+  // direction while charging for the other. These are real provider display
+  // strings, not unknown data, and must reach the page verbatim.
+  const zeroInputCost = () => ({
+    unit: "USD_per_1M_tokens", input: 0, output: 0.5, cacheRead: null,
+    display: { input: "$0.00", output: usd(0.5), cache: null },
+    free: false, source: "picker", pricingVersion: "2026-10",
+  });
+  const freeInputCost = () => ({
+    unit: "USD_per_1M_tokens", input: null, output: 1, cacheRead: null,
+    display: { input: "free", output: usd(1), cache: null },
+    free: false, source: "picker", pricingVersion: "2026-10",
   });
   const includedCost = () => ({
     unit: "USD_per_1M_tokens", input: null, output: null, cacheRead: null,
@@ -119,6 +132,12 @@
   const portalModel = {
     id: "portal-chat", label: "Portal Chat", pricingStatus: "priced", cost: pricedCost(2, 4),
   };
+  const zeroPricedModels = [
+    { id: "zero-input-paid-output", label: "Zero Input, Paid Output",
+      pricingStatus: "priced", cost: zeroInputCost() },
+    { id: "free-input-paid-output", label: "Free Input, Paid Output",
+      pricingStatus: "priced", cost: freeInputCost() },
+  ];
 
   function catalogFor(profileId, provider, refresh) {
     const M = window.__mockApi;
@@ -126,6 +145,7 @@
       ? []
       : catalogProviders.map((p) => {
         if (p.id === "nous" && M.catalogManyModels) return { ...p, models: [...p.models, ...bulkModels] };
+        if (p.id === "nous" && M.catalogZeroPriced) return { ...p, models: [...p.models, ...zeroPricedModels] };
         if (p.id === "portal" && M.catalogPortalModels) return { ...p, models: [...p.models, portalModel] };
         return p;
       });
@@ -169,7 +189,9 @@
       return { ok: false, provider, models: [], fetchedAt: null, source: "unknown", stale: true,
         error: `provider '${provider}' is not available in this profile's catalog (not configured or not authenticated)` };
     }
-    const models = (row.models || []).map((m) => ({ id: m.id, name: m.label }));
+    const extra = provider === "nous" && window.__mockApi.catalogZeroPriced
+      ? zeroPricedModels : [];
+    const models = [...(row.models || []), ...extra].map((m) => ({ id: m.id, name: m.label }));
     return {
       ok: true, provider, models, fetchedAt: row.fetchedAt, source: "picker", stale: row.stale,
       error: row.warning || (models.length ? null : `provider '${provider}' reported no models`),

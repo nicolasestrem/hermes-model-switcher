@@ -128,7 +128,7 @@ test("provider groups and row counts mirror the /catalog payload exactly", async
     .toHaveText("range $0.10");
 });
 
-test("price matrix renders exact display strings, free badges only for free, and never $0.00", async ({ page }) => {
+test("price matrix renders exact display strings, free badges only for free, and fabricates no $0.00", async ({ page }) => {
   await openFixture(page);
   await openCatalog(page);
 
@@ -156,12 +156,50 @@ test("price matrix renders exact display strings, free badges only for free, and
   await expect(unknown.locator('[data-column="output"]')).toHaveText("—");
   await expect(unknown.locator('[data-column="status"]')).toHaveText("unknown");
 
-  // Exactly the one free fixture model wears the badge, and no zero-dollar
-  // string leaks anywhere in the section.
+  // Exactly the one free fixture model wears the badge, and the default
+  // fixture (no provider-stated zero) leaks no fabricated zero-dollar string.
   await expect(page.locator(".hms-badge-free")).toHaveCount(2);
   const text = await section(page).innerText();
   expect(text).not.toContain("$0.00");
   expect(text).toContain("unknown — never treated as free");
+});
+
+test("a provider-stated zero or 'free' rate for one direction is real data, never unknown", async ({ page }) => {
+  await openWithFlags(page, { catalogZeroPriced: true });
+  await openCatalog(page);
+
+  // (a) priced with display input "$0.00" and a positive output: both strings
+  // render verbatim, and the input cell is not the unknown treatment.
+  const zero = row(page, "nous", "zero-input-paid-output");
+  await expect(zero).toHaveAttribute("data-pricing-status", "priced");
+  await expect(zero.locator('[data-column="input"]')).toHaveText("$0.00");
+  await expect(zero.locator('[data-column="output"]')).toHaveText("$0.50");
+  await expect(zero.locator('[data-column="input"] .hms-catalog-unknown')).toHaveCount(0);
+  await expect(zero.locator('[data-column="input"] [title]')).toHaveCount(0);
+
+  // (c) priced with "free" in ONE direction: literal text, but no free badge.
+  const freeInput = row(page, "nous", "free-input-paid-output");
+  await expect(freeInput).toHaveAttribute("data-pricing-status", "priced");
+  await expect(freeInput.locator('[data-column="input"]')).toHaveText("free");
+  await expect(freeInput.locator('[data-column="output"]')).toHaveText("$1.00");
+  await expect(freeInput.locator(".hms-badge-free")).toHaveCount(0);
+
+  // (b) absent cost stays unknown with the never-treated-as-free explanation.
+  const unknown = row(page, "nous", "hermes-unknown");
+  await expect(unknown.locator('[data-column="input"]')).toHaveText("—");
+  await expect(unknown.locator('[data-column="input"] .hms-catalog-unknown'))
+    .toHaveAttribute("title", "no list price in the installed catalog; never treated as free");
+
+  // (d) the badge still appears only for pricingStatus === "free".
+  await expect(page.locator('[data-pricing-status="priced"] .hms-badge-free')).toHaveCount(0);
+  await expect(page.locator(".hms-badge-free")).toHaveCount(2);
+  await expect(row(page, "nous", "hermes-4-70b").locator(".hms-badge-free")).toHaveCount(2);
+
+  // A real zero is the cheapest known input, not an unknown sorted last.
+  await expect(page.getByTestId("catalog-summary-strip").locator('[data-tile="cheapest"] dd'))
+    .toContainText("$0.00");
+  await expect(page.locator('[data-provider-group="nous"] .hms-catalog-range'))
+    .toHaveText("range $0.00–$10.00");
 });
 
 test("summary strip reports provider/model counts, cheapest input and unknown honesty", async ({ page }) => {

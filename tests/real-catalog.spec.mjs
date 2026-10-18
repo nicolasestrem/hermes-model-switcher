@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 
 // The REAL plugin backend over the isolated lab home (tests/real-server.mjs).
 // No live prices are asserted: this lab frequently has no published pricing,
-// and the point is honesty — unknown is never "$0.00" or "free".
+// and the point is honesty — unknown is never "$0.00" or "free". A provider-stated
+// zero rate, however, is real data and renders verbatim.
 const HERE = dirname(fileURLToPath(import.meta.url));
 const labHome = JSON.parse(readFileSync(join(HERE, "real-home.json"), "utf8")).home;
 const URL = "http://localhost:8932/fixture-real.html";
@@ -115,7 +116,17 @@ test("real catalog: one on-demand fetch, payload-shaped groups/rows, and honest 
   }
 
   const sectionText = await page.getByTestId("catalog-section").innerText();
-  expect(sectionText).not.toContain("$0.00");
+  // Honesty contract: "$0.00" is real data only when the payload itself states a
+  // zero rate; with no provider-stated zero, any rendered $0.00 is fabricated.
+  // Unknown rows must render "—", never a zero.
+  const zeroStated = payload.providers
+    .flatMap((p) => p.models)
+    .some((m) => m.cost?.display && Object.values(m.cost.display).includes("$0.00"));
+  if (zeroStated) {
+    expect(sectionText).toContain("$0.00");
+  } else {
+    expect(sectionText).not.toContain("$0.00");
+  }
   expect(sectionText).not.toMatch(/\b(just now|today|minutes? ago|hours? ago)\b/i);
 
   // Closing and reopening uses the shared per-profile cache: still ONE fetch.
