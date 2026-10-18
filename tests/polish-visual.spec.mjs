@@ -41,8 +41,9 @@ for (const theme of ['dark', 'light']) {
       await expect(page.getByTestId('removal-advanced')).not.toHaveAttribute('open', '');
       await expect(page.getByTestId('picker-advanced')).not.toHaveAttribute('open', '');
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
-      const grid = await page.locator('.hms-workspace').evaluate(el => getComputedStyle(el).display);
-      expect(grid).toBe(width === 1440 ? 'grid' : 'block');
+      // hms-wide is applied by a ResizeObserver after mount: assert with a
+      // retrying expectation instead of a one-shot computed-style read.
+      await expect(page.locator('.hms-workspace')).toHaveCSS('display', width === 1440 ? 'grid' : 'block');
       await expect(page.locator('[data-column="profile"]').first()).toHaveCSS('position', 'sticky');
       const region = page.getByTestId('matrix-scroll');
       if (width === 375) {
