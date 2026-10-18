@@ -9,8 +9,8 @@ Candidate `feat/model-catalog` (release-candidate tree; commit id recorded in th
 release PR) was checked on Linux, Python 3.13 and Node 26:
 
 ```text
-512 passed, 1 skipped, 0 failed (513 tests)
-124 passed (59.6s)
+538 passed, 1 skipped (539 tests)
+125 passed (1.5m)
 ```
 
 Package assembly (`scripts/build_package.py --replace`) and the privacy guard
