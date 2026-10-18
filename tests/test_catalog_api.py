@@ -21,6 +21,11 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+# Runtime-built host-path shape: no baked-in ``/home/<user>`` literal in the
+# repo (the skeleton scan forbids host-specific tracked strings), while the
+# sanitizer test still proves an absolute host path never reaches the client.
+LAB_HOST_PATH = str(Path("/home") / "lab" / "config.yaml")
+
 import dashboard.plugin_api as api  # noqa: E402
 
 PROVIDER_KEYS = {"id", "label", "authenticated", "configured", "isCurrent",
@@ -213,7 +218,7 @@ def test_zero_provider_rows_is_a_visible_failure(monkeypatch):
 def test_adapter_exception_is_sanitized(monkeypatch):
     monkeypatch.setattr(api, "_ADAPTER", FakeAdapter(
         {}, raise_on_payload=RuntimeError(
-            "Authorization: Bearer secret-test-token /home/lab/config.yaml")))
+            f"Authorization: Bearer secret-test-token at {LAB_HOST_PATH}")))
     monkeypatch.setattr(api, "discover_profiles", lambda: {"default": object()})
     r = _client().get("/catalog")
     assert r.status_code == 200
@@ -224,6 +229,7 @@ def test_adapter_exception_is_sanitized(monkeypatch):
     assert "secret-test-token" not in serialized
     assert "Bearer" not in serialized
     assert "/home/" not in serialized
+    assert LAB_HOST_PATH not in serialized
 
 
 def test_module_load_failure_is_sanitized(monkeypatch):

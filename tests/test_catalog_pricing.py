@@ -28,6 +28,11 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+# Built at runtime: the repo carries no baked-in ``/home/<user>`` literal (the
+# skeleton scan forbids host-specific strings in tracked files), while this
+# test still proves a real absolute host path never reaches a surfaced error.
+LAB_HOST_PATH = str(Path("/home") / "lab" / "config.yaml")
+
 import dashboard.model_catalog as mc  # noqa: E402
 
 TOP_KEYS = {"ok", "profileId", "providers", "cost", "error"}
@@ -273,6 +278,63 @@ def test_zero_numeric_rates_without_free_flag_are_unknown_not_free():
     assert model["cost"] is None
 
 
+def test_picker_display_survives_a_cold_raw_pricing_cache():
+    """The row's display price is not discarded when raw rates are cached out."""
+    payload = make_payload(make_row(
+        "nous", "Nous", models=["hermes-4-405b"],
+        pricing={"hermes-4-405b": {
+            "input": "$3.00", "output": "$15.00", "cache": "$0.30", "free": False}}))
+    res = mc.get_model_catalog_all(FakeAdapter(payload, FakeProbe()), None)
+    model = _model(res["providers"][0], "hermes-4-405b")
+    assert model["pricingStatus"] == "priced"
+    cost = model["cost"]
+    assert set(cost) == COST_KEYS
+    assert cost["display"] == {"input": "$3.00", "output": "$15.00", "cache": "$0.30"}
+    # Display text is never parsed into numbers: no raw rate, no numeric claim.
+    assert cost["input"] is None and cost["output"] is None and cost["cacheRead"] is None
+    assert cost["free"] is False
+    assert cost["source"] == "picker"
+    assert cost["pricingVersion"] is None
+    json.dumps(res, allow_nan=False)
+
+
+def test_picker_display_only_free_honours_the_explicit_flag():
+    payload = make_payload(make_row(
+        "nous", "Nous", models=["free-model"],
+        pricing={"free-model": {"input": "free", "output": "free", "cache": None, "free": True}}))
+    model = _model(mc.get_model_catalog_all(FakeAdapter(payload, FakeProbe()), None)["providers"][0],
+                   "free-model")
+    assert model["pricingStatus"] == "free"
+    cost = model["cost"]
+    assert cost["free"] is True
+    assert cost["display"] == {"input": "free", "output": "free", "cache": None}
+    assert cost["input"] is None and cost["output"] is None
+
+
+def test_picker_display_only_one_direction_free_is_not_a_free_model():
+    payload = make_payload(make_row(
+        "nous", "Nous", models=["hybrid"],
+        pricing={"hybrid": {"input": "free", "output": "$5.00", "cache": None, "free": False}}))
+    model = _model(mc.get_model_catalog_all(FakeAdapter(payload, FakeProbe()), None)["providers"][0],
+                   "hybrid")
+    assert model["pricingStatus"] == "priced"
+    assert model["cost"]["free"] is False
+    assert model["cost"]["display"] == {"input": "free", "output": "$5.00", "cache": None}
+    assert model["cost"]["input"] is None and model["cost"]["output"] is None
+
+
+def test_picker_all_free_display_without_flag_is_unknown_not_free():
+    """Zero display strings cannot prove a free model any more than 0.0 can."""
+    payload = make_payload(make_row(
+        "nous", "Nous", models=["zero-display"],
+        pricing={"zero-display": {"input": "free", "output": "free",
+                                  "cache": None, "free": False}}))
+    model = _model(mc.get_model_catalog_all(FakeAdapter(payload, FakeProbe()), None)["providers"][0],
+                   "zero-display")
+    assert model["pricingStatus"] == "unknown"
+    assert model["cost"] is None
+
+
 # -- billing-route / models.dev fallbacks ----------------------------------
 
 def test_subscription_route_is_included_not_free():
@@ -340,6 +402,50 @@ def test_models_dev_zero_cost_dict_is_unknown_not_free():
     assert model["cost"] is None
 
 
+# -- numeric guard: non-finite / negative / bool rates ---------------------
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"),
+                                 -0.5, True])
+def test_snapshot_cost_rejects_non_finite_negative_and_bool_rates(bad):
+    entry = {"source": "official_docs_snapshot", "pricing_version": "v",
+             "input": bad, "output": bad, "cache_read": bad}
+    assert mc._snapshot_cost(entry) == {"pricingStatus": "unknown", "cost": None}
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"),
+                                 -1.0, True])
+def test_models_dev_cost_rejects_non_finite_negative_and_bool_rates(bad):
+    assert mc._models_dev_cost(
+        {"input": bad, "output": bad, "cache_read": bad}) == {
+            "pricingStatus": "unknown", "cost": None}
+
+
+def test_a_bad_rate_only_nulls_that_field_and_keeps_the_rest_priced():
+    resolved = mc._models_dev_cost(
+        {"input": float("inf"), "output": 4.0, "cache_read": float("nan")})
+    assert resolved["pricingStatus"] == "priced"
+    cost = resolved["cost"]
+    assert cost["input"] is None and cost["cacheRead"] is None
+    assert cost["output"] == 4.0
+    assert cost["display"] == {"input": None, "output": "$4.00", "cache": None}
+    json.dumps(resolved, allow_nan=False)
+
+
+@pytest.mark.parametrize("bad_rate", ["nan", "inf", "-inf", "-0.000001", "1e999"])
+def test_picker_raw_bad_rates_degrade_to_unknown_and_serialize_as_valid_json(bad_rate):
+    payload = make_payload(make_row(
+        "nous", "Nous", models=["bad-rate"], pricing={"bad-rate": {}}))
+    probe = FakeProbe(picker={"nous": {"bad-rate": {
+        "prompt": bad_rate, "completion": bad_rate,
+        "input_cache_read": bad_rate}}})
+    res = mc.get_model_catalog_all(FakeAdapter(payload, probe), None)
+    model = _model(res["providers"][0], "bad-rate")
+    assert model["pricingStatus"] == "unknown"
+    assert model["cost"] is None
+    # NaN/Infinity would make this raise (and are invalid JSON on the wire).
+    json.dumps(res, allow_nan=False)
+
+
 # -- exact-id join across providers ---------------------------------------
 
 def test_same_model_id_under_two_providers_keeps_each_provider_price():
@@ -372,6 +478,29 @@ def test_exact_ids_are_not_fuzzy_normalized_across_case():
                    "Vendor/Model-X")
     assert model["pricingStatus"] == "priced"
     assert probe.calls == [("picker", "provider-a")]  # no lookup for another case variant
+
+
+# -- per-request cost memoization -----------------------------------------
+
+def test_cost_lookups_are_memoized_per_provider_and_model_within_a_request():
+    """A repeated id must not re-run billing/models.dev seam lookups."""
+    payload = make_payload(make_row("nous", "Nous", models=["dup", "dup"]))
+    adapter = FakeAdapter(payload)
+    res = mc.get_model_catalog_all(adapter, None)
+    assert adapter.probe.calls.count(("route", "dup", "nous")) == 1
+    assert adapter.probe.calls.count(("models_dev", "nous", "dup")) == 1
+    assert [m["pricingStatus"] for m in res["providers"][0]["models"]] == [
+        "unknown", "unknown"]
+
+
+def test_cost_memo_does_not_outlive_the_request():
+    payload = make_payload(make_row("nous", "Nous", models=["dup", "dup"]))
+    adapter = FakeAdapter(payload)
+    mc.get_model_catalog_all(adapter, None)
+    mc.get_model_catalog_all(adapter, None)
+    # One lookup per request: the cache is per-request, never a module global.
+    assert adapter.probe.calls.count(("route", "dup", "nous")) == 2
+    assert adapter.probe.calls.count(("models_dev", "nous", "dup")) == 2
 
 
 # -- failures / isolation --------------------------------------------------
@@ -425,13 +554,14 @@ def test_provider_filter_matches_alias_and_prefers_authenticated_duplicate():
 
 def test_catalog_exception_is_sanitized():
     adapter = FakeAdapter({}, raise_on_payload=RuntimeError(
-        "Authorization: Bearer secret-test-token at /home/lab/config.yaml"))
+        f"Authorization: Bearer secret-test-token at {LAB_HOST_PATH}"))
     res = mc.get_model_catalog_all(adapter, "work")
     assert res["ok"] is False
     assert "RuntimeError" in res["error"]
     assert "secret-test-token" not in res["error"]
     assert "Bearer" not in res["error"]
     assert "/home/" not in res["error"]
+    assert LAB_HOST_PATH not in res["error"]
 
 
 def test_unavailable_pricing_seam_marks_providers_and_keeps_prices_unknown():
@@ -515,6 +645,39 @@ def test_freshness_is_per_provider_and_pending_is_surfaced(hermes_home):
     assert fresh["stale"] is False and fresh["fetchedAt"]
     assert stale["stale"] is True and stale["fetchedAt"]
     assert res["cost"]["pending"] is True
+
+
+def test_provider_filter_scopes_pending_to_the_filtered_provider():
+    """One unrelated provider's pending flag must not taint a clean request."""
+    payload = make_payload(
+        make_row("pending-one", "Pending", models=["m"], pricing_pending=True),
+        make_row("clean", "Clean", models=["m"]),
+    )
+    filtered = mc.get_model_catalog_all(FakeAdapter(payload), None, "clean")
+    assert filtered["ok"] is True
+    assert [p["id"] for p in filtered["providers"]] == ["clean"]
+    assert filtered["cost"]["pending"] is False
+
+    # A payload-level (global) pending flag is likewise not attributable to the
+    # single provider this response describes.
+    payload_with_global = dict(payload, pricing_pending=True)
+    filtered_global = mc.get_model_catalog_all(
+        FakeAdapter(payload_with_global), None, "clean")
+    assert filtered_global["cost"]["pending"] is False
+
+    # Unfiltered, the same payload still reports the pending work.
+    unfiltered = mc.get_model_catalog_all(FakeAdapter(payload), None)
+    assert unfiltered["cost"]["pending"] is True
+
+
+def test_provider_filter_scopes_unavailable_providers_to_the_response():
+    payload = make_payload(
+        make_row("nous", "Nous", models=["m"]),
+        make_row("openrouter", "OpenRouter", models=["m"]),
+    )
+    probe = FakeProbe(available=False)
+    filtered = mc.get_model_catalog_all(FakeAdapter(payload, probe), None, "openrouter")
+    assert filtered["cost"]["unavailableProviders"] == ["openrouter"]
 
 
 def test_no_cache_entry_reports_stale_and_null_fetched_at(hermes_home):
@@ -627,4 +790,48 @@ def test_adapter_models_dev_probe_requires_raw_cost_dict_presence(monkeypatch):
                         lambda p, m: {"input": 0, "output": 0})
     assert probe.models_dev_cost("nous", "m") == {
         "input": 0.0, "output": 0.0, "cache_read": None}
+
+
+def test_models_dev_private_helper_skew_degrades_to_unknown(monkeypatch):
+    """Missing models.dev registry helpers must yield unknown, never a 500."""
+    from types import SimpleNamespace
+    import agent.models_dev as models_dev
+    import hermes_adapter
+
+    for name in ("_models_dev_id", "_registry_models", "_iter_model_entries"):
+        monkeypatch.delattr(models_dev, name, raising=False)
+    info = SimpleNamespace(cost_input=0.0, cost_output=0.0, cost_cache_read=None,
+                           has_cost_data=lambda: False)
+    monkeypatch.setattr(hermes_adapter, "_load_pricing_seams", lambda: {
+        "get_pricing_for_provider": lambda provider, **kw: {},
+        "resolve_billing_route": lambda model, provider=None, **kw: None,
+        "get_pricing_entry": lambda model, provider=None, **kw: None,
+        "get_model_info": lambda provider, model, **kw: info,
+    })
+    assert hermes_adapter._raw_models_dev_cost("nous", "m") is None
+    probe = hermes_adapter.HermesAdapter().pricing_probe()
+    assert probe.models_dev_cost("nous", "m") is None
+
+    payload = make_payload(make_row("nous", "Nous", models=["m"]))
+    res = mc.get_model_catalog_all(FakeAdapter(payload, probe), None)
+    assert res["ok"] is True
+    model = _model(res["providers"][0], "m")
+    assert model["pricingStatus"] == "unknown"
+    assert model["cost"] is None
+    json.dumps(res, allow_nan=False)
+
+
+def test_models_dev_helper_raising_at_call_time_degrades_to_unknown(monkeypatch):
+    import agent.models_dev as models_dev
+    import hermes_adapter
+
+    def boom(*args, **kwargs):
+        raise AttributeError("_iter_model_entries moved in this Hermes version")
+
+    monkeypatch.setattr(models_dev, "_models_dev_id",
+                        lambda provider: provider, raising=False)
+    monkeypatch.setattr(models_dev, "_registry_models",
+                        lambda *args, **kwargs: {"m": {}}, raising=False)
+    monkeypatch.setattr(models_dev, "_iter_model_entries", boom, raising=False)
+    assert hermes_adapter._raw_models_dev_cost("nous", "m") is None
 

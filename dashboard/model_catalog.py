@@ -44,11 +44,14 @@ Contract of :func:`get_model_catalog_all` (frozen Dashboard DTO)::
     }
 
 Cost resolution is OFFLINE and ordered: (1) picker display strings verbatim +
-raw cached per-token rates, (2) billing route — subscription-included, else
-official-docs snapshot, (3) models.dev cost dict, (4) ``unknown`` with
-``cost=None``.  ``free`` requires an explicit free flag (0.0 cannot distinguish
-a free model from missing data), and ``unknown`` is never rendered as free or
-``$0.00``.  Rates are USD per 1M tokens; there is no price timestamp.
+raw cached per-token rates — when the cached raw rates are empty the display
+strings still price the row (numeric fields stay null, text is never parsed),
+(2) billing route — subscription-included, else official-docs snapshot,
+(3) models.dev cost dict, (4) ``unknown`` with ``cost=None``.  ``free``
+requires an explicit free flag (0.0 cannot distinguish a free model from
+missing data), and ``unknown`` is never rendered as free or ``$0.00``.  Rates
+are USD per 1M tokens; there is no price timestamp.  Only finite, non-negative
+numbers can populate a numeric cost field.
 
 Truthfulness rules:
   * ``ok`` is ``True`` only when a row for the requested provider was found (even
@@ -74,6 +77,7 @@ secrets — it only shapes the picker builder's public payload.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
@@ -301,16 +305,36 @@ def get_model_catalog(
 
 # -- aggregate provider -> models -> cost catalog ---------------------------
 
+def _rate(value: Any) -> Optional[float]:
+    """A finite, non-negative numeric rate, else ``None`` (bools are not rates).
+
+    The ONE numeric guard for every rate entry point (picker raw rates,
+    official-docs snapshot, models.dev): NaN/inf/negative values can never
+    reach the DTO's numeric cost fields, so nothing here can serialize as
+    ``NaN``/``Infinity`` (invalid JSON) or as a negative price.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
 def _usd_display(value: Optional[float]) -> Optional[str]:
     """Format a USD/1M rate as ``$x.xx`` (up to 4 decimals, >=2 kept).
 
     Numeric rates are the source of truth; a missing rate is ``None`` — never
-    rendered as ``$0.00``.
+    rendered as ``$0.00``. Non-finite/negative input is rejected by ``_rate``.
     """
-    if value is None:
+    number = _rate(value)
+    if number is None:
         return None
     try:
-        dec = Decimal(str(value))
+        dec = Decimal(str(number))
     except (InvalidOperation, ValueError):
         return None
     if not dec.is_finite():
@@ -328,6 +352,8 @@ def _per_million(raw: Any) -> Optional[float]:
     """Raw per-token price string → USD/1M float, or None when absent/invalid."""
     if raw is None:
         return None
+    if isinstance(raw, bool):
+        return None
     if isinstance(raw, str) and not raw.strip():
         return None
     try:
@@ -337,7 +363,7 @@ def _per_million(raw: Any) -> Optional[float]:
     if not value.is_finite() or value < 0:
         return None
     try:
-        return float(value)
+        return _rate(float(value))
     except (OverflowError, ValueError):
         return None
 
@@ -387,17 +413,58 @@ def _cost_from_rates(*, source: str, inp: Optional[float],
     }
 
 
+def _display_only_cost(display: dict, free: bool) -> dict:
+    """Cost DTO from picker DISPLAY strings when no raw per-token rate exists.
+
+    A cold pricing cache (``picker_pricing(cached_only=True)`` → ``{}``) can
+    still leave the picker's own display strings in the row; those are shown
+    verbatim and the numeric fields stay ``null`` — display text is never
+    parsed into a number. ``free`` requires the row's explicit free flag: a
+    per-direction ``free`` is a zero for THAT direction only, so
+    ``free input + $5.00 output`` stays ``priced``, and an all-``free`` display
+    without the flag remains ``unknown`` (zero cannot prove a free model).
+    """
+    has_price_display = any(
+        isinstance(value, str) and value.strip().startswith("$")
+        for value in display.values())
+    if not free and not has_price_display:
+        return {"pricingStatus": "unknown", "cost": None}
+    return {
+        "pricingStatus": "free" if free else "priced",
+        "cost": {
+            "unit": COST_UNIT,
+            "input": None,
+            "output": None,
+            "cacheRead": None,
+            "display": display,
+            "free": bool(free),
+            "source": "picker",
+            "pricingVersion": None,
+        },
+    }
+
+
 def _picker_cost(entry: Any, raw: Any) -> dict:
     """Step (1): picker display strings verbatim + numeric raw per-token rates."""
     if not isinstance(entry, dict):
         return {"pricingStatus": "unknown", "cost": None}
     raw = raw if isinstance(raw, dict) else {}
+    inp = _per_million(raw.get("prompt"))
+    out = _per_million(raw.get("completion"))
+    cache = _per_million(raw.get("input_cache_read"))
+    display = _picker_display(entry)
+    if inp is None and out is None and cache is None:
+        # No raw rate at all (cold cache / cached_only): keep the picker's
+        # display price instead of discarding it. Any raw rate present makes
+        # the numeric path authoritative (zero rates stay unknown without the
+        # explicit free flag).
+        return _display_only_cost(display, entry.get("free") is True)
     return _cost_from_rates(
         source="picker",
-        inp=_per_million(raw.get("prompt")),
-        out=_per_million(raw.get("completion")),
-        cache=_per_million(raw.get("input_cache_read")),
-        display=_picker_display(entry),
+        inp=inp,
+        out=out,
+        cache=cache,
+        display=display,
         free=entry.get("free") is True,
         pricing_version=None,
     )
@@ -430,18 +497,16 @@ def _snapshot_cost(entry: Any) -> dict:
     """
     if not isinstance(entry, dict) or entry.get("source") != "official_docs_snapshot":
         return {"pricingStatus": "unknown", "cost": None}
-    inp = entry.get("input")
-    out = entry.get("output")
-    cache = entry.get("cache_read")
+    inp = _rate(entry.get("input"))
+    out = _rate(entry.get("output"))
+    cache = _rate(entry.get("cache_read"))
     return _cost_from_rates(
         source="official_docs_snapshot",
-        inp=inp if isinstance(inp, (int, float)) else None,
-        out=out if isinstance(out, (int, float)) else None,
-        cache=cache if isinstance(cache, (int, float)) else None,
-        display={key: _usd_display(value) for key, value in
-                 (("input", entry.get("input")),
-                  ("output", entry.get("output")),
-                  ("cache", entry.get("cache_read")))},
+        inp=inp,
+        out=out,
+        cache=cache,
+        display={"input": _usd_display(inp), "output": _usd_display(out),
+                 "cache": _usd_display(cache)},
         free=False,
         pricing_version=entry.get("pricing_version"),
     )
@@ -451,17 +516,16 @@ def _models_dev_cost(entry: Any) -> dict:
     """Step (3): models.dev rate row (USD/1M), only on a present cost dict."""
     if not isinstance(entry, dict):
         return {"pricingStatus": "unknown", "cost": None}
-    inp = entry.get("input")
-    out = entry.get("output")
-    cache = entry.get("cache_read")
+    inp = _rate(entry.get("input"))
+    out = _rate(entry.get("output"))
+    cache = _rate(entry.get("cache_read"))
     return _cost_from_rates(
         source="models_dev",
-        inp=inp if isinstance(inp, (int, float)) else None,
-        out=out if isinstance(out, (int, float)) else None,
-        cache=cache if isinstance(cache, (int, float)) else None,
-        display={"input": _usd_display(inp if isinstance(inp, (int, float)) else None),
-                 "output": _usd_display(out if isinstance(out, (int, float)) else None),
-                 "cache": _usd_display(cache if isinstance(cache, (int, float)) else None)},
+        inp=inp,
+        out=out,
+        cache=cache,
+        display={"input": _usd_display(inp), "output": _usd_display(out),
+                 "cache": _usd_display(cache)},
         free=False,
         pricing_version=None,
     )
@@ -528,8 +592,33 @@ def _provider_warning(row: dict) -> Optional[str]:
     return text or None
 
 
+class _CostLookups:
+    """Per-request memo of resolved costs, keyed by ``(provider, model_id)``.
+
+    The same id can be listed more than once in one request, and every
+    billing-route / snapshot / models.dev lookup is a pure read of an offline
+    cache. The cache is created per request and dies with it — deliberately
+    NOT a module-level global with unbounded lifetime.
+    """
+
+    def __init__(self, probe: Any) -> None:
+        self._probe = probe
+        self._resolved: Dict[tuple, dict] = {}
+
+    def resolve(self, model_id: str, picker_entry: Any,
+                raw_picker_pricing: Any, provider_slug: str) -> dict:
+        key = (provider_slug, model_id)
+        resolved = self._resolved.get(key)
+        if resolved is None:
+            resolved = _cost_for_model(
+                model_id, picker_entry, raw_picker_pricing,
+                provider_slug, self._probe)
+            self._resolved[key] = resolved
+        return resolved
+
+
 def _provider_dto(row: dict, probe: Any, refresh: bool,
-                  now: datetime) -> dict:
+                  now: datetime, lookups: "_CostLookups") -> dict:
     """One provider row as the frozen DTO (no paths/URLs/raw config ever)."""
     slug = _row_id(row)
     ids = _model_ids(row)
@@ -541,10 +630,10 @@ def _provider_dto(row: dict, probe: Any, refresh: bool,
     raw_pricing = probe.picker_pricing(slug) if pricing else {}
     models = []
     for model_id in ids:
-        resolved = _cost_for_model(
+        resolved = lookups.resolve(
             model_id, pricing.get(model_id),
             raw_pricing.get(model_id) if isinstance(raw_pricing, dict) else None,
-            slug, probe)
+            slug)
         models.append({
             "id": model_id,
             "label": model_id,
@@ -622,13 +711,7 @@ def get_model_catalog_all(
                 return result
 
             probe = adapter.pricing_probe()
-            unavailable = set()
-            if not getattr(probe, "available", True):
-                # Import probe failed (version skew): every price is unknown,
-                # never guessed, and the affected providers are named.
-                unavailable.update(_row_id(r) for r in rows if _row_id(r))
-            pending = bool(payload.get("pricing_pending")) if isinstance(payload, dict) else False
-            pending = pending or any(r.get("pricing_pending") is True for r in rows)
+            lookups = _CostLookups(probe)
 
             if requested:
                 row = _find_provider_row(rows, requested)
@@ -640,12 +723,22 @@ def get_model_catalog_all(
                     return result
                 rows = [row]
 
+            # Aggregate flags describe THIS response: a single-provider filter
+            # must never inherit another provider's pending or unavailable
+            # state, so they are computed AFTER the filter.
+            unavailable = set()
+            if not getattr(probe, "available", True):
+                # Import probe failed (version skew): every price is unknown,
+                # never guessed, and the affected providers are named.
+                unavailable.update(_row_id(r) for r in rows if _row_id(r))
+            pending = any(r.get("pricing_pending") is True for r in rows)
+            if not requested and isinstance(payload, dict) and payload.get("pricing_pending"):
+                pending = True
+
             providers = []
             for row in rows:
-                if row.get("pricing_pending") is True:
-                    pending = True
                 try:
-                    providers.append(_provider_dto(row, probe, refresh, now))
+                    providers.append(_provider_dto(row, probe, refresh, now, lookups))
                 except Exception as exc:  # one bad row must not suppress the rest
                     providers.append(_degraded_provider_dto(row, exc))
                     slug = _row_id(row)
