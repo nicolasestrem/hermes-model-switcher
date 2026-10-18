@@ -8,6 +8,8 @@ the Plugin SDK) + optional ``dashboard/plugin_api.py`` FastAPI routes.
 
 Wiring (real, no mocks):
   GET  /state                      profiles + route inventory + presets
+  GET  /models                     provider-aware model ids (native passthrough)
+  GET  /catalog                    aggregate provider -> models -> cost catalog
   POST /preview                    pure change preview (no writes)
   POST /presets                    persist a reviewed preset
   POST /operations                 journalled apply (engine)
@@ -1470,6 +1472,45 @@ def models(response: Response, provider: str = "",
         result = {"ok": False, "provider": provider, "models": [],
                   "fetchedAt": None, "source": "unknown", "stale": True,
                   "error": "catalog returned an unexpected payload"}
+    return result
+
+
+@router.get("/catalog")
+def catalog(response: Response, provider: str = "",
+            profileId: Optional[str] = None, refresh: bool = False):
+    """Aggregate provider -> models -> cost catalog — read-only, truthful.
+
+    Shape: ``{ok, profileId, providers:[{id, label, authenticated, configured,
+    isCurrent, modelCount, fetchedAt, stale, warning, models:[{id, label,
+    pricingStatus, cost}]}], cost:{pending, unavailableProviders}, error}``.
+    Unknown profile / module failure / zero provider rows are ``ok=false`` with
+    a sanitized ``error`` (HTTP 200), never an empty success. Deliberately NOT
+    gated on ``_runtime_writable()``: reading a catalog is safe on a read-only
+    runtime. The response is never cached and this path performs no
+    journal/preset/state writes.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    provider = str(provider or "")
+    failure = {"ok": False,
+               "profileId": profileId if profileId else None,
+               "providers": [],
+               "cost": {"pending": False, "unavailableProviders": []}}
+    try:
+        catalog_module = _model_catalog_module()
+    except Exception:
+        return {**failure, "error": "model catalog module unavailable"}
+    # Explicit profile-discovery validation: an unknown profile is a truthful
+    # visible error, never a silent empty success.
+    if profileId and profileId not in discover_profiles():
+        return {**failure, "error": f"unknown profile {profileId!r}"}
+    try:
+        result = catalog_module.get_model_catalog_all(
+            _ADAPTER, profileId, provider, refresh=bool(refresh))
+    except Exception as exc:
+        return {**failure,
+                "error": f"catalog lookup failed: {type(exc).__name__}"}
+    if not isinstance(result, dict):
+        return {**failure, "error": "catalog returned an unexpected payload"}
     return result
 
 
