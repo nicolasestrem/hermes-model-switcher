@@ -16,9 +16,12 @@ what is configured and check a change before writing it.
 
 - Inspect supported routes across profiles in one filterable matrix. Configured
   routes stay separate from recorded usage; an open session may still use its old model.
-- Select individual slots or a matching group, browse provider models or enter a
-  provider/model pair, then preview the change. Filters change the view; checkboxes
-  choose edit targets.
+- See what you could switch to in the model catalog: a bird's-eye, provider-grouped
+  view of every model the profile can route to, with list prices per 1M tokens, free
+  and no-list-price entries marked distinctly, and which slots already use each model.
+- Select individual slots or a matching group, pick from searchable provider and
+  model dropdowns or enter an exact provider/model pair, then preview the change.
+  Filters change the view; checkboxes choose edit targets.
 - Save reviewed choices as named presets and reuse them after a fresh preview.
 - Check per-profile results in the operation drawer and use revision-guarded Undo.
   If a write fails, the engine attempts to restore completed steps and flags any
@@ -31,6 +34,10 @@ Built for the Hermes Dashboard, using its themes and authenticated transport. MI
 *The compiled plugin in a Dashboard SDK fixture with synthetic lab profiles. This
 screenshot demonstrates the interface; it is not evidence of live Dashboard
 deployment or provider inference.*
+
+![Model catalog with list prices per 1M tokens](docs/images/model-switcher-catalog-1440.png)
+
+![Model catalog on a narrow screen](docs/images/model-switcher-catalog-375.png)
 
 ### In the real Hermes Dashboard
 
@@ -114,8 +121,10 @@ when you rebuild the UI yourself.
 1. **Select targets.** Filter by profile, family, slot, or state, then select the
    slots you want to change. Filtering changes the view only; checkboxes choose edit
    targets. The selection summary includes selected slots hidden by filters.
-2. **Choose routing.** Browse provider models or enter a custom provider/model pair.
-   Model IDs belong to their provider, so keep the pair together.
+2. **Choose routing.** Pick from the searchable provider and model dropdowns, open
+   **Browse model catalog** to compare options with their list prices, or enter an
+   exact provider/model pair for custom routes. Model IDs belong to their provider,
+   so keep the pair together.
 3. **Preview changes.** Review the affected profiles and side effects. Resolve blocked
    entries and acknowledge unknown-cost routes when required. Changing the selection
    or routing requires a fresh preview.
@@ -138,6 +147,10 @@ and exact-model removal; see [advanced routing](docs/technical-reference.md).
 - **What if the model list looks stale or a provider is missing?** Model catalog
   refresh can contact provider services; a catalog result is a listing, not an
   inference test. Missing providers usually mean a missing credential on that profile.
+- **Where do the catalog prices come from?** List prices per 1M tokens come from the
+  installed Hermes pricing caches and official pricing snapshots — not from provider
+  probes, inference, or your recorded spend. They can lag behind provider pricing
+  pages; a missing price is shown as unknown, never as free or `$0.00`.
 - **Someone edited a config while I was reviewing — what happens?** Each operation
   validates profiles and revisions. Avoid concurrent CLI or editor edits during Apply
   or Undo, and use **Refresh state** to reload external changes.
@@ -166,6 +179,8 @@ and exact-model removal; see [advanced routing](docs/technical-reference.md).
 - **Explicit selection only.** Only supported, explicitly selected slots are writable;
   unknown or unsupported slots remain coverage gaps.
 - **Prerequisite: connected credentials.** A missing connection blocks the change.
+- **Prices are informational.** Catalog list prices can be stale or absent; they are
+  not spend estimates, not cost approvals, and unknown cost is never treated as free.
 - **Scale.** Large profile sets increase first-request (cold discovery) time; 50
   synthetic profiles took about seven seconds in the lab. See
   [release readiness](docs/release-readiness.md) and

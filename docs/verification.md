@@ -5,19 +5,23 @@ No production configuration, inference call or live plugin installation is used 
 
 ## Observed integrated checks
 
-Candidate `188add0` was checked on Linux, Python 3.13 and Node 26:
+Candidate `feat/model-catalog` (release-candidate tree; commit id recorded in the
+release PR) was checked on Linux, Python 3.13 and Node 26:
 
 ```text
-463 passed, 1 skipped, 5 warnings in 46.72s
-83 passed (31.5s)
+512 passed, 1 skipped, 0 failed (513 tests)
+124 passed (59.6s)
 ```
+
+Package assembly (`scripts/build_package.py --replace`) and the privacy guard
+(`scripts/privacy_guard.py`, clean) ran on the same tree.
 
 The single local skip is the explicitly gated clean-checkout bootstrap E2E test.
 It was exercised separately with its gate enabled (`32 passed, 5 warnings in 9.27s`
 including bootstrap and adjacent write-path tests); CI enables it too. These are
 revision-bounded historical receipts, not promises that a later checkout passes.
 
-Commands: `python -m pytest -o addopts='' -q` and `npm test`. The browser command needs no `HMS_PYTHON` override: its entry point and seed reader share a resolver (explicit override, local virtual environment, then `python3`).
+Commands: `python -m pytest -o addopts='' -q` and `npm test`. The browser command needs no `HMS_PYTHON` override: its entry point and seed reader share a resolver (explicit override, local virtual environment, then `python3`). Note `pytest.ini` already sets `addopts = -q`; adding another `-q` on the command line suppresses the final summary line — use `-o addopts='' -q`, or count the progress rows.
 
 The backend suite exercises journal privacy, commit/compensation/undo, malformed URLs, conflicting targets, two-process SQLite contention, persistent preset salvage across fresh processes, and public failure-category allowlisting. The browser suite includes real-router configuration writes and byte-exact undo plus SDK-contract, error presentation, theme opacity, keyboard and narrow-layout checks. UI-only fixtures are not evidence of a deployed Dashboard or provider inference.
 

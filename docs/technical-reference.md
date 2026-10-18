@@ -39,13 +39,39 @@ Implementation and advanced routing details for contributors.
    shipped `dashboard/dist/index.js`; `tests/fixture.html` covers the legacy path.
 
 
+## Model catalog
+
+**Browse model catalog** opens a read-only, provider-grouped overview of every
+model the current profile can route to, with list prices per 1M tokens where the
+installed Hermes catalog knows them. Prices are informational: they come from
+Hermes' picker pricing caches, its official-pricing snapshot, and the local
+models.dev registry cache (in that order), never from inference calls and never
+from recorded spend. A missing price renders as unknown ("—", *never treated as
+free*); `free` appears only on an explicit free flag; `$0.00` is never displayed.
+Hermes' price caches carry no fetch timestamps, so the UI reports pending/stale
+evidence instead of inventing an as-of time.
+
+Data flows through the read-only `GET /catalog` route (validated `profileId`, an
+optional `provider` filter, `refresh=1` only on an explicit user action), which
+aggregates every provider row in one call. The response is never cached, performs
+no journal, preset or configuration writes, and keeps working on a read-only
+runtime. Unknown profiles and lookup failures return a visible `ok:false` error
+instead of an empty success; per-provider failures degrade that provider only.
+The provider and model dropdowns reuse the same catalog data and keep exact-ID
+typing for custom routes.
+
+The catalog is informational only: it never widens what Preview/Apply will write,
+and a listed model is not proof it is routable — credentials are still validated
+per profile, and billing approval is re-derived server-side.
+
 ## Advanced routing
 
-Expand **Browse provider models** to search Hermes' provider-scoped catalog, keeping the exact
-model ID alongside its provider. IDs are not portable across providers: Nous may
-use `deepseek/deepseek-v4.1-flash` while OpenCode Go uses `deepseek-v4.1-flash`.
-Refresh requests live discovery, but failed probes and curated/cache fallbacks
-remain visibly unproven-fresh. Manual entry stays available for custom routes.
+The provider and model dropdowns search Hermes' provider-scoped catalog, keeping
+the exact model ID alongside its provider. IDs are not portable across providers:
+Nous may use `deepseek/deepseek-v4.1-flash` while OpenCode Go uses
+`deepseek-v4.1-flash`. **Refresh catalog** requests live discovery, but failed
+probes and curated/cache fallbacks remain visibly unproven-fresh. Manual entry
+stays available for custom routes.
 
 **Choose a model** assigns a provider and model. On a fallback slot, that is an
 explicit one-entry chain. **Set fallback sequence** supports several
