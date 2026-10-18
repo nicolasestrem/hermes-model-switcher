@@ -168,6 +168,22 @@ test("Other keeps exact hand-typed provider slugs and model ids", async ({ page 
   await expect(modelExact(page)).toHaveCount(0);
 });
 
+test("typing an exact provider slug fetches /models once, on leaving the field", async ({ page }) => {
+  await open(page);
+  await providerSelect(page).selectOption(OTHER);
+  const exact = providerExact(page);
+  await exact.focus();
+  for (const ch of "zhipu") {
+    await exact.press(ch);
+    await page.waitForTimeout(300); // longer than the 250 ms debounce
+  }
+  expect((await modelRequests(page)).length).toBe(0); // no fetch per partial slug
+  await expect(modelSelect(page).locator("option").first()).toHaveText("Finish the provider slug to list its models");
+  await exact.blur();
+  await expect.poll(async () => (await modelRequests(page)).length).toBe(1);
+  expect((await modelRequests(page))[0].search).toContain("provider=zhipu");
+});
+
 test("uncatalogued model lists fall back to /models with inline error and Retry", async ({ page }) => {
   await open(page);
   // broken-provider has no catalog models, so /models is the source.

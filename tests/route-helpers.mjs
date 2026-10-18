@@ -33,6 +33,8 @@ export async function setProvider(page, id, { exact = false } = {}) {
   }
   await select.selectOption(OTHER);
   await providerExact(page).fill(id);
+  // Model lookup for a typed slug waits until the field is left.
+  await providerExact(page).blur();
 }
 
 export async function setModel(page, id, { exact = false } = {}) {

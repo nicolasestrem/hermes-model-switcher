@@ -1146,19 +1146,25 @@ function ChangeEditor({
   // An OpenRouter-only scalar selection pins the provider; its models still list.
   const scalarPinned = writableSelected.length > 0 && writableSelected.every(isScalarSlot);
   const modelProvider = scalarPinned ? "openrouter" : editor.provider.trim();
-  const providerList = (catalog.data && Array.isArray(catalog.data.providers)) ? catalog.data.providers : [];
+  const providerList = useMemo(
+    () => ((catalog.data && Array.isArray(catalog.data.providers)) ? catalog.data.providers : []),
+    [catalog.data],
+  );
   const catalogModelCount = providerList.reduce((n, p) => n + (p.models || []).length, 0);
   const staleProviderCount = providerList.filter((p) => p.stale).length;
   const catalogProvider = providerList.find((p) => p.id === modelProvider) || null;
 
   const [providerOther, setProviderOther] = useState(false);
+  // While an exact provider slug is being typed, partial slugs ("ope", "open")
+  // must not each trigger a GET /models; the fallback fetch waits for blur.
+  const [providerTyping, setProviderTyping] = useState(false);
   const [modelOther, setModelOther] = useState(false);
   const [modelState, setModelState] = useState({ key: null, data: null, error: null, loading: false });
   const modelSeq = useRef(0);
   const modelKey = `${catalogProfileId}\u0000${modelProvider}`;
   const fallbackModels = modelState.key === modelKey ? modelState.data : null;
   const modelError = modelState.key === modelKey ? modelState.error : null;
-  const needsModelFetch = Boolean(modelProvider && catalog.data && !catalog.loading &&
+  const needsModelFetch = Boolean(modelProvider && !providerTyping && catalog.data && !catalog.loading &&
     !(catalogProvider && (catalogProvider.models || []).length));
   const modelLoading = needsModelFetch && !fallbackModels && !modelError;
 
@@ -1185,6 +1191,15 @@ function ChangeEditor({
       setModelState({ key, data: null, error: message, loading: false });
     }
   };
+  // A pinned provider (OpenRouter-only scalar selection) disables the
+  // provider dropdown, so its lazy-load handlers can never fire: load the
+  // catalog as soon as the pin applies so the model dropdown still lists.
+  useEffect(() => {
+    if (!scalarPinned || editor.changeType !== "set" || catalog.loading) return;
+    const sameScope = catalog.profileId === catalogProfileId;
+    if (!sameScope || (!catalog.data && !catalog.error)) onEnsureCatalog?.();
+  }, [scalarPinned, editor.changeType, catalogProfileId, catalog.profileId, catalog.data, catalog.loading, catalog.error]);
+
   useEffect(() => {
     if (!needsModelFetch) return undefined;
     const timer = setTimeout(() => fetchModels(modelProvider), 250);
@@ -1196,13 +1211,13 @@ function ChangeEditor({
     const ay = y.authenticated === false ? 1 : 0;
     if (ax !== ay) return ax - ay;
     return String(x.label || x.id).localeCompare(String(y.label || y.id));
-  }), [catalog.data]);
+  }), [providerList]);
 
   const catalogModelMap = useMemo(() => {
     const map = new Map();
     for (const p of providerList) for (const m of p.models || []) map.set(`${p.id}\u0000${m.id}`, m);
     return map;
-  }, [catalog.data]);
+  }, [providerList]);
 
   const modelRows = useMemo(() => {
     if (catalogProvider && (catalogProvider.models || []).length) {
@@ -1214,6 +1229,10 @@ function ChangeEditor({
   const providerInList = sortedProviders.some((p) => p.id === modelProvider);
   const modelInList = modelRows.some((m) => m.id === editor.model);
   const showProviderOther = providerOther || (Boolean(modelProvider) && !providerInList && Boolean(catalog.data));
+  // An unmounted exact field fires no blur: never leave the fetch gate shut.
+  useEffect(() => {
+    if (providerTyping && (!showProviderOther || scalarPinned || editor.changeType !== "set")) setProviderTyping(false);
+  });
   const showModelOther = modelOther || (Boolean(editor.model) && !modelInList && !modelLoading && Boolean(modelProvider));
 
   const modelOptionText = (m) => {
@@ -1231,6 +1250,7 @@ function ChangeEditor({
       return;
     }
     setProviderOther(false);
+    setProviderTyping(false);
     setModelOther(false);
     const p = providerList.find((x) => x.id === value);
     const known = p ? (p.models || []) : [];
@@ -1340,6 +1360,8 @@ function ChangeEditor({
             {showProviderOther && !scalarOnly && (
               <label className="hms-route-field hms-route-exact">Exact provider slug
                 <input data-testid="provider-exact" value={editor.provider}
+                  onFocus={() => setProviderTyping(true)}
+                  onBlur={() => setProviderTyping(false)}
                   placeholder="e.g. nous, opencode-go, custom:my-endpoint"
                   onChange={(e) => set({ provider: e.target.value })} />
               </label>
@@ -1355,9 +1377,12 @@ function ChangeEditor({
               <select aria-label="New model" data-testid="model-select"
                 value={showModelOther ? OTHER_VALUE : editor.model}
                 disabled={!modelProvider && !scalarOnly}
+                onFocus={() => onEnsureCatalog?.()}
+                onPointerEnter={() => onEnsureCatalog?.()}
                 onChange={(e) => chooseModel(e.target.value)}>
                 <option value="">
                   {!modelProvider && !scalarOnly ? "Choose a provider first"
+                    : providerTyping ? "Finish the provider slug to list its models"
                     : modelLoading ? "Loading models…"
                     : modelRows.length ? `Choose a model (${modelRows.length})…` : "No listed models — choose Other"}
                 </option>

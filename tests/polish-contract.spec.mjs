@@ -92,3 +92,25 @@ test('a multi-change, multi-diff preview renders every keyed row without duplica
   await expect(page.getByTestId('preview-diff').locator('li')).toHaveCount(4);
   expect(consoleErrors.filter((e) => /same key|unique "key"/i.test(e))).toEqual([]);
 });
+
+test('a pinned OpenRouter selection loads the catalog without touching the disabled provider', async ({ page }) => {
+  const catalogHits = [];
+  await page.route('**' + BASE + '/catalog?*', route => {
+    catalogHits.push(route.request().url());
+    return route.fulfill({ json: { ok: true, profileId: 'default', cost: { pending: false }, providers: [
+      { id: 'openrouter', label: 'OpenRouter', authenticated: true, fetchedAt: null, stale: false, models: [
+        { id: 'vendor/listed-model', label: 'Listed Model', pricingStatus: 'unknown', cost: null },
+      ] },
+    ] } });
+  });
+  await scene(page, [{ slotId: 'auxiliary.openrouter_model', family: 'auxiliary', provider: '', model: 'old/model' }]);
+  expect(catalogHits).toHaveLength(0); // still lazy until the pin applies
+  await page.getByLabel('Select default auxiliary.openrouter_model', { exact: true }).check();
+  await expect(page.getByLabel('New provider', { exact: true })).toBeDisabled();
+  // No hover/focus on the provider dropdown: the pin alone must list models.
+  const model = page.getByLabel('New model', { exact: true });
+  await expect(model.locator('option[value="vendor/listed-model"]')).toHaveCount(1);
+  expect(catalogHits).toHaveLength(1);
+  await model.selectOption('vendor/listed-model');
+  await expect(page.getByTestId('route-summary')).toHaveText('Route: openrouter/vendor/listed-model');
+});
