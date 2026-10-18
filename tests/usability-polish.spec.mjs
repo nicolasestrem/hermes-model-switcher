@@ -14,6 +14,7 @@
 //    the editor stays before the matrix in the DOM.
 //  - Operation drawer: focus entry, Escape close, focus return.
 import { test, expect } from "@playwright/test";
+import { setProvider, setModel } from "./route-helpers.mjs";
 
 const URL = "/fixture.html";
 const STATE = "/api/plugins/hermes-model-switcher/state";
@@ -32,8 +33,8 @@ test("Profiles shown filters the view only: selection survives, review is invali
   // bulk-select two targets and build a reviewed preview
   await page.getByLabel("Select default main").check();
   await page.getByLabel("Select research main").check();
-  await page.getByLabel("New provider").fill("zhipu");
-  await page.getByLabel("New model").fill("glm-5.3-flash");
+  await setProvider(page, "zhipu");
+  await setModel(page, "glm-5.3-flash");
   expect(await summary(page).textContent()).toContain("2 slots on 2 profiles selected");
   await page.getByRole("button", { name: "Preview changes" }).click();
   await expect(page.getByTestId("preview-panel")).toBeVisible();

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { setProvider, setModel } from "./route-helpers.mjs";
 
 const URL = 'http://localhost:8932/fixture-real.html';
 const BASE = 'http://localhost:8932/api/plugins/hermes-model-switcher';
@@ -38,15 +39,15 @@ test('real API: edits invalidate review and refresh after mutation reveals confi
   await open(page);
   await page.getByLabel('Profile research', { exact: true }).check();
   await page.getByLabel('Select research delegation.model', { exact: true }).check();
-  await page.getByLabel('New provider', { exact: true }).fill('zhipu');
-  await page.getByLabel('New model', { exact: true }).fill('glm-5.3-flash');
+  await setProvider(page, 'zhipu');
+  await setModel(page, 'glm-5.3-flash');
   await page.getByLabel('I acknowledge unknown-cost routes').check();
   await page.getByRole('button', { name: 'Preview changes', exact: true }).click();
   await expect(page.getByTestId('preview-panel')).toBeVisible();
-  await page.getByLabel('New model', { exact: true }).fill('glm-5.3-flash-changed');
+  await setModel(page, 'glm-5.3-flash-changed');
   await expect(page.getByTestId('preview-panel')).toHaveCount(0);
   await expect(page.getByTestId('apply-custom')).toBeDisabled();
-  await page.getByLabel('New model', { exact: true }).fill('glm-5.3-flash');
+  await setModel(page, 'glm-5.3-flash');
   await page.getByRole('button', { name: 'Preview changes', exact: true }).click();
   await page.getByTestId('apply-custom').click();
   await expect(page.getByTestId('result-research')).toContainText('Applied + read back');
@@ -78,14 +79,13 @@ test('real API: disabled chain preview and configured disabled state survive rea
 
 test('real API: unavailable catalog is visible and manual exact ID stays usable', async ({ page }) => {
   await open(page);
-  // The retired picker's replacement is the model combobox: an unavailable
-  // provider surfaces its /models error inline, and exact manual entry remains.
-  await page.getByLabel('New provider', { exact: true }).fill('provider-not-configured');
-  await page.getByLabel('New model', { exact: true }).click();
-  await expect(page.getByTestId('model-combo-error')).toContainText('not available');
-  await page.getByLabel('New provider', { exact: true }).fill('nous');
-  await page.getByLabel('New model', { exact: true }).fill('deepseek/deepseek-v4.1-flash');
-  await expect(page.getByLabel('New model', { exact: true })).toHaveValue('deepseek/deepseek-v4.1-flash');
+  // A provider the catalog does not list falls back to /models: its refusal
+  // surfaces inline, and exact manual entry remains.
+  await setProvider(page, 'provider-not-configured');
+  await expect(page.getByTestId('model-error')).toContainText('not available');
+  await setProvider(page, 'nous');
+  await setModel(page, 'deepseek/deepseek-v4.1-flash');
+  await expect(page.getByTestId('route-summary')).toHaveText('Route: nous/deepseek/deepseek-v4.1-flash');
 });
 
 test('real API: a late preview response cannot revive an edited review', async ({ page }) => {
@@ -99,17 +99,23 @@ test('real API: a late preview response cannot revive an edited review', async (
     };
   });
   await page.getByLabel('Select research delegation.model', { exact: true }).check();
-  await page.getByLabel('New provider', { exact: true }).fill('zhipu');
-  await page.getByLabel('New model', { exact: true }).fill('glm-5.3-flash');
+  await setProvider(page, 'zhipu');
+  await setModel(page, 'glm-5.3-flash');
   await page.getByRole('button', { name: 'Preview changes', exact: true }).click();
-  await page.getByLabel('New model', { exact: true }).fill('a-different-route');
+  await setModel(page, 'a-different-route');
   await expect(page.getByRole('button', { name: 'Preview changes', exact: true })).toBeEnabled();
   await expect(page.getByTestId('preview-panel')).toHaveCount(0);
   await expect(page.getByTestId('apply-custom')).toBeDisabled();
 });
 
-test('picker contract fixture: search and selection preserve provider-native IDs', async ({ page }) => {
+// With no catalog rows, every provider is entered exactly and its model list
+// comes from GET /models — the fallback path these contract fixtures pin.
+const emptyCatalog = (page) => page.route('**/api/plugins/hermes-model-switcher/catalog?*', route =>
+  route.fulfill({ json: { ok: true, profileId: 'default', providers: [], cost: { pending: false } } }));
+
+test('picker contract fixture: selection preserves provider-native IDs', async ({ page }) => {
   // Controlled catalog responses test selection spelling; no provider inference is performed.
+  await emptyCatalog(page);
   await page.route('**/api/plugins/hermes-model-switcher/models?*', route => {
     const provider = new globalThis.URL(route.request().url()).searchParams.get('provider');
     const id = provider === 'nous' ? 'deepseek/deepseek-v4.1-flash' : 'deepseek-v4.1-flash';
@@ -117,14 +123,15 @@ test('picker contract fixture: search and selection preserve provider-native IDs
       source: 'contract-fixture', stale: true, fetchedAt: null, error: null } });
   });
   await open(page);
+  const model = page.getByLabel('New model', { exact: true });
   for (const [provider, id] of [['nous', 'deepseek/deepseek-v4.1-flash'], ['opencode-go', 'deepseek-v4.1-flash']]) {
-    await page.getByLabel('New provider', { exact: true }).fill(provider);
-    await page.getByLabel('New model', { exact: true }).click();
-    await page.getByLabel('New model', { exact: true }).fill('deepseek');
-    await expect(page.getByTestId('model-option-another-model')).toHaveCount(0);
-    await page.getByTestId('model-option-' + id).click();
-    await expect(page.getByLabel('New provider', { exact: true })).toHaveValue(provider);
-    await expect(page.getByLabel('New model', { exact: true })).toHaveValue(id);
+    await setProvider(page, provider);
+    await expect(model.locator(`option[value="${id}"]`)).toHaveCount(1);
+    await expect(model.locator('option[value="another-model"]')).toHaveCount(1);
+    await model.selectOption(id);
+    await expect(page.getByLabel('Exact provider slug', { exact: true })).toHaveValue(provider);
+    await expect(model).toHaveValue(id);
+    await expect(page.getByTestId('route-summary')).toHaveText(`Route: ${provider}/${id}`);
   }
 });
 
@@ -133,16 +140,17 @@ test('picker note: an ok:true catalog carrying a warning still surfaces it', asy
   // returns ok:true WITH a non-null error when a provider row resolves but
   // reports no models (or carries a warning), so this state is reachable and
   // must render — prove it rather than deleting the branch.
+  await emptyCatalog(page);
   await page.route('**/api/plugins/hermes-model-switcher/models?*', route =>
     route.fulfill({ json: { ok: true, provider: 'nous', models: [], fetchedAt: null,
       source: 'curated', stale: true, error: "provider 'nous' reported no models" } }));
   await open(page);
-  // The combobox note renders an ok:true /models warning without converting
-  // it into a hard error (and without hiding the exact-ID path).
-  await page.getByLabel('New provider', { exact: true }).fill('nous');
-  await page.getByLabel('New model', { exact: true }).click();
-  await expect(page.getByTestId('model-combo-note')).toContainText('reported no models');
-  await expect(page.getByTestId('model-combo-error')).toHaveCount(0);
+  // The note renders an ok:true /models warning without converting it into a
+  // hard error (and without hiding the exact-ID path).
+  await setProvider(page, 'nous');
+  await expect(page.getByTestId('model-note')).toContainText('reported no models');
+  await expect(page.getByTestId('model-error')).toHaveCount(0);
+  await expect(page.getByLabel('New model', { exact: true }).locator('option[value="__other__"]')).toHaveCount(1);
 });
 
 test('real API: object-shaped diff values render as JSON, never [object Object]', async ({ page }) => {
@@ -163,8 +171,8 @@ test('real API: one slot carries either a set or a removal — never both', asyn
   // emit both intents for one slot. The removal owns the slot here.
   await open(page);
   await page.getByLabel('Select default main', { exact: true }).check();
-  await page.getByLabel('New provider', { exact: true }).fill('zhipu');
-  await page.getByLabel('New model', { exact: true }).fill('glm-5.3-flash');
+  await setProvider(page, 'zhipu');
+  await setModel(page, 'glm-5.3-flash');
   await page.getByTestId('removal-advanced').locator('summary').click();
   await page.getByLabel('Exact provider/model to remove', { exact: true })
     .fill('anthropic/claude-sonnet-4-6');

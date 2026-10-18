@@ -361,118 +361,6 @@
   white-space: normal;
 }
 
-/* ---------- Catalog combobox (ARIA 1.2) ----------
- * The popup is position:fixed and rendered inside .hms-root: fixed positioning
- * escapes the 360px rail and the matrix scroll box (overflow:auto) without a
- * document.body portal, so the plugin's scoped tokens still apply. */
-.hms-root .hms-combo {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-
-.hms-root .hms-combo > label {
-  min-width: 0;
-}
-
-.hms-root .hms-combo-popup {
-  position: fixed;
-  z-index: 60;
-  display: flex;
-  flex-direction: column;
-  min-width: 360px;
-  max-width: min(560px, calc(100vw - 8px));
-  max-height: 320px;
-  overflow: hidden;
-  border: 1px solid var(--hms-border);
-  border-radius: var(--hms-radius);
-  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.38);
-}
-
-.hms-root .hms-combo-list {
-  flex: 1 1 auto;
-  min-height: 0;
-  max-height: inherit;
-  overflow: auto;
-  padding: 4px;
-  overscroll-behavior: contain;
-}
-
-.hms-root .hms-combo-option {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 2px 10px;
-  align-items: center;
-  min-height: 38px;
-  padding: 6px 8px;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.hms-root .hms-combo-option + .hms-combo-option {
-  margin-top: 2px;
-}
-
-.hms-root .hms-combo-option[data-active="true"] {
-  box-shadow: inset 0 0 0 2px var(--hms-accent);
-  background: var(--hms-surface);
-}
-
-.hms-root .hms-combo-option[data-disabled="true"] {
-  cursor: not-allowed;
-  opacity: 0.7;
-}
-
-.hms-root .hms-opt-main {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 8px;
-  align-items: baseline;
-  min-width: 0;
-}
-
-.hms-root .hms-opt-name {
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-
-.hms-root .hms-opt-slug,
-.hms-root .hms-opt-id {
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 12px;
-  color: var(--text-muted-color, var(--midground, #9aa1ad));
-  overflow-wrap: anywhere;
-}
-
-.hms-root .hms-opt-status {
-  justify-self: end;
-  font-size: 12px;
-  white-space: nowrap;
-  color: var(--text-muted-color, var(--midground, #9aa1ad));
-}
-
-.hms-root .hms-opt-status[data-status="priced"],
-.hms-root .hms-opt-status[data-status="no list price"] {
-  color: inherit;
-}
-
-.hms-root .hms-opt-reason {
-  grid-column: 1 / -1;
-  font-size: 12px;
-  color: var(--text-muted-color, var(--midground, #9aa1ad));
-}
-
-.hms-root .hms-price {
-  justify-self: end;
-  font-size: 12px;
-  white-space: nowrap;
-  color: inherit;
-}
-
-.hms-root .hms-price-unknown {
-  color: var(--text-muted-color, var(--midground, #9aa1ad));
-}
-
 .hms-root .hms-badge {
   display: inline-block;
   padding: 0 6px;
@@ -483,33 +371,47 @@
   line-height: 18px;
 }
 
-.hms-root .hms-combo-loading,
-.hms-root .hms-combo-empty,
-.hms-root .hms-combo-note,
-.hms-root .hms-combo-error {
-  padding: 8px;
-  font-size: 13px;
-  color: var(--text-muted-color, var(--midground, #9aa1ad));
+/* ---------- Route dropdowns (native selects) ---------- */
+.hms-root .hms-route-picks {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
 }
 
-.hms-root .hms-combo-error {
+.hms-root .hms-route-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.hms-root .hms-route-field select,
+.hms-root .hms-route-field input {
+  width: 100%;
+  min-width: 0;
+  font-weight: 400;
+}
+
+.hms-root .hms-route-exact {
+  padding-left: 12px;
+  border-left: 2px solid var(--hms-border);
+  font-weight: 400;
+  font-size: 13px;
+}
+
+.hms-root .hms-route-status {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
-  color: inherit;
+  font-size: 13px;
 }
 
-.hms-root .hms-combo-retry {
-  min-height: 38px;
-}
-
-.hms-root .hms-combo-skeleton {
-  height: 34px;
-  margin: 4px;
-  border-radius: 4px;
-  background: var(--hms-border);
-  opacity: 0.35;
+.hms-root .hms-route-summary {
+  margin: 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
 
 .hms-root .hms-catalog-tools {
@@ -533,16 +435,11 @@
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
 
-.hms-root .hms-catalog-freshness [data-testid="catalog-inline-error"] {
-  color: inherit;
-  font-weight: 600;
-}
-
 .hms-root .hms-freshness-list {
   list-style: none;
   margin: 0;
   padding: 0;
-  max-height: 84px;
+  max-height: 220px;
   overflow: auto;
   display: grid;
   gap: 2px;
@@ -551,12 +448,6 @@
 
 .hms-root .hms-freshness-list li {
   overflow-wrap: anywhere;
-}
-
-@media (max-width: 1099px) {
-  .hms-root .hms-combo-popup {
-    max-height: 50vh;
-  }
 }
 
 @media (max-width: 480px) {

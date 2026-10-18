@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { setProvider, setModel } from "./route-helpers.mjs";
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -30,8 +31,8 @@ test('Edge TTS is selectable for an explicit model-bearing backend assignment', 
   await expect(page.getByLabel('Select default specialist.embedding', { exact: true })).not.toBeChecked();
   await expect(page.getByTestId('selection-summary')).toContainText('1 slot on 1 profile selected');
   await expect(page.getByTestId('editor-applicability')).toContainText('model-bearing backend');
-  await page.getByLabel('New provider', { exact: true }).fill('openai');
-  await page.getByLabel('New model', { exact: true }).fill('gpt-4o-mini-tts');
+  await setProvider(page, 'openai');
+  await setModel(page, 'gpt-4o-mini-tts');
   await page.route('**' + BASE + '/preview', r => r.fulfill({ json: { ok: true, preview: { id: 'fixture-only-preview', changes: [], blocked: [] } } }));
   const request = page.waitForRequest(r => r.url().endsWith(BASE + '/preview'));
   await page.getByRole('button', { name: 'Preview changes', exact: true }).click();
@@ -77,8 +78,8 @@ for (const viewport of [{ width: 1440, height: 900, theme: 'dark' }, { width: 37
     await page.getByLabel('Change type').selectOption('unset');
     await expect(page.getByRole('button', { name: 'Preview changes', exact: true })).toBeDisabled();
     await page.getByLabel('Change type').selectOption('set');
-    await page.getByLabel('New provider', { exact: true }).fill('openai');
-    await page.getByLabel('New model', { exact: true }).fill('gpt-4o-mini-tts');
+    await setProvider(page, 'openai');
+    await setModel(page, 'gpt-4o-mini-tts');
     await expect(page.getByRole('button', { name: 'Preview changes', exact: true })).toBeEnabled();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
     const root = path.join(process.env.TMPDIR, 'model-switcher-review-round1');

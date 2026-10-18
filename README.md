@@ -19,8 +19,8 @@ what is configured and check a change before writing it.
 - See what you could switch to in the model catalog: a bird's-eye, provider-grouped
   view of every model the profile can route to, with list prices per 1M tokens, free
   and no-list-price entries marked distinctly, and which slots already use each model.
-- Select individual slots or a matching group, pick from searchable provider and
-  model dropdowns or enter an exact provider/model pair, then preview the change.
+- Select individual slots or a matching group, pick a provider and then one of
+  its models from plain dropdowns (or choose "Other" for an exact pair), then preview the change.
   Filters change the view; checkboxes choose edit targets.
 - Save reviewed choices as named presets and reuse them after a fresh preview.
 - Check per-profile results in the operation drawer and use revision-guarded Undo.
@@ -121,9 +121,9 @@ when you rebuild the UI yourself.
 1. **Select targets.** Filter by profile, family, slot, or state, then select the
    slots you want to change. Filtering changes the view only; checkboxes choose edit
    targets. The selection summary includes selected slots hidden by filters.
-2. **Choose routing.** Pick from the searchable provider and model dropdowns, open
-   **Browse model catalog** to compare options with their list prices, or enter an
-   exact provider/model pair for custom routes. Model IDs belong to their provider,
+2. **Choose routing.** Pick a provider, then a model from its dropdown (each
+   entry shows its list price), open **Browse model catalog** to compare options, or
+   choose **Other** to enter an exact provider/model pair for custom routes. Model IDs belong to their provider,
    so keep the pair together.
 3. **Preview changes.** Review the affected profiles and side effects. Resolve blocked
    entries and acknowledge unknown-cost routes when required. Changing the selection

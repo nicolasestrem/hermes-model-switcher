@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { setProvider, setModel } from "./route-helpers.mjs";
 
 // Explicit UI contract fixtures: no claim of backend saves or inference.
 const BASE = '/api/plugins/hermes-model-switcher';
@@ -17,7 +18,7 @@ test('scalar fallback uses model-only intent and implicit OpenRouter provider', 
   await page.getByLabel('Select default auxiliary.openrouter_model', { exact: true }).check();
   await expect(page.getByLabel('New provider', { exact: true })).toBeDisabled();
   await expect(page.getByTestId('editor-applicability')).toContainText('OpenRouter');
-  await page.getByLabel('New model', { exact: true }).fill('vendor/exact-model:free');
+  await setModel(page, 'vendor/exact-model:free');
   const request = page.waitForRequest(r => r.url().endsWith(BASE + '/preview'));
   await page.route('**' + BASE + '/preview', route => route.fulfill({ json: {
     ok: true, preview: { id: 'fixture-preview', changes: [], blocked: [] },
@@ -80,8 +81,8 @@ test('a multi-change, multi-diff preview renders every keyed row without duplica
   } } }));
 
   await page.getByLabel('Select default main', { exact: true }).check();
-  await page.getByLabel('New provider', { exact: true }).fill('zhipu');
-  await page.getByLabel('New model', { exact: true }).fill('glm-5.3-flash');
+  await setProvider(page, 'zhipu');
+  await setModel(page, 'glm-5.3-flash');
   await page.getByRole('button', { name: 'Preview changes', exact: true }).click();
 
   const panel = page.getByTestId('preview-panel');
@@ -90,4 +91,26 @@ test('a multi-change, multi-diff preview renders every keyed row without duplica
   // both changes carry a two-row diff list, all keyed by their path
   await expect(page.getByTestId('preview-diff').locator('li')).toHaveCount(4);
   expect(consoleErrors.filter((e) => /same key|unique "key"/i.test(e))).toEqual([]);
+});
+
+test('a pinned OpenRouter selection loads the catalog without touching the disabled provider', async ({ page }) => {
+  const catalogHits = [];
+  await page.route('**' + BASE + '/catalog?*', route => {
+    catalogHits.push(route.request().url());
+    return route.fulfill({ json: { ok: true, profileId: 'default', cost: { pending: false }, providers: [
+      { id: 'openrouter', label: 'OpenRouter', authenticated: true, fetchedAt: null, stale: false, models: [
+        { id: 'vendor/listed-model', label: 'Listed Model', pricingStatus: 'unknown', cost: null },
+      ] },
+    ] } });
+  });
+  await scene(page, [{ slotId: 'auxiliary.openrouter_model', family: 'auxiliary', provider: '', model: 'old/model' }]);
+  expect(catalogHits).toHaveLength(0); // still lazy until the pin applies
+  await page.getByLabel('Select default auxiliary.openrouter_model', { exact: true }).check();
+  await expect(page.getByLabel('New provider', { exact: true })).toBeDisabled();
+  // No hover/focus on the provider dropdown: the pin alone must list models.
+  const model = page.getByLabel('New model', { exact: true });
+  await expect(model.locator('option[value="vendor/listed-model"]')).toHaveCount(1);
+  expect(catalogHits).toHaveLength(1);
+  await model.selectOption('vendor/listed-model');
+  await expect(page.getByTestId('route-summary')).toHaveText('Route: openrouter/vendor/listed-model');
 });

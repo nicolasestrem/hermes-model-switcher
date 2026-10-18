@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { setProvider, setModel } from "./route-helpers.mjs";
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -50,19 +51,19 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     }
     await page.getByRole('button', { name: 'All profiles', exact: true }).click();
     await page.getByLabel('Select default main', { exact: true }).check();
-    await page.getByLabel('New provider', { exact: true }).fill('zhipu');
-    await page.getByLabel('New model', { exact: true }).fill('glm-5.3-flash');
+    await setProvider(page, 'zhipu');
+    await setModel(page, 'glm-5.3-flash');
     await page.getByLabel('I acknowledge unknown-cost routes').check();
     await page.getByRole('button', { name: 'Preview changes', exact: true }).click();
     await expect(page.getByTestId('preview-panel')).toBeVisible();
     await capture('preview');
     // Editing the reviewed route invalidates the review BEFORE apply: the
     // panel clears and Apply is disabled (the changed review lifecycle).
-    await page.getByLabel('New model', { exact: true }).fill('glm-5.3-flash-edited');
+    await setModel(page, 'glm-5.3-flash-edited');
     await expect(page.getByTestId('preview-panel')).toHaveCount(0);
     await expect(page.getByTestId('apply-custom')).toBeDisabled();
     await capture('invalidated');
-    await page.getByLabel('New model', { exact: true }).fill('glm-5.3-flash');
+    await setModel(page, 'glm-5.3-flash');
     await page.getByRole('button', { name: 'Preview changes', exact: true }).click();
     await expect(page.getByTestId('preview-panel')).toBeVisible();
     await page.getByTestId('apply-custom').click();
