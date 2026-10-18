@@ -47,6 +47,7 @@ DOC_FILES = [
     "release-readiness.md", "verification.md", "backlog.md", "catalog-submission.md", "images/README.md",
     "images/model-switcher-dark-1440.png", "images/model-switcher-light-1440.png",
     "images/model-switcher-dark-375.png",
+    "images/model-switcher-catalog-1440.png", "images/model-switcher-catalog-375.png",
     "images/model-switcher-real-dashboard.png", "images/model-switcher-real-preview.png",
     "images/model-switcher-real-operation.png",
 ]

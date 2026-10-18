@@ -18,7 +18,9 @@ Nothing here contains private host data.
   the integration imports private core modules (model catalog, profile scope, canonical
   writer, and others). Validation passes, but these can break on later Hermes releases.
   Migrate to supported public equivalents when they exist; do not add new private
-  imports casually.
+  imports casually. The catalog pricing seam (`hermes_cli.models_pricing`,
+  `agent.usage_pricing`, `agent.models_dev`) is import-probed behind `hermes_adapter`
+  and degrades to "unknown price" rather than failing when a seam drifts.
 - **Platforms.** Linux is the verification target. macOS and native Windows are
   unverified, and the lab shell helpers are GNU/Linux-only.
 
@@ -33,6 +35,17 @@ Nothing here contains private host data.
   category (`src/model_switcher/engine.py`, the failure category is set from the last
   attempt). Not reachable through the Dashboard API, which always plans a fresh operation;
   relevant only to direct engine callers.
+
+## Deferred UI
+
+- **Context windows and capability chips** in catalog rows (reasoning/tools/vision):
+  the frozen catalog DTO carries prices only; extending it needs a trustworthy
+  per-model metadata source first.
+- **Fallback-chain chip editor and matrix row menu**: compact affordances sketched
+  during the dropdown work and deliberately left out; the chain textarea and the
+  preview-gated editor remain the single write path.
+- **Price-aware apply policy** (e.g. max $/Mtok per route): catalog prices stay
+  informational; the billing gate keeps approving on cost class only.
 
 ## Build and packaging
 

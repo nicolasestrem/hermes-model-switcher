@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Model catalog and dropdowns
+
+- Add a read-only `GET /catalog` route aggregating every provider's models with
+  per-1M-token list prices (picker pricing caches, then the official-pricing
+  snapshot, then the local models.dev registry), behind an import-probed seam in
+  `hermes_adapter`; seam drift degrades to "unknown price" instead of failing.
+  `/models` is unchanged.
+- Replace blind free-text provider/model entry with searchable ARIA comboboxes at
+  the point of editing and in the matrix filters; exact-ID typing stays
+  first-class for custom routes.
+- Add a collapsible bird's-eye model catalog: provider-grouped table with
+  input/output prices, free/included/unknown badges, a "Configured in" slot
+  cross-reference, a summary strip, and a preview-gated "Use" prefill.
+- Cost honesty throughout: unknown is never rendered as free or `$0.00`, no price
+  timestamps are invented, and the catalog stays informational — billing approval
+  is unchanged and re-derived server-side.
+- New backend tests (catalog pricing and catalog API) and browser specs
+  (`dropdowns.spec.mjs`, `models-catalog.spec.mjs`, `real-catalog.spec.mjs`).
+
 ### Removed
 
 - The `/probe` HTTP route is gone. It previously always refused and never performed an inference probe, so removing it loses no supported inference capability.

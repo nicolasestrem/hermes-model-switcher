@@ -158,6 +158,21 @@ export function modelsUrl({ provider, profileId, refresh } = {}) {
   return "/models" + (s ? "?" + s : "");
 }
 
+// Aggregate provider -> models -> cost catalog for one profile. The frozen DTO
+// is ``{ok, profileId, providers:[{id,label,authenticated,configured,isCurrent,
+// modelCount,fetchedAt,stale,warning,models:[{id,label,pricingStatus,cost}]}],
+// cost:{pending,unavailableProviders}, error}``. ``refresh=1`` is reserved for
+// an explicit user refresh — never sent on first open or on mount.
+// Exported so the URL contract is unit-testable without a browser.
+export function catalogUrl({ profileId, provider, refresh } = {}) {
+  const qs = new URLSearchParams();
+  if (profileId) qs.set("profileId", profileId);
+  if (provider) qs.set("provider", provider);
+  if (refresh) qs.set("refresh", "1");
+  const s = qs.toString();
+  return "/catalog" + (s ? "?" + s : "");
+}
+
 export const api = {
   loadState: () => request("/state"),
   preview: (changes) => request("/preview", { method: "POST", body: JSON.stringify({ changes }) }),
@@ -177,4 +192,6 @@ export const api = {
   // GET /models?provider=&profileId=&refresh=1 →
   // { ok:true, provider, models:[{id,name}], fetchedAt, source, stale, error }
   getModels: (opts) => request(modelsUrl(opts)),
+  // GET /catalog?profileId=&provider=&refresh=1 → frozen aggregate DTO above.
+  getCatalog: (opts) => request(catalogUrl(opts)),
 };

@@ -180,5 +180,12 @@ jobs:
           npm ci
           npm run build
 
+      # The committed bundle is what a git install loads; fail on drift instead
+      # of shipping stale dashboard/dist assets.
+      - name: Verify committed bundles match a fresh build
+        run: |
+          git diff --exit-code -- dashboard/dist \
+            || { echo "::error::dashboard/dist is stale — run npm run build and commit the rebuilt assets"; exit 1; }
+
       - name: Privacy gate
         run: python scripts/privacy_guard.py

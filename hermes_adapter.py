@@ -71,6 +71,161 @@ class StoreConflict(RuntimeError):
     """The store's revision changed underneath us — refuse, never force."""
 
 
+class CatalogSeamUnavailable(RuntimeError):
+    """The installed Hermes picker seam is missing (version skew).
+
+    Raised by :meth:`HermesAdapter.catalog_payload`; callers surface it as a
+    truthful sanitized failure (``ok=False``), never as an empty catalog.
+    """
+
+
+def _load_inventory():
+    """Import the installed picker builder module (the ONE import site)."""
+    from hermes_cli import inventory
+
+    return inventory
+
+
+def _load_pricing_seams() -> Dict[str, Any]:
+    """Import every offline pricing seam this plugin reads (the ONE import site).
+
+    Version skew must fail HERE, behind the adapter, so no other module carries
+    a Hermes-private import and a missing attribute degrades to "unknown cost"
+    rather than a 500.
+    """
+    from hermes_cli.models_pricing import get_pricing_for_provider
+    from agent import usage_pricing
+    from agent import models_dev
+
+    resolve_billing_route = getattr(usage_pricing, "resolve_billing_route", None)
+    get_pricing_entry = getattr(usage_pricing, "get_pricing_entry", None)
+    get_model_info = getattr(models_dev, "get_model_info", None)
+    for name, value in (
+        ("resolve_billing_route", resolve_billing_route),
+        ("get_pricing_entry", get_pricing_entry),
+        ("get_model_info", get_model_info),
+    ):
+        if not callable(value):
+            raise AttributeError(f"agent models seam missing {name}")
+    return {
+        "get_pricing_for_provider": get_pricing_for_provider,
+        "resolve_billing_route": resolve_billing_route,
+        "get_pricing_entry": get_pricing_entry,
+        "get_model_info": get_model_info,
+    }
+
+
+def _float_or_none(value: Any) -> Optional[float]:
+    """Nullable numeric seam value as a float; unparsable → None (never 0)."""
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _raw_models_dev_cost(provider: str, model: str) -> Optional[Dict[str, Any]]:
+    """The RAW models.dev cost dict for provider/model, offline, or None.
+
+    ``ModelInfo`` zero-fills missing costs (``has_cost_data()`` is only input>0
+    or output>0), so a 0.0 rate cannot distinguish a free model from one with
+    no catalog data. Presence of the registry's own ``cost`` mapping is the
+    evidence; this probe never allows network access and never guesses.
+    """
+    try:
+        from agent import models_dev
+
+        resolve: Any = getattr(models_dev, "_models_dev_id", None)
+        registry: Any = getattr(models_dev, "_registry_models", None)
+        entries: Any = getattr(models_dev, "_iter_model_entries", None)
+        if not (callable(resolve) and callable(registry) and callable(entries)):
+            return None
+        mdev_id = resolve(provider) or provider
+        models = registry(mdev_id, allow_network=False)
+        if not isinstance(models, dict):
+            return None
+        entry = next(
+            (e for _mid, e in entries(
+                models, model, suffix_fallback=False, provider=provider)),
+            None)
+        cost = entry.get("cost") if isinstance(entry, dict) else None
+        if not isinstance(cost, dict) or not any(k in cost for k in ("input", "output")):
+            return None
+        return cost
+    except Exception:
+        return None
+
+
+class PricingProbe:
+    """Exception-safe, OFFLINE pricing probe over the installed Hermes rate sources.
+
+    Every method answers from caches only: the picker probe passes
+    ``cached_only=True``, billing routes are resolved WITHOUT ``base_url`` /
+    ``api_key`` (those arguments enable provider metadata fetches), and
+    models.dev is read with ``allow_network=False``. A seam that cannot answer
+    returns ``{}`` / ``None``; callers must render that as ``unknown``, never as
+    free or ``$0.00``. ``available`` is False only when the pricing imports
+    themselves failed (version skew).
+    """
+
+    def __init__(self, *, available: bool = True, unavailable: tuple = (),
+                 reason: Optional[str] = None,
+                 picker: Optional[Any] = None, route: Optional[Any] = None,
+                 entry: Optional[Any] = None, models_dev: Optional[Any] = None):
+        self.available = bool(available)
+        self.unavailable = tuple(unavailable)
+        self.reason = reason
+        self._picker = picker
+        self._route = route
+        self._entry = entry
+        self._models_dev = models_dev
+
+    def picker_pricing(self, provider: str) -> Dict[str, Any]:
+        """Raw per-token pricing rows ``{model: {prompt, completion, ...}}``."""
+        if self._picker is None:
+            return {}
+        try:
+            rows = self._picker(str(provider or ""))
+        except Exception:
+            return {}
+        return rows if isinstance(rows, dict) else {}
+
+    def billing_mode(self, model: str, provider: str) -> Optional[str]:
+        """``resolve_billing_route(...).billing_mode`` for provider-only lookup."""
+        if self._route is None:
+            return None
+        try:
+            mode = self._route(str(model or ""), str(provider or ""))
+        except Exception:
+            return None
+        return str(mode) if mode else None
+
+    def pricing_entry(self, model: str, provider: str) -> Optional[Dict[str, Any]]:
+        """Official-docs snapshot entry as USD/1M numbers (provider-only call)."""
+        if self._entry is None:
+            return None
+        try:
+            entry = self._entry(str(model or ""), str(provider or ""))
+        except Exception:
+            return None
+        if entry is None:
+            return None
+        return entry if isinstance(entry, dict) else None
+
+    def models_dev_cost(self, provider: str, model: str) -> Optional[Dict[str, Any]]:
+        """models.dev rate row (USD/1M) only when the catalog defines a cost dict."""
+        if self._models_dev is None:
+            return None
+        try:
+            cost = self._models_dev(str(provider or ""), str(model or ""))
+        except Exception:
+            return None
+        return cost if isinstance(cost, dict) else None
+
+    def __repr__(self) -> str:  # never include seam callables/errors
+        return (f"PricingProbe(available={self.available!r}, "
+                f"unavailable={self.unavailable!r}, reason={self.reason!r})")
+
+
 @dataclass(frozen=True)
 class RuntimeInfo:
     importable: bool
@@ -203,6 +358,103 @@ class HermesAdapter:
             yield ident
 
     # -- reads -------------------------------------------------------
+    def catalog_payload(self, refresh: bool = False) -> Any:
+        """The installed picker payload for the CURRENT profile scope.
+
+        Call inside :meth:`scoped` so the builder reads the requested profile's
+        config and credential scope. ``hermes_cli.inventory`` is imported here
+        and nowhere else in the plugin; version skew raises
+        :class:`CatalogSeamUnavailable` (sanitized by the API layer) instead of
+        surfacing an import traceback or an empty-success catalog.
+        """
+        try:
+            inventory = _load_inventory()
+            build = getattr(inventory, "build_model_options_payload", None)
+            load_ctx = getattr(inventory, "load_picker_context", None)
+            if not callable(build) or not callable(load_ctx):
+                raise AttributeError("hermes_cli.inventory picker seam missing")
+        except (ImportError, AttributeError) as exc:
+            raise CatalogSeamUnavailable(type(exc).__name__) from None
+        return build(
+            load_ctx(),
+            explicit_only=False,
+            include_unconfigured=True,
+            refresh=bool(refresh),
+        )
+
+    def pricing_probe(self) -> PricingProbe:
+        """Build an OFFLINE pricing probe over the installed rate sources.
+
+        Import failure (version skew) degrades to ``available=False`` with no
+        callables: callers then report every price as ``unknown`` and list the
+        affected providers in ``cost.unavailableProviders``. Never raises.
+        """
+        try:
+            seams = _load_pricing_seams()
+        except (ImportError, AttributeError) as exc:
+            return PricingProbe(
+                available=False,
+                unavailable=("pricing",),
+                reason=type(exc).__name__,
+            )
+
+        def _picker(provider: str) -> Dict[str, Any]:
+            # cached_only=True: never start provider I/O on a read path.
+            return seams["get_pricing_for_provider"](
+                provider, cached_only=True) or {}
+
+        def _route(model: str, provider: str) -> Optional[str]:
+            # provider-only: base_url/api_key would enable a network metadata
+            # fetch inside the resolver; the catalog must stay offline.
+            route = seams["resolve_billing_route"](model, provider=provider)
+            return getattr(route, "billing_mode", None)
+
+        def _entry(model: str, provider: str) -> Optional[Dict[str, Any]]:
+            entry = seams["get_pricing_entry"](model, provider=provider)
+            if entry is None:
+                return None
+
+            def dec(name: str) -> Optional[float]:
+                value = getattr(entry, name, None)
+                return float(value) if value is not None else None
+
+            return {
+                "input": dec("input_cost_per_million"),
+                "output": dec("output_cost_per_million"),
+                "cache_read": dec("cache_read_cost_per_million"),
+                "cache_write": dec("cache_write_cost_per_million"),
+                "source": getattr(entry, "source", None),
+                "pricing_version": getattr(entry, "pricing_version", None),
+            }
+
+        def _models_dev(provider: str, model: str) -> Optional[Dict[str, Any]]:
+            info = seams["get_model_info"](provider, model, allow_network=False)
+            if info is None:
+                return None
+            # ModelInfo defaults costs to 0.0, so 0.0 alone cannot distinguish
+            # "free" from "no data". Presence is proven by a raw cost dict in
+            # the offline registry or by parsed positive rates.
+            raw_present = _raw_models_dev_cost(provider, model) is not None
+            try:
+                has_cost = bool(info.has_cost_data())
+            except Exception:
+                has_cost = False
+            if not raw_present and not has_cost:
+                return None
+            return {
+                "input": _float_or_none(getattr(info, "cost_input", None)),
+                "output": _float_or_none(getattr(info, "cost_output", None)),
+                "cache_read": _float_or_none(getattr(info, "cost_cache_read", None)),
+            }
+
+        return PricingProbe(
+            available=True,
+            picker=_picker,
+            route=_route,
+            entry=_entry,
+            models_dev=_models_dev,
+        )
+
     def load_raw_config(self, profile: Optional[str] = None) -> Dict[str, Any]:
         """Strict raw-config read inside the profile scope (no defaults merge;
         failed reads surface as errors, never as an empty config)."""

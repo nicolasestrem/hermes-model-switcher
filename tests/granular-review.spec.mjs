@@ -78,10 +78,11 @@ test('real API: disabled chain preview and configured disabled state survive rea
 
 test('real API: unavailable catalog is visible and manual exact ID stays usable', async ({ page }) => {
   await open(page);
-  await page.getByTestId('picker-advanced').locator('summary').click();
-  await page.getByLabel('Picker provider', { exact: true }).fill('provider-not-configured');
-  await page.getByTestId('fetch-models').click();
-  await expect(page.getByTestId('picker-error')).toContainText('not available');
+  // The retired picker's replacement is the model combobox: an unavailable
+  // provider surfaces its /models error inline, and exact manual entry remains.
+  await page.getByLabel('New provider', { exact: true }).fill('provider-not-configured');
+  await page.getByLabel('New model', { exact: true }).click();
+  await expect(page.getByTestId('model-combo-error')).toContainText('not available');
   await page.getByLabel('New provider', { exact: true }).fill('nous');
   await page.getByLabel('New model', { exact: true }).fill('deepseek/deepseek-v4.1-flash');
   await expect(page.getByLabel('New model', { exact: true })).toHaveValue('deepseek/deepseek-v4.1-flash');
@@ -116,11 +117,10 @@ test('picker contract fixture: search and selection preserve provider-native IDs
       source: 'contract-fixture', stale: true, fetchedAt: null, error: null } });
   });
   await open(page);
-  await page.getByTestId('picker-advanced').locator('summary').click();
   for (const [provider, id] of [['nous', 'deepseek/deepseek-v4.1-flash'], ['opencode-go', 'deepseek-v4.1-flash']]) {
-    await page.getByLabel('Picker provider', { exact: true }).fill(provider);
-    await page.getByTestId('fetch-models').click();
-    await page.getByLabel('Search models', { exact: true }).fill('deepseek');
+    await page.getByLabel('New provider', { exact: true }).fill(provider);
+    await page.getByLabel('New model', { exact: true }).click();
+    await page.getByLabel('New model', { exact: true }).fill('deepseek');
     await expect(page.getByTestId('model-option-another-model')).toHaveCount(0);
     await page.getByTestId('model-option-' + id).click();
     await expect(page.getByLabel('New provider', { exact: true })).toHaveValue(provider);
@@ -137,11 +137,12 @@ test('picker note: an ok:true catalog carrying a warning still surfaces it', asy
     route.fulfill({ json: { ok: true, provider: 'nous', models: [], fetchedAt: null,
       source: 'curated', stale: true, error: "provider 'nous' reported no models" } }));
   await open(page);
-  await page.getByTestId('picker-advanced').locator('summary').click();
-  await page.getByLabel('Picker provider', { exact: true }).fill('nous');
-  await page.getByTestId('fetch-models').click();
-  await expect(page.getByTestId('picker-note')).toContainText('reported no models');
-  await expect(page.getByTestId('picker-error')).toHaveCount(0);
+  // The combobox note renders an ok:true /models warning without converting
+  // it into a hard error (and without hiding the exact-ID path).
+  await page.getByLabel('New provider', { exact: true }).fill('nous');
+  await page.getByLabel('New model', { exact: true }).click();
+  await expect(page.getByTestId('model-combo-note')).toContainText('reported no models');
+  await expect(page.getByTestId('model-combo-error')).toHaveCount(0);
 });
 
 test('real API: object-shaped diff values render as JSON, never [object Object]', async ({ page }) => {

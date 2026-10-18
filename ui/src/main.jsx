@@ -43,6 +43,1000 @@ function useOpaqueSurface() {
   return bg;
 }
 
+// ---------- ARIA 1.2 combobox ----------
+// Hand-rolled (no new dependency): an editable text input plus a listbox
+// popup. Free-text entry must keep working, so the input is never replaced by
+// a button. The popup is position:fixed and stays INSIDE the plugin root (not
+// document.body) so `.hms-root` tokens still apply while the 360px editor rail
+// and the matrix scroll region (overflow:auto) cannot clip it. Non-modal: no
+// focus trap, Escape returns focus to the input.
+let comboSeq = 0;
+
+function optionSearchText(option) {
+  return String(option.searchText || option.label || option.key || "");
+}
+
+function firstEnabledKey(list) {
+  const found = list.find((o) => !o.disabled);
+  return found ? found.key : null;
+}
+
+function lastEnabledKey(list) {
+  for (let i = list.length - 1; i >= 0; i -= 1) if (!list[i].disabled) return list[i].key;
+  return null;
+}
+
+function ComboBox({
+  label, value, onChange, onSelect, onCommit, options = [],
+  loading = false, error = null, note = null, onRetry = null,
+  emptyMessage = "No matches", loadingLabel = "Loading…",
+  placeholder = "", disabled = false, testId, listboxTestId,
+  errorTestId, retryTestId, noteTestId, skeletonTestId,
+  onOpenChange, minWidth = 360, renderOption = null, className = "",
+}) {
+  const seqRef = useRef(0);
+  if (!seqRef.current) seqRef.current = ++comboSeq;
+  const baseId = "hms-combo-" + seqRef.current;
+  const inputId = baseId + "-input";
+  const listId = baseId + "-listbox";
+  const inputRef = useRef(null);
+  const wrapRef = useRef(null);
+  const listRef = useRef(null);
+  const surface = useOpaqueSurface();
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState(value || "");
+  const [activeKey, setActiveKey] = useState(null);
+  const [rect, setRect] = useState(null);
+  // Filter text used while the popup is open. Usually the input value, but a
+  // pointer open on an already-committed value shows the full list (the user
+  // is browsing, not re-typing the selected slug).
+  const [filterText, setFilterText] = useState(value || "");
+  const openedValue = useRef(value || "");
+
+  useEffect(() => {
+    if (!open) setQuery(value || "");
+  }, [value, open]);
+
+  const q = String(filterText || "").trim().toLowerCase();
+  const visible = useMemo(
+    () => options.filter((o) => !q || optionSearchText(o).toLowerCase().includes(q)),
+    [options, q],
+  );
+
+  const anchor = () => {
+    const node = inputRef.current;
+    if (node) setRect(node.getBoundingClientRect());
+  };
+
+  const openWith = (where, typed) => {
+    if (disabled || open) return;
+    const text = typed === undefined ? (value || "") : typed;
+    openedValue.current = value || "";
+    // A committed value opens the whole list; arbitrary typed text filters it.
+    const committed = options.some((o) => o.key === value);
+    const filter = typed === undefined && committed ? "" : text;
+    const list = options.filter(
+      (o) => !filter.trim() || optionSearchText(o).toLowerCase().includes(filter.trim().toLowerCase()),
+    );
+    anchor();
+    setOpen(true);
+    setFilterText(filter);
+    setQuery(text);
+    setActiveKey(
+      where === "last" ? lastEnabledKey(list)
+        : where === "current" ? (list.find((o) => o.key === value && !o.disabled)?.key ?? firstEnabledKey(list))
+          : firstEnabledKey(list),
+    );
+    onOpenChange?.(true);
+  };
+
+  const close = ({ restore = false } = {}) => {
+    if (!open) return;
+    setOpen(false);
+    setActiveKey(null);
+    setFilterText("");
+    if (restore) {
+      setQuery(openedValue.current);
+      onChange?.(openedValue.current);
+    } else {
+      setQuery(value || "");
+    }
+    onOpenChange?.(false);
+  };
+
+  const selectOption = (option) => {
+    if (!option || option.disabled) return;
+    setQuery(option.key);
+    onChange?.(option.key);
+    onSelect?.(option);
+    setOpen(false);
+    setActiveKey(null);
+    setFilterText("");
+    onOpenChange?.(false);
+    inputRef.current?.focus();
+  };
+
+  const move = (delta) => {
+    const enabled = visible.filter((o) => !o.disabled);
+    if (!enabled.length) return;
+    const idx = enabled.findIndex((o) => o.key === activeKey);
+    const next = idx < 0
+      ? (delta > 0 ? 0 : enabled.length - 1)
+      : ((idx + delta) % enabled.length + enabled.length) % enabled.length;
+    setActiveKey(enabled[next].key);
+  };
+
+  const handleKeyDown = (event) => {
+    if (disabled) return;
+    const key = event.key;
+    if (key === "Escape") {
+      if (open) {
+        event.preventDefault();
+        event.stopPropagation();
+        close({ restore: true });
+        inputRef.current?.focus();
+      }
+      return;
+    }
+    if (event.altKey && (key === "ArrowDown" || key === "ArrowUp")) {
+      event.preventDefault();
+      if (!open) openWith(key === "ArrowDown" ? "first" : "last");
+      return;
+    }
+    if (key === "Enter") {
+      event.preventDefault();
+      if (!open) {
+        openWith("current");
+        return;
+      }
+      const active = visible.find((o) => o.key === activeKey);
+      if (active && !active.disabled) selectOption(active);
+      else {
+        onCommit?.(value || "");
+        close();
+      }
+      return;
+    }
+    if (key === "Tab") {
+      if (open) {
+        onCommit?.(value || "");
+        close();
+      }
+      return; // never trap Tab: the listbox is non-modal
+    }
+    if (!open && key === "ArrowDown") {
+      event.preventDefault();
+      openWith("current");
+      return;
+    }
+    if (!open && key === "ArrowUp") {
+      event.preventDefault();
+      openWith("last");
+      return;
+    }
+    if (key === "ArrowDown" || key === "ArrowUp") {
+      event.preventDefault();
+      move(key === "ArrowDown" ? 1 : -1);
+      return;
+    }
+    if (key === "Home" || key === "End") {
+      if (!open) return;
+      event.preventDefault();
+      setActiveKey(key === "Home" ? firstEnabledKey(visible) : lastEnabledKey(visible));
+      return;
+    }
+    if (key === "PageDown" || key === "PageUp") {
+      if (!open) return;
+      event.preventDefault();
+      move(key === "PageDown" ? 10 : -10);
+      return;
+    }
+    // Space opens an empty trigger; typing a space into a non-empty value is
+    // left to the browser (provider slugs / exact model ids never need it).
+    if (key === " " && !open && !value) {
+      event.preventDefault();
+      openWith("current");
+    }
+  };
+
+  const handleInput = (event) => {
+    const next = event.target.value;
+    setQuery(next);
+    onChange?.(next);
+    if (!open) {
+      openWith("current", next);
+    } else {
+      setFilterText(next);
+      const list = options.filter(
+        (o) => !next.trim() || optionSearchText(o).toLowerCase().includes(next.trim().toLowerCase()),
+      );
+      setActiveKey(firstEnabledKey(list));
+    }
+  };
+
+  // Options that arrive asynchronously (provider catalog / model catalog) must
+  // land on a real active option without stealing a still-valid one.
+  useEffect(() => {
+    if (!open) return;
+    if (!visible.length) {
+      if (activeKey !== null) setActiveKey(null);
+      return;
+    }
+    if (!visible.some((o) => o.key === activeKey && !o.disabled)) {
+      setActiveKey(firstEnabledKey(visible));
+    }
+  }, [open, visible, activeKey]);
+
+  // Keep the active option visible inside the popup (never scroll the page).
+  useEffect(() => {
+    if (!open || !activeKey || !listRef.current) return;
+    const list = listRef.current;
+    const el = list.querySelector('[data-active="true"]');
+    if (!el) return;
+    const top = el.offsetTop;
+    const bottom = top + el.offsetHeight;
+    if (top < list.scrollTop) list.scrollTop = top;
+    else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
+  }, [open, activeKey]);
+
+  // Outside click / scroll / resize. The popup is non-modal: a pointerdown
+  // anywhere outside closes it without touching the already-typed value.
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDown = (event) => {
+      if (!wrapRef.current?.contains(event.target)) close();
+    };
+    const reposition = (event) => {
+      if (event && event.type === "scroll" && listRef.current?.contains(event.target)) return;
+      anchor();
+    };
+    document.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("scroll", reposition, true);
+    window.addEventListener("resize", reposition);
+    return () => {
+      document.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("scroll", reposition, true);
+      window.removeEventListener("resize", reposition);
+    };
+  });
+
+  const activeOption = visible.find((o) => o.key === activeKey);
+  let popupStyle = null;
+  if (open && rect && typeof window !== "undefined") {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const width = Math.min(Math.max(rect.width, minWidth), Math.max(200, vw - 8));
+    const left = Math.min(Math.max(4, rect.left), Math.max(4, vw - width - 4));
+    const cap = vw < 1100 ? Math.round(vh * 0.5) : 320;
+    const spaceBelow = vh - rect.bottom - 8;
+    const spaceAbove = rect.top - 8;
+    const below = spaceBelow >= 160 || spaceBelow >= spaceAbove;
+    const maxHeight = Math.max(120, Math.min(cap, below ? spaceBelow : spaceAbove));
+    let top = below ? rect.bottom + 4 : rect.top - 4 - maxHeight;
+    top = Math.min(Math.max(4, top), Math.max(4, vh - maxHeight - 4));
+    popupStyle = { left, top, width, maxHeight, backgroundColor: surface };
+  }
+
+  return (
+    <div className={`hms-combo ${className}`.trim()} ref={wrapRef} data-testid={testId}>
+      <label htmlFor={inputId}>{label}</label>
+      <input
+        ref={inputRef}
+        id={inputId}
+        type="text"
+        role="combobox"
+        aria-label={label}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={listId}
+        aria-autocomplete="list"
+        aria-activedescendant={open && activeOption ? `${baseId}-opt-${visible.indexOf(activeOption)}` : undefined}
+        aria-busy={loading || undefined}
+        autoComplete="off"
+        spellCheck={false}
+        value={value || ""}
+        placeholder={placeholder}
+        disabled={disabled}
+        onChange={handleInput}
+        onKeyDown={handleKeyDown}
+        onClick={() => { if (!open) openWith("current"); }}
+        onBlur={() => close()}
+      />
+      {open && popupStyle && (
+        <div className="hms-combo-popup" style={popupStyle}
+          data-testid={testId ? `${testId}-popup` : undefined}
+          onMouseDown={(event) => event.preventDefault()}>
+          <div className="hms-combo-list" role="listbox" id={listId} ref={listRef}
+            aria-label={`${label} options`} aria-busy={loading || undefined}
+            data-testid={listboxTestId}>
+            {loading && (
+              <div className="hms-combo-loading" role="status">{loadingLabel}</div>
+            )}
+            {loading && !visible.length && (
+              <div className="hms-combo-skeleton-wrap" aria-hidden="true" data-testid={skeletonTestId}>
+                {[0, 1, 2].map((i) => <div className="hms-combo-skeleton" key={i} />)}
+              </div>
+            )}
+            {error && (
+              <div className="hms-combo-error" role="alert" data-testid={errorTestId}>
+                <span>{error}</span>
+                {onRetry && (
+                  <button type="button" className="hms-combo-retry" data-testid={retryTestId}
+                    onClick={onRetry}>Retry</button>
+                )}
+              </div>
+            )}
+            {!error && note && (
+              <div className="hms-combo-note" role="note" data-testid={noteTestId}>{note}</div>
+            )}
+            {!error && !loading && visible.length === 0 && (
+              <div className="hms-combo-empty" role="presentation">
+                {typeof emptyMessage === "function" ? emptyMessage((filterText || "").trim()) : emptyMessage}
+              </div>
+            )}
+            {!error && visible.map((option, index) => (
+              <div
+                key={option.key}
+                role="option"
+                id={`${baseId}-opt-${index}`}
+                aria-selected={option.key === activeKey}
+                aria-disabled={option.disabled ? "true" : undefined}
+                data-active={option.key === activeKey ? "true" : "false"}
+                data-disabled={option.disabled ? "true" : "false"}
+                data-option-key={option.key}
+                data-testid={option.testId}
+                title={option.disabled ? (option.disabledReason || option.title) : option.title}
+                className="hms-combo-option"
+                onMouseEnter={() => { if (!option.disabled) setActiveKey(option.key); }}
+                onClick={() => selectOption(option)}
+              >
+                {renderOption ? renderOption(option) : <span className="hms-combo-option-label">{option.label || option.key}</span>}
+              </div>
+            ))}
+          </div>
+          {note && !error && !loading && visible.length > 0 && null}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Price hint for one model from the aggregate /catalog row. Provider display
+// strings are rendered verbatim, including a real "$0.00" or "free" for one
+// token direction — that is a zero rate for that direction, not a free model.
+// Only an absent/null display is unknown: a dash plus an explicit
+// screen-reader sentence. Only pricingStatus === "free" earns the badge.
+const CATALOG_UNKNOWN_TITLE = "no list price in the installed catalog; never treated as free";
+const CATALOG_PENDING_TEXT = "prices still loading";
+
+function priceHint(catalogModel) {
+  const unknown = {
+    text: "—",
+    kind: "unknown",
+    title: CATALOG_UNKNOWN_TITLE,
+  };
+
+  if (!catalogModel) return unknown;
+  const status = catalogModel.pricingStatus;
+  if (status === "free") return { text: "free", kind: "free", title: "free route" };
+  if (status === "included") {
+    return { text: "included in subscription", kind: "included", title: "included in subscription" };
+  }
+  if (status === "priced" && catalogModel.cost) {
+    const out = catalogModel.cost.display?.output;
+    if (out) {
+      return { text: `→ ${out} out`, kind: "priced", title: `${out} per 1M output tokens` };
+    }
+    const inp = catalogModel.cost.display?.input;
+    if (inp) {
+      return { text: `→ ${inp} in`, kind: "priced", title: `${inp} per 1M input tokens` };
+    }
+  }
+  return unknown;
+}
+
+function providerStatus(provider) {
+  if (provider.authenticated === false) return "sign-in needed";
+  const hasPricing = (provider.models || []).some(
+    (m) => ["priced", "free", "included"].includes(m.pricingStatus),
+  );
+  return hasPricing ? "priced" : "no list price";
+}
+
+function freshnessText(value) {
+  if (!value) return "no timestamp";
+  return String(value);
+}
+
+// ---------- Model catalog browser ----------
+// A read-only, full-width bird's-eye view of the SAME aggregate /catalog DTO
+// the editor comboboxes consume. Collapsed until asked for; opening it never
+// touches selection, editor state, or a pending review. Prices are rendered
+// verbatim from ``cost.display`` (already formatted per 1M tokens) and an
+// unknown price is never coerced to "$0.00" or a free badge.
+const CATALOG_SR_ONLY = {
+  position: "absolute", left: -9999, width: 1, height: 1, overflow: "hidden",
+};
+const CATALOG_PAGE_SIZE = 50;
+const CATALOG_FLAT_PAGE_SIZE = 100;
+
+function catalogModelsOf(provider) {
+  return Array.isArray(provider && provider.models) ? provider.models : [];
+}
+
+function catalogPriceValue(model) {
+  const v = model && model.cost ? model.cost.input : null;
+  // A provider-stated 0 is a real (cheapest) rate, not unknown; only an
+  // absent or non-numeric input has no comparable numeric price.
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+}
+
+function catalogDisplay(model, field) {
+  const value = model && model.cost && model.cost.display ? model.cost.display[field] : null;
+  // Provider display strings are provider-stated data: render them verbatim,
+  // including "$0.00" (a real zero rate for this direction) and "free" in one
+  // direction. Only an absent/null display is unknown — absent data is never
+  // coerced to a fabricated zero here.
+  return value ? value : null;
+}
+
+function catalogCheapestInput(models) {
+  const priced = models.filter((m) => m.pricingStatus === "priced" && catalogPriceValue(m) !== null);
+  if (!priced.length) return null;
+  priced.sort((a, b) => catalogPriceValue(a) - catalogPriceValue(b));
+  const cheapest = priced[0];
+  return catalogDisplay(cheapest, "input") || `$${catalogPriceValue(cheapest).toFixed(2)}`;
+}
+
+function catalogPriceRange(models) {
+  const priced = models.filter((m) => m.pricingStatus === "priced" && catalogPriceValue(m) !== null);
+  if (!priced.length) return null;
+  const sorted = [...priced].sort((a, b) => catalogPriceValue(a) - catalogPriceValue(b));
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+  const lo = catalogDisplay(first, "input") || `$${catalogPriceValue(first).toFixed(2)}`;
+  const hi = catalogDisplay(last, "input") || `$${catalogPriceValue(last).toFixed(2)}`;
+  return lo === hi ? lo : `${lo}–${hi}`;
+}
+
+// Price cells are deliberately status-first: free/included/unknown come from
+// the catalog's own classification, never from a numeric guess. A present
+// display string — including "$0.00" or "free" for one direction — is rendered
+// verbatim; only a missing display for a priced row is unknown, never zero.
+function CatalogPriceCell({ model, field, pending }) {
+  if (pending) return <span className="hms-catalog-pending">{CATALOG_PENDING_TEXT}</span>;
+  const status = model.pricingStatus;
+  if (status === "free") return <span className="hms-badge hms-badge-free">free</span>;
+  if (status === "included") return <span className="hms-catalog-included">included in subscription</span>;
+  const display = catalogDisplay(model, field);
+  if (display) return <span>{display}</span>;
+  return (
+    <span className="hms-catalog-unknown" title={CATALOG_UNKNOWN_TITLE}
+      aria-label={CATALOG_UNKNOWN_TITLE}>—</span>
+  );
+}
+
+// Price sort puts free routes at zero (they are the cheapest), priced rows by
+// their numeric input price, and every unknown/included row LAST in BOTH
+// directions — an absent price must never look like the cheapest option.
+function catalogSortRows(rows, sort) {
+  const nameOf = (row) => String(row.model.label || row.model.id || "").toLowerCase();
+  const providerOf = (row) => String(row.provider.label || row.provider.id || "").toLowerCase();
+  const priceOf = (model) => {
+    if (model.pricingStatus === "free") return 0;
+    return catalogPriceValue(model);
+  };
+  return [...rows].sort((a, b) => {
+    if (sort === "name") {
+      return nameOf(a).localeCompare(nameOf(b)) || String(a.model.id).localeCompare(String(b.model.id));
+    }
+    if (sort === "provider") {
+      return providerOf(a).localeCompare(providerOf(b)) ||
+        String(a.provider.id).localeCompare(String(b.provider.id)) ||
+        nameOf(a).localeCompare(nameOf(b));
+    }
+    const av = priceOf(a.model);
+    const bv = priceOf(b.model);
+    if (av === null && bv === null) return nameOf(a).localeCompare(nameOf(b));
+    if (av === null) return 1; // unknown always last
+    if (bv === null) return -1;
+    return sort === "price-desc" ? bv - av : av - bv;
+  });
+}
+
+function catalogStatusText(status) {
+  return ["priced", "free", "included", "unknown"].includes(status) ? status : "unknown";
+}
+
+function catalogConfiguredText(routeIndex, providerId, modelId) {
+  const matches = routeIndex.get(providerId + "\u0000" + modelId) || [];
+  if (!matches.length) {
+    return { text: "—", title: "No loaded profile slot routes to this provider/model." };
+  }
+  const profiles = [...new Set(matches.map((s) => s.profileId))];
+  return {
+    text: `${matches.length} slot${matches.length === 1 ? "" : "s"} · ${profiles.join(", ")}`,
+    title: matches.map((s) => `${s.profileId}/${s.slotId}`).join(", "),
+  };
+}
+
+function CatalogRow({ provider, model, pending, grouped, routeIndex, onUse, profileId }) {
+  const configured = catalogConfiguredText(routeIndex, provider.id, model.id);
+  const blocked = provider.authenticated === false;
+  const useId = `catalog-use-${provider.id}-${model.id}`;
+  return (
+    <tr data-model-row data-provider-id={provider.id} data-model-id={model.id}
+      data-pricing-status={catalogStatusText(model.pricingStatus)}>
+      <td data-column="model">
+        <span className="hms-catalog-model-label">{model.label || model.id}</span>{" "}
+        <code className="hms-catalog-model-id">{model.id}</code>
+        {!grouped && <span className="hms-catalog-provider-tag">{provider.id}</span>}
+      </td>
+      <td className="hms-catalog-price" data-column="input">
+        <CatalogPriceCell model={model} field="input" pending={pending} />
+      </td>
+      <td className="hms-catalog-price" data-column="output">
+        <CatalogPriceCell model={model} field="output" pending={pending} />
+      </td>
+      <td data-column="status">{catalogStatusText(model.pricingStatus)}</td>
+      <td data-column="configured" title={configured.title}>{configured.text}</td>
+      <td data-column="use">
+        <button type="button" data-testid={useId} disabled={blocked}
+          title={blocked ? `Sign-in needed for ${provider.id}; this profile cannot route there.` : `Use ${provider.id}/${model.id}`}
+          onClick={() => onUse(provider, model)}>Use</button>
+        {blocked && (
+          <span className="hms-catalog-use-reason">
+            Sign-in needed — not authenticated in profile “{profileId}”.
+          </span>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+function ModelCatalogView({ catalog, profileId, slots, onRefresh, onRetry, onCollapse, onUse }) {
+  const stickyBg = useOpaqueSurface();
+  const searchRef = useRef(null);
+  const [query, setQuery] = useState("");
+  const [freeOnly, setFreeOnly] = useState(false);
+  const [pricedOnly, setPricedOnly] = useState(false);
+  const [grouped, setGrouped] = useState(true);
+  const [sort, setSort] = useState("price-asc");
+  const [expandedGroups, setExpandedGroups] = useState(() => new Set());
+  const [showAllFlat, setShowAllFlat] = useState(false);
+
+  // '/' focuses the catalog search from anywhere on the page, except while the
+  // user is typing in a field (or editing content). Mounted only while open.
+  useEffect(() => {
+    const onKey = (event) => {
+      if (event.key !== "/" || event.altKey || event.ctrlKey || event.metaKey) return;
+      const el = event.target;
+      const tag = el && el.tagName ? el.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (el && el.isContentEditable)) return;
+      event.preventDefault();
+      searchRef.current?.focus();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
+  const data = catalog && catalog.data && catalog.profileId === profileId ? catalog.data : null;
+  const providers = data && Array.isArray(data.providers) ? data.providers : [];
+  const loading = !data && Boolean(catalog && catalog.loading);
+  const error = catalog && catalog.profileId === profileId ? catalog.error : null;
+  const pending = Boolean(data && data.cost && data.cost.pending);
+  const unavailable = new Set(
+    data && data.cost && Array.isArray(data.cost.unavailableProviders)
+      ? data.cost.unavailableProviders
+      : [],
+  );
+
+  const stats = useMemo(() => {
+    const models = providers.flatMap((p) => catalogModelsOf(p));
+    const priced = models.filter((m) => m.pricingStatus === "priced").length;
+    const free = models.filter((m) => m.pricingStatus === "free").length;
+    const unknown = models.filter((m) => m.pricingStatus === "unknown").length;
+    const included = models.filter((m) => m.pricingStatus === "included").length;
+    const pricedProviders = providers.filter((p) =>
+      catalogModelsOf(p).some((m) => m.pricingStatus === "priced")).length;
+    return {
+      providers: providers.length,
+      models: models.length,
+      priced,
+      free,
+      unknown,
+      included,
+      pricedProviders,
+      cheapest: catalogCheapestInput(models),
+      stale: providers.filter((p) => p.stale).length,
+      withFetchTime: providers.filter((p) => Boolean(p.fetchedAt)).length,
+      pending,
+    };
+  }, [data, pending]);
+
+  // One pass over the loaded /state slots: provider+model exact identity is
+  // the join key. 9k-model catalogs stay responsive because rows only look up
+  // a prebuilt map instead of rescanning every slot.
+  const routeIndex = useMemo(() => {
+    const index = new Map();
+    for (const slot of slots || []) {
+      if (!slot || !slot.provider || !slot.model) continue;
+      const key = slot.provider + "\u0000" + slot.model;
+      if (!index.has(key)) index.set(key, []);
+      index.get(key).push(slot);
+    }
+    return index;
+  }, [slots]);
+
+  const q = query.trim().toLowerCase();
+  const matches = (provider, model) => {
+    if (freeOnly && model.pricingStatus !== "free") return false;
+    if (pricedOnly && model.pricingStatus !== "priced") return false;
+    if (!q) return true;
+    return [provider.id, provider.label, model.id, model.label]
+      .some((value) => String(value || "").toLowerCase().includes(q));
+  };
+
+  const rowsByProvider = useMemo(() => providers.map((provider) => ({
+    provider,
+    rows: catalogSortRows(
+      catalogModelsOf(provider).filter((m) => matches(provider, m))
+        .map((m) => ({ provider, model: m })),
+      sort,
+    ),
+  })), [providers, q, freeOnly, pricedOnly, sort]);
+
+  const narrowing = Boolean(q) || freeOnly || pricedOnly;
+  const orderedGroups = sort === "provider"
+    ? [...rowsByProvider].sort((a, b) =>
+      String(a.provider.label || a.provider.id).localeCompare(String(b.provider.label || b.provider.id)) ||
+      String(a.provider.id).localeCompare(String(b.provider.id)))
+    : rowsByProvider;
+  const groups = narrowing ? orderedGroups.filter((g) => g.rows.length > 0) : orderedGroups;
+
+  const flatAll = useMemo(() => {
+    if (grouped) return [];
+    return catalogSortRows(
+      providers.flatMap((provider) => catalogModelsOf(provider)
+        .filter((m) => matches(provider, m))
+        .map((m) => ({ provider, model: m }))),
+      sort,
+    );
+  }, [grouped, providers, q, freeOnly, pricedOnly, sort]);
+  const flatShown = showAllFlat ? flatAll : flatAll.slice(0, CATALOG_FLAT_PAGE_SIZE);
+
+  const toggleGroup = (id) => {
+    setExpandedGroups((old) => {
+      const next = new Set(old);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const clearNarrowing = () => {
+    setQuery("");
+    setFreeOnly(false);
+    setPricedOnly(false);
+  };
+  const toggleFree = () => {
+    setFreeOnly((v) => !v);
+    setPricedOnly(false);
+  };
+  const togglePriced = () => {
+    setPricedOnly((v) => !v);
+    setFreeOnly(false);
+  };
+
+  const noticeProviders = providers.filter((p) => p.warning || unavailable.has(p.id));
+
+  const theadStyle = {
+    textAlign: "left", borderBottom: `1px solid ${THEME.border}`, padding: 4,
+    position: "sticky", top: 0, background: stickyBg, zIndex: 2,
+  };
+
+  return (
+    <div className="hms-catalog-view" data-testid="catalog-view">
+      <header className="hms-catalog-header">
+        <div className="hms-catalog-heading">
+          <h3 id="hms-catalog-title">Model catalog — what this profile can route to</h3>
+          {data ? (
+            <p className="hms-catalog-provenance" data-testid="catalog-provenance">
+              List prices per 1M tokens from the installed Hermes catalog ·{" "}
+              {stats.priced} of {stats.models} models priced
+              {pending ? ` · ${CATALOG_PENDING_TEXT}` : ""}
+              {stats.unknown ? ` · ${stats.unknown} with no list price — never treated as free` : ""}
+            </p>
+          ) : (
+            <p className="hms-catalog-provenance">
+              Reading the installed Hermes catalog for profile <code>{profileId}</code>…
+            </p>
+          )}
+          <p className="hms-note hms-catalog-readonly">
+            Profile scope: <code>{profileId}</code> · Read-only: browsing this catalog never
+            changes configuration or costs.
+          </p>
+        </div>
+        <div className="hms-catalog-actions">
+          <button type="button" data-testid="catalog-view-refresh"
+            aria-label="Refresh catalog for this profile"
+            disabled={Boolean(catalog && catalog.loading)}
+            onClick={() => onRefresh?.()}>
+            {catalog && catalog.loading ? "Refreshing…" : "Refresh catalog"}
+          </button>
+          <button type="button" data-testid="catalog-collapse" onClick={onCollapse}>
+            Collapse
+          </button>
+        </div>
+      </header>
+
+      {data && (
+        <details className="hms-catalog-freshness" data-testid="catalog-freshness-details">
+          <summary>
+            Catalog freshness by provider — {stats.withFetchTime} with a fetch time ·{" "}
+            {stats.stale} of {stats.providers} marked stale
+          </summary>
+          {stats.withFetchTime > 0 ? (
+            <ul>
+              {providers.filter((p) => p.fetchedAt).map((p) => (
+                <li key={p.id} data-provider-freshness={p.id}>
+                  <strong>{p.label || p.id}</strong>: {p.fetchedAt}
+                  {p.stale ? " · stale" : " · fresh"}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="hms-note">
+              No provider in this catalog reported a fetch timestamp. Prices come from the
+              installed snapshot; no freshness time is invented.
+            </p>
+          )}
+        </details>
+      )}
+
+      {data && providers.length > 0 && (
+        <>
+          <dl className="hms-catalog-summary" data-testid="catalog-summary-strip"
+            aria-label="Model catalog summary">
+            <div data-tile="providers">
+              <dt>Providers</dt>
+              <dd>{stats.providers} <span>({stats.pricedProviders} priced)</span></dd>
+            </div>
+            <div data-tile="models">
+              <dt>Models</dt>
+              <dd>{stats.models}
+                <span>({stats.priced} priced · {stats.free} free)</span>
+              </dd>
+            </div>
+            {stats.cheapest && (
+              <div data-tile="cheapest">
+                <dt>Cheapest input</dt>
+                <dd>{stats.cheapest}/Mtok<span>per 1M tokens</span></dd>
+              </div>
+            )}
+            <div data-tile="unknown">
+              <dt>No list price</dt>
+              <dd>{stats.unknown} <span>unknown — never treated as free</span></dd>
+            </div>
+          </dl>
+
+          {pending && (
+            <p className="hms-catalog-pending-note" data-testid="catalog-pending" role="note">
+              Prices are still loading for this catalog. No route is treated as free while
+              cost data is pending.
+            </p>
+          )}
+
+          {!grouped && noticeProviders.length > 0 && (
+            <div className="hms-catalog-notices" data-testid="catalog-provider-notices"
+              role="group" aria-label="Provider catalog notices">
+              {providers.filter((p) => p.warning).map((p) => (
+                <p key={"warning-" + p.id} role="note" data-provider-warning={p.id}>
+                  <strong>{p.label || p.id}</strong>: {p.warning}
+                </p>
+              ))}
+              {providers.filter((p) => unavailable.has(p.id)).map((p) => (
+                <p key={"unavailable-" + p.id} role="note" data-unavailable-provider={p.id}>
+                  <strong>{p.label || p.id}</strong>: prices unavailable — no price is shown,
+                  and nothing is treated as free.
+                </p>
+              ))}
+            </div>
+          )}
+
+          <div className="hms-catalog-controls" role="group" aria-label="Catalog filters">
+            <label className="hms-catalog-search">Search catalog
+              <input ref={searchRef} type="search" data-testid="catalog-search"
+                aria-label="Search model catalog"
+                placeholder="provider, model id, or model name…"
+                value={query} onChange={(e) => setQuery(e.target.value)} />
+            </label>
+            <div className="hms-catalog-toggles">
+              <button type="button" data-testid="catalog-free-only" aria-pressed={freeOnly}
+                onClick={toggleFree}>Free only</button>
+              <button type="button" data-testid="catalog-priced-only" aria-pressed={pricedOnly}
+                onClick={togglePriced}>Priced only</button>
+              <button type="button" data-testid="catalog-group-toggle" aria-pressed={grouped}
+                onClick={() => setGrouped((v) => !v)}>Group by provider</button>
+            </div>
+            <label className="hms-catalog-sort">Sort
+              <select data-testid="catalog-sort" aria-label="Sort model catalog"
+                value={sort} onChange={(e) => setSort(e.target.value)}>
+                <option value="price-asc">Price ↑</option>
+                <option value="price-desc">Price ↓</option>
+                <option value="name">Name</option>
+                <option value="provider">Provider</option>
+              </select>
+            </label>
+          </div>
+
+          {groups.length === 0 || (!grouped && flatAll.length === 0) ? (
+            <div className="hms-catalog-panel" data-testid="catalog-view-empty-matches" role="status">
+              <span>
+                {q
+                  ? `No models or providers match “${query.trim()}”.`
+                  : "No models match these filters."}{" "}
+                Clear the search and filters to see all {stats.models} models.
+              </span>
+              <button type="button" data-testid="catalog-clear-filters" onClick={clearNarrowing}>
+                Clear search and filters
+              </button>
+            </div>
+          ) : (
+            <div className="hms-catalog-scroll" data-testid="catalog-scroll" role="region"
+              aria-label="Scrollable model catalog" tabIndex={0}>
+              <table className="hms-catalog-table" data-testid="catalog-table">
+                <caption style={CATALOG_SR_ONLY}>
+                  Model catalog: providers, per-million-token prices, and configuration status
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col" style={theadStyle}
+                      aria-sort={sort === "name" ? "ascending" : "none"}>Model</th>
+                    <th scope="col" style={{ ...theadStyle, textAlign: "right" }}
+                      aria-label="Input price, US dollars per million tokens"
+                      aria-sort={sort === "price-asc" ? "ascending" : sort === "price-desc" ? "descending" : "none"}>
+                      Input $/1M
+                    </th>
+                    <th scope="col" style={{ ...theadStyle, textAlign: "right" }}
+                      aria-label="Output price, US dollars per million tokens"
+                      aria-sort="none">Output $/1M</th>
+                    <th scope="col" style={theadStyle}>Status</th>
+                    <th scope="col" style={theadStyle}>Configured in</th>
+                    <th scope="col" style={theadStyle}>Action</th>
+                  </tr>
+                </thead>
+                {grouped ? groups.map(({ provider, rows }) => {
+                  const models = catalogModelsOf(provider);
+                  const range = catalogPriceRange(models);
+                  const expanded = expandedGroups.has(provider.id);
+                  const shownRows = expanded ? rows : rows.slice(0, CATALOG_PAGE_SIZE);
+                  return (
+                    <tbody key={provider.id} data-provider-group={provider.id}>
+                      <tr className="hms-catalog-group">
+                        <th scope="colgroup" colSpan={6}>
+                          <span className="hms-catalog-group-head">
+                            <strong>{provider.label || provider.id}</strong>
+                            <code>{provider.id}</code>
+                            <span>{provider.modelCount ?? models.length} models</span>
+                            {range && <span className="hms-catalog-range">range {range}</span>}
+                            <span className="hms-catalog-group-status"
+                              data-auth={provider.authenticated === false ? "no" : "yes"}>
+                              {provider.authenticated === false
+                                ? "not authenticated — sign-in needed"
+                                : "authenticated"}
+                              {provider.configured === false ? " · not configured in this profile" : ""}
+                            </span>
+                            {provider.stale && (
+                              <span className="hms-catalog-stale">
+                                stale snapshot{provider.fetchedAt ? ` · fetched ${provider.fetchedAt}` : ""}
+                              </span>
+                            )}
+                          </span>
+                          {provider.warning && (
+                            <span className="hms-catalog-warning" role="note"
+                              data-provider-warning={provider.id}>{provider.warning}</span>
+                          )}
+                          {unavailable.has(provider.id) && (
+                            <span className="hms-catalog-unavailable" role="note"
+                              data-unavailable-provider={provider.id}>
+                              Prices unavailable for this provider — no price is shown, and
+                              nothing is treated as free.
+                            </span>
+                          )}
+                        </th>
+                      </tr>
+                      {shownRows.map(({ provider: rowProvider, model }) => (
+                        <CatalogRow key={rowProvider.id + "/" + model.id}
+                          provider={rowProvider} model={model} pending={pending}
+                          grouped routeIndex={routeIndex} onUse={onUse} profileId={profileId} />
+                      ))}
+                      {rows.length === 0 && (
+                        <tr data-empty-provider={provider.id}>
+                          <td colSpan={6} className="hms-catalog-no-models">
+                            No models published for this provider. This is not evidence of
+                            free access.
+                          </td>
+                        </tr>
+                      )}
+                      {rows.length > CATALOG_PAGE_SIZE && (
+                        <tr data-cap-row={provider.id}>
+                          <td colSpan={6}>
+                            <button type="button" data-testid={`catalog-show-all-${provider.id}`}
+                              aria-expanded={expanded} onClick={() => toggleGroup(provider.id)}>
+                              {expanded ? "Show fewer" : `Show all ${rows.length}`}
+                            </button>
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  );
+                }) : (
+                  <tbody>
+                    {flatShown.map(({ provider, model }) => (
+                      <CatalogRow key={provider.id + "/" + model.id}
+                        provider={provider} model={model} pending={pending}
+                        grouped={false} routeIndex={routeIndex} onUse={onUse} profileId={profileId} />
+                    ))}
+                    {flatAll.length > CATALOG_FLAT_PAGE_SIZE && (
+                      <tr data-cap-row="flat">
+                        <td colSpan={6}>
+                          <button type="button" data-testid="catalog-show-all-flat"
+                            aria-expanded={showAllFlat} onClick={() => setShowAllFlat((v) => !v)}>
+                            {showAllFlat ? "Show fewer" : `Show all ${flatAll.length}`}
+                          </button>
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                )}
+              </table>
+            </div>
+          )}
+        </>
+      )}
+
+      {!data && loading && (
+        <div className="hms-catalog-panel" role="status" data-testid="catalog-view-loading">
+          Loading model catalog for profile <code>{profileId}</code>…
+        </div>
+      )}
+      {!data && !loading && error && (
+        <div className="hms-catalog-panel" data-kind="error" role="alert"
+          data-testid="catalog-view-error">
+          <span><strong>Catalog failed to load:</strong> {error}</span>
+          <button type="button" data-testid="catalog-view-retry" onClick={() => onRetry?.()}>
+            Retry
+          </button>
+        </div>
+      )}
+      {!data && !loading && !error && (
+        <div className="hms-catalog-panel" role="status" data-testid="catalog-view-idle">
+          <span>The catalog has not been loaded yet.</span>
+          <button type="button" data-testid="catalog-view-load" onClick={() => onRetry?.()}>
+            Load catalog
+          </button>
+        </div>
+      )}
+      {data && error && (
+        <div className="hms-catalog-panel" data-kind="error" role="alert"
+          data-testid="catalog-view-error">
+          <span><strong>Catalog refresh failed:</strong> {error} — showing the last loaded catalog.</span>
+          <button type="button" data-testid="catalog-view-retry" onClick={() => onRetry?.()}>
+            Retry
+          </button>
+        </div>
+      )}
+      {data && providers.length === 0 && (
+        <div className="hms-catalog-panel" role="status" data-testid="catalog-view-empty">
+          <span>
+            This profile reports no providers in its catalog. Nothing here is treated as
+            free; check the profile’s provider configuration.
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const FAMILIES = [
   { id: "main", label: "Main" },
   { id: "delegation", label: "Delegation" },
@@ -256,6 +1250,26 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
 
   const setFilter = (patch) => setFilters({ ...filters, ...patch });
 
+  // Filter comboboxes are strictly local: their options are the distinct
+  // values already present in the loaded state. No network request is made.
+  const providerFilterOptions = useMemo(() => {
+    const values = new Set();
+    for (const s of slots) if (s.provider) values.add(s.provider);
+    return [...values].sort((a, b) => a.localeCompare(b)).map((v) => ({
+      key: v, label: v, searchText: v, testId: `filter-provider-option-${v}`,
+    }));
+  }, [slots]);
+  const modelFilterOptions = useMemo(() => {
+    const values = new Set();
+    for (const s of slots) if (s.model) values.add(s.model);
+    return [...values].sort((a, b) => a.localeCompare(b)).map((v) => ({
+      key: v, label: v, searchText: v, testId: `filter-model-option-${v}`,
+    }));
+  }, [slots]);
+  const filterEmpty = (kind) => (q) => (q
+    ? `No matching ${kind} — press Enter to filter by “${q}”.`
+    : `No ${kind} values in the loaded state.`);
+
   const rowKey = (s) => s.profileId + "/" + s.slotId;
   const writableInView = filtered.filter(canSelectSlot);
   const selectedInView = writableInView.filter((s) => selection.has(rowKey(s)));
@@ -306,10 +1320,18 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
           <option value="all">All tasks</option>
           {subfamilies.map((sf) => <option key={sf} value={sf}>{taskLabel(scoped.find(s => subfamilyOf(s) === sf) || { slotId: sf })}</option>)}
         </select></label>
-        <label className="hms-filter">Provider<input aria-label="Filter by provider" placeholder="provider…" value={filters.provider}
-          onChange={(e) => setFilter({ provider: e.target.value })} /></label>
-        <label className="hms-filter">Model<input aria-label="Filter by model" placeholder="model…" value={filters.model}
-          onChange={(e) => setFilter({ model: e.target.value })} /></label>
+        <ComboBox className="hms-filter" label="Filter by provider" value={filters.provider}
+          onChange={(v) => setFilter({ provider: v })}
+          onSelect={(o) => setFilter({ provider: o.key })}
+          options={providerFilterOptions} placeholder="provider…"
+          emptyMessage={filterEmpty("provider")}
+          testId="filter-provider-combobox" listboxTestId="filter-provider-listbox" />
+        <ComboBox className="hms-filter" label="Filter by model" value={filters.model}
+          onChange={(v) => setFilter({ model: v })}
+          onSelect={(o) => setFilter({ model: o.key })}
+          options={modelFilterOptions} placeholder="model…"
+          emptyMessage={filterEmpty("model")}
+          testId="filter-model-combobox" listboxTestId="filter-model-listbox" />
         <label className="hms-filter">State<select aria-label="Filter by state" value={filters.state}
           onChange={(e) => setFilter({ state: e.target.value })}>
           <option value="all">All states</option>
@@ -456,7 +1478,7 @@ export function chainInvalid(entries) {
 
 function ChangeEditor({
   selection, slots, editor, setEditor, onPreview, onApply, preview, previewInvalid,
-  busy, picker, onFetchModels,
+  busy, catalog, catalogProfileId, onEnsureCatalog, onRefreshCatalog, onRetryCatalog, announce,
 }) {
   const selectedSlots = slots.filter((s) => selection.has(s.profileId + "/" + s.slotId));
   const hasSelection = selectedSlots.length > 0;
@@ -469,6 +1491,157 @@ function ChangeEditor({
   const chainEntries = parseChain(editor.chainText);
   const chainBad = editor.changeType === "chain" && chainInvalid(chainEntries);
   const writableSelected = selectedSlots.filter(canSelectSlot);
+
+  // ---- catalog-backed provider / model comboboxes -----------------------
+  // The aggregate catalog is shared app state, fetched lazily on the first
+  // provider-list open (or an explicit Refresh). Model rows come from the
+  // existing GET /models; price hints are joined from the cached catalog only
+  // when it is already loaded. No extra network call is made for prices.
+  const modelProvider = editor.provider.trim();
+  const [modelOpen, setModelOpen] = useState(false);
+  const [modelState, setModelState] = useState({
+    key: null, provider: "", data: null, error: null, loading: false,
+  });
+  const modelSeq = useRef(0);
+  const fetchModelsRef = useRef(() => {});
+  const modelKey = `${catalogProfileId}\u0000${modelProvider}`;
+  const modelData = modelState.key === modelKey ? modelState.data : null;
+  const modelError = modelState.key === modelKey ? modelState.error : null;
+  const modelLoading = Boolean(modelOpen && modelProvider && (!modelData && !modelError));
+
+  const providerList = (catalog.data && Array.isArray(catalog.data.providers)) ? catalog.data.providers : [];
+  const catalogModelCount = providerList.reduce((n, p) => n + (p.models || []).length, 0);
+  const staleProviderCount = providerList.filter((p) => p.stale).length;
+  const catalogModels = useMemo(() => {
+    const map = new Map();
+    for (const p of providerList) {
+      for (const m of p.models || []) map.set(`${p.id}\u0000${m.id}`, m);
+    }
+    return map;
+  }, [catalog.data]);
+
+  const providerOptions = useMemo(() => providerList.map((p) => ({
+    key: p.id,
+    label: p.id,
+    searchText: `${p.label || ""} ${p.id}`,
+    disabled: p.authenticated === false,
+    disabledReason: p.authenticated === false
+      ? (p.warning || "this provider is not authenticated in this profile")
+      : undefined,
+    data: p,
+    testId: `provider-option-${p.id}`,
+  })), [catalog.data]);
+
+  const modelOptions = useMemo(() => {
+    const rows = modelData?.models || [];
+    const providerId = modelData?.provider || modelProvider;
+    return rows.map((m) => {
+      const hint = priceHint(catalogModels.get(`${providerId}\u0000${m.id}`));
+      return {
+        key: m.id,
+        label: m.id,
+        searchText: `${m.id} ${m.name || ""}`,
+        data: { ...m, hint },
+        testId: `model-option-${m.id}`,
+        title: hint.kind === "unknown" ? hint.title : undefined,
+      };
+    });
+  }, [modelData, catalogModels, modelProvider]);
+
+  const renderProviderOption = (option) => {
+    const p = option.data;
+    const status = providerStatus(p);
+    const reason = p.warning || "this provider is not authenticated in this profile";
+    return (
+      <>
+        <span className="hms-opt-main">
+          <strong className="hms-opt-name">{p.label || p.id}</strong>
+          <code className="hms-opt-slug">{p.id}</code>
+        </span>
+        <span className="hms-opt-status" data-status={status}>{status}</span>
+        {(p.authenticated === false || p.warning) && (
+          <span className="hms-opt-reason">
+            {p.authenticated === false ? `Sign-in needed — ${reason}` : reason}
+          </span>
+        )}
+      </>
+    );
+  };
+
+  const renderModelOption = (option) => {
+    const hint = option.data.hint;
+    return (
+      <>
+        <span className="hms-opt-main">
+          <code className="hms-opt-id">{option.data.id}</code>
+          {option.data.name && option.data.name !== option.data.id && (
+            <span className="hms-opt-name">{option.data.name}</span>
+          )}
+        </span>
+        <span className={`hms-price hms-price-${hint.kind}`} data-price-kind={hint.kind}
+          title={hint.title}
+          aria-label={hint.kind === "unknown" ? hint.title : undefined}>
+          {hint.kind === "free"
+            ? <span className="hms-badge hms-badge-free">free</span>
+            : hint.text}
+        </span>
+      </>
+    );
+  };
+
+  const chooseProvider = (option) => {
+    const p = option.data;
+    const knownModels = p.models || [];
+    const keepModel = !editor.model || knownModels.some((m) => m.id === editor.model);
+    set({ provider: p.id, model: keepModel ? editor.model : "" });
+    announce?.(`Provider set to ${p.id}${knownModels.length ? ` — ${knownModels.length} models` : ""}`);
+  };
+
+  const chooseModel = (option) => {
+    const provider = modelData?.provider || modelProvider;
+    set({ provider, model: option.key, changeType: "set" });
+    announce?.(`Route set to ${provider}/${option.key}`);
+  };
+
+  fetchModelsRef.current = async (provider, { retry = false } = {}) => {
+    if (!provider) return;
+    const pid = catalogProfileId;
+    const key = `${pid}\u0000${provider}`;
+    if (!retry && modelState.key === key && (modelState.loading || modelState.data || modelState.error)) return;
+    const seq = ++modelSeq.current;
+    setModelState({ key, provider, data: null, error: null, loading: true });
+    try {
+      const data = await Promise.race([
+        api.getModels({ provider, profileId: pid }),
+        new Promise((_, reject) => setTimeout(
+          () => reject(new Error("Model catalog timed out after 1.2s — retry or type an exact model id.")),
+          1200,
+        )),
+      ]);
+      if (seq !== modelSeq.current) return;
+      setModelState({ key, provider: data.provider || provider, data, error: null, loading: false });
+    } catch (err) {
+      if (seq !== modelSeq.current) return;
+      // ApiError already carries the sanitized server message; avoid rendering
+      // the literal "undefined" for unexpected throws.
+      const message = err && typeof err.message === "string" && err.message
+        ? err.message : "model catalog request failed";
+      setModelState({ key, provider, data: null, error: message, loading: false });
+    }
+  };
+
+  // Debounce model-catalog loads while the combobox is open: 250ms after the
+  // provider settles, then one request (a 1200ms hard timeout lives above).
+  useEffect(() => {
+    if (!modelOpen) return undefined;
+    const provider = editor.provider.trim();
+    if (!provider) return undefined;
+    const key = `${catalogProfileId}\u0000${provider}`;
+    if (modelState.key === key && (modelState.loading || modelState.data || modelState.error)) return undefined;
+    const timer = setTimeout(() => fetchModelsRef.current(provider), 250);
+    return () => clearTimeout(timer);
+  }, [modelOpen, editor.provider, catalogProfileId]);
+
   // Applicability is stated in words: a change type that cannot reach every
   // selected target names the excluded ones instead of silently dropping them
   // from the review.
@@ -529,10 +1702,45 @@ function ChangeEditor({
 
         {editor.changeType === "set" && (
           <>
-            <label>New provider <input value={scalarOnly ? "openrouter" : editor.provider} disabled={scalarOnly}
-              onChange={(e) => set({ provider: e.target.value })} aria-label="New provider" /></label>
-            <label>New model <input value={editor.model}
-              onChange={(e) => set({ model: e.target.value })} aria-label="New model" /></label>
+            <ComboBox label="New provider"
+              value={scalarOnly ? "openrouter" : editor.provider}
+              disabled={scalarOnly}
+              onChange={(v) => set({ provider: v })}
+              onSelect={chooseProvider}
+              onOpenChange={(isOpen) => { if (isOpen) onEnsureCatalog?.(); }}
+              options={providerOptions}
+              loading={Boolean(catalog.loading)}
+              error={catalog.error || null}
+              onRetry={onRetryCatalog}
+              errorTestId="catalog-error" retryTestId="catalog-retry"
+              loadingLabel="Loading provider catalog…"
+              placeholder="nous / opencode-go / …"
+              emptyMessage={(q) => (q
+                ? `No provider matches “${q}” — you can still type an exact provider slug.`
+                : "No providers in this profile’s catalog — type an exact provider slug.")}
+              testId="provider-combobox" listboxTestId="provider-listbox"
+              renderOption={renderProviderOption} />
+            <ComboBox label="New model"
+              value={editor.model}
+              onChange={(v) => set({ model: v })}
+              onSelect={chooseModel}
+              onOpenChange={setModelOpen}
+              options={modelOptions}
+              loading={modelLoading}
+              error={modelError}
+              note={modelData?.error || null}
+              onRetry={() => fetchModelsRef.current(modelProvider, { retry: true })}
+              errorTestId="model-combo-error" retryTestId="model-combo-retry"
+              noteTestId="model-combo-note" skeletonTestId="model-skeleton"
+              loadingLabel="Loading models…"
+              placeholder="provider-native model id"
+              emptyMessage={(q) => {
+                if (q) return `No catalog match — press Enter to use “${q}” as an exact model id.`;
+                if (!modelProvider) return "Choose a provider to browse models — or type an exact model id.";
+                return "No catalog models for this provider — press Enter to use the typed value as an exact model id.";
+              }}
+              testId="model-combobox" listboxTestId="model-listbox"
+              renderOption={renderModelOption} />
           </>
         )}
 
@@ -572,58 +1780,45 @@ function ChangeEditor({
           {removalTargets.length > 0 && <p role="note">Remove this exact route from {removalTargets.length} selected configured slot(s). Removal takes precedence over a model change for these targets.</p>}
         </details>
 
-        {/* Provider-native model picker: exact ids from the installed catalog,
-            never a guessed list. Manual entry stays available above. */}
-        <details data-testid="picker-advanced"><summary>Browse provider models</summary>
-        <fieldset data-testid="model-picker-controls"
-          style={{ border: `1px solid ${THEME.border}`, borderRadius: 6, padding: 8 }}>
-          <legend>Model picker (exact catalog ids)</legend>
-          <label style={{ display: "block" }}>Provider
-            <input value={editor.pickerProvider} onChange={(e) => set({ pickerProvider: e.target.value })}
-              style={{ display: "block", marginTop: 4 }} aria-label="Picker provider" placeholder="nous / opencode-go / …" /></label>
-          <label style={{ display: "block" }}>Profile scope (optional)
-            <input value={editor.pickerProfileId} onChange={(e) => set({ pickerProfileId: e.target.value })}
-              style={{ display: "block", marginTop: 4, marginBottom: 6 }} aria-label="Picker profile" placeholder="default" /></label>
-          <button data-testid="fetch-models" disabled={busy || picker.loading || !editor.pickerProvider.trim()}
-            onClick={() => onFetchModels(false)}>Fetch models</button>
-          <button data-testid="fetch-models-refresh" disabled={busy || picker.loading || !editor.pickerProvider.trim()}
-            onClick={() => onFetchModels(true)}>Refresh catalog</button>
-          {picker.error && (
-            <div role="alert" data-testid="picker-error" style={{ color: THEME.danger }}>{picker.error}</div>
-          )}
-          {picker.loading && <p role="status">Loading model catalog…</p>}
-          {picker.data && (
-            <div data-testid="model-picker" style={{ marginTop: 6 }}>
-              <div data-testid="picker-freshness" style={{ color: THEME.muted, fontSize: 13 }}>
-                provider <code>{picker.data.provider}</code> · source {picker.data.source || "unknown"} ·
-                {" "}fetched {picker.data.fetchedAt || "unverified"}
-                {picker.data.stale ? <> · <strong style={{ color: THEME.warn }}>stale</strong></> : null}
-              </div>
-              {picker.data.error && (
-                <div role="note" data-testid="picker-note" style={{ color: THEME.warn }}>{picker.data.error}</div>
-              )}
-              <label>Search models <input aria-label="Search models" value={editor.modelSearch || ""}
-                onChange={(e) => set({ modelSearch: e.target.value })} /></label>
-              <ul style={{ listStyle: "none", padding: 0, maxHeight: 180, overflow: "auto" }}>
-                {(picker.data.models || []).filter((model) => `${model.name} ${model.id}`.toLowerCase().includes((editor.modelSearch || "").toLowerCase())).map((m) => (
-                  <li key={m.id}>
-                    <button data-testid={`model-option-${m.id}`} data-model-id={m.id}
-                      onClick={() => set({ provider: picker.data.provider, model: m.id, changeType: "set" })}>
-                      {m.name || m.id}
-                    </button>
-                  </li>
-                ))}
-                {(picker.data.models || []).length === 0 && (
-                  <li style={{ color: THEME.muted }}>This provider returned no models. You can still enter an exact model ID above.</li>
-                )}
-                {(picker.data.models || []).length > 0 && !(picker.data.models || []).some((model) => `${model.name} ${model.id}`.toLowerCase().includes((editor.modelSearch || "").toLowerCase())) && (
-                  <li role="status" style={{ color: THEME.muted }}>No models match your search. Try a shorter name or clear the search.</li>
-                )}
-              </ul>
-            </div>
-          )}
-        </fieldset>
-        </details>
+        {/* Catalog controls replace the old collapsible picker: the provider
+            and model fields above ARE the catalog browser. Only an explicit
+            click sends refresh=1; opening the list never does. */}
+        <div className="hms-catalog-tools" data-testid="picker-advanced">
+          <div className="hms-catalog-actions">
+            <button type="button" data-testid="refresh-catalog"
+              disabled={busy || catalog.loading}
+              onClick={() => onRefreshCatalog?.()}>
+              {catalog.loading ? "Refreshing…" : "Refresh catalog"}
+            </button>
+            <span className="hms-note">Scope: <code>{catalogProfileId}</code></span>
+          </div>
+          <div className="hms-catalog-freshness" data-testid="catalog-freshness">
+            {catalog.error && (
+              <div role="alert" data-testid="catalog-inline-error">{catalog.error}</div>
+            )}
+            {!catalog.data && !catalog.error && (
+              <span className="hms-note">Catalog not loaded — open the provider list or refresh.</span>
+            )}
+            {catalog.data && (
+              <>
+                <span className="hms-note" data-testid="catalog-summary">
+                  {providerList.length} providers · {catalogModelCount} models ·{" "}
+                  {catalog.data.cost?.pending ? "cost pending · " : ""}
+                  {staleProviderCount ? `${staleProviderCount} stale` : "fresh"}
+                </span>
+                <ul className="hms-freshness-list" aria-label="Provider catalog freshness">
+                  {providerList.map((p) => (
+                    <li key={p.id} data-provider-freshness={p.id}>
+                      <code>{p.id}</code> — {freshnessText(p.fetchedAt)}
+                      {p.stale ? <strong> · stale</strong> : null}
+                      {p.warning ? <span> · {p.warning}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </div>
+        </div>
 
         <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
           <input type="checkbox" checked={editor.ackUnknownCost}
@@ -993,7 +2188,7 @@ export function buildPresetChanges(preset, slots) {
 
 const EMPTY_EDITOR = {
   changeType: "set", provider: "", model: "", chainText: "",
-  removeExact: "", ackUnknownCost: false, pickerProvider: "", pickerProfileId: "",
+  removeExact: "", ackUnknownCost: false,
 };
 
 function App() {
@@ -1027,9 +2222,16 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [saveName, setSaveName] = useState("");
   const [editor, setEditor] = useState(EMPTY_EDITOR);
-  const [picker, setPicker] = useState({ data: null, error: null, loading: false });
+  // Lazy, shared aggregate catalog state. One fetch per profileId; only an
+  // explicit Refresh sends refresh=1. Never fetched on mount.
+  const [catalog, setCatalog] = useState({ profileId: null, data: null, error: null, loading: false });
+  // Bird's-eye catalog section is collapsed until the user asks for it. The
+  // section is a sibling of the workspace, so toggling it can never unmount
+  // or reset selection/editor/preview state.
+  const [catalogOpen, setCatalogOpen] = useState(false);
   const reviewSeq = useRef(0);
-  const pickerSeq = useRef(0);
+  const catalogSeq = useRef(0);
+  const catalogCache = useRef(new Map());
   const loadSeq = useRef(0);
 
   const announce = (msg, kind = "info") => setStatus({ text: msg, kind });
@@ -1069,10 +2271,6 @@ function App() {
     const { ackUnknownCost: oldAck, ...oldIntent } = editor;
     const { ackUnknownCost: newAck, ...newIntent } = next;
     if (JSON.stringify(oldIntent) !== JSON.stringify(newIntent)) invalidateReviews();
-    if (next.pickerProvider !== editor.pickerProvider || next.pickerProfileId !== editor.pickerProfileId) {
-      pickerSeq.current += 1;
-      setPicker({ data: null, error: null, loading: false });
-    }
     setEditor(next);
   };
 
@@ -1101,6 +2299,9 @@ function App() {
   useEffect(() => { load(); }, []);
 
   const slots = state ? state.slots : [];
+  // Scope for /catalog and /models: the single checked profile, else default
+  // (same rule the retired picker used). The freshness line states the scope.
+  const catalogProfileId = filters.profileIds.length === 1 ? filters.profileIds[0] : "default";
   const selectedSlots = slots.filter((slot) => selection.has(slot.profileId + "/" + slot.slotId));
   const customChanges = buildCustomChanges(editor, selectedSlots);
   const customFingerprint = "custom:" + JSON.stringify(customChanges);
@@ -1146,21 +2347,71 @@ function App() {
     await runPreview(buildPresetChanges(preset, slots), "preset:" + preset.id);
   };
 
-  const fetchModels = async (refresh) => {
-    const seq = ++pickerSeq.current;
-    setPicker({ data: null, error: null, loading: true });
+  const loadCatalog = async ({ refresh = false, force = false } = {}) => {
+    const pid = catalogProfileId;
+    const cached = catalogCache.current.get(pid);
+    if (!refresh && !force && cached) {
+      setCatalog({ profileId: pid, data: cached, error: null, loading: false });
+      return;
+    }
+    if (catalog.loading && catalog.profileId === pid) return;
+    const seq = ++catalogSeq.current;
+    setCatalog((prev) => ({
+      profileId: pid,
+      data: prev.profileId === pid ? prev.data : null,
+      error: null,
+      loading: true,
+    }));
     try {
-      const data = await api.getModels({ provider: editor.pickerProvider,
-        profileId: editor.pickerProfileId || (filters.profileIds.length === 1 ? filters.profileIds[0] : "default"), refresh });
-      if (seq === pickerSeq.current) setPicker({ data, error: null, loading: false });
+      const data = await api.getCatalog({ profileId: pid, refresh });
+      if (seq !== catalogSeq.current) return;
+      catalogCache.current.set(pid, data);
+      setCatalog({ profileId: pid, data, error: null, loading: false });
+      const providers = Array.isArray(data.providers) ? data.providers : [];
+      const models = providers.reduce((n, p) => n + (p.models || []).length, 0);
+      const priced = providers.reduce((n, p) =>
+        n + (p.models || []).filter((m) => ["priced", "free", "included"].includes(m.pricingStatus)).length, 0);
+      announce(`${models} models available, ${priced} priced`);
     } catch (e) {
-      // Mirror the load path's safety: a non-Error rejection has no `.message`,
-      // so `e.message` would render the literal "undefined" in the picker alert.
-      if (seq === pickerSeq.current) {
-        setPicker({ data: null, error: e instanceof ApiError ? e.message : String(e), loading: false });
-      }
+      if (seq !== catalogSeq.current) return;
+      setCatalog((prev) => ({
+        profileId: pid,
+        data: prev.profileId === pid ? prev.data : null,
+        error: e instanceof ApiError ? e.message : String(e),
+        loading: false,
+      }));
     }
   };
+
+  // The trigger is the ONLY thing that opens the section; it shares the
+  // editor's lazy cache, so opening after the picker loaded costs zero extra
+  // requests. A profile-scope change while open fetches that profile once.
+  const toggleCatalog = () => {
+    if (!catalogOpen) loadCatalog();
+    setCatalogOpen((open) => !open);
+  };
+  useEffect(() => {
+    if (!catalogOpen) return;
+    if (catalog.profileId !== catalogProfileId && !catalog.loading) loadCatalog();
+  }, [catalogOpen, catalogProfileId, catalog.profileId, catalog.loading]);
+
+  // Row action: exactly the editor's existing model-option behavior, then
+  // bring the rail into view. Never touches acknowledgment or selection.
+  const useCatalogRoute = (provider, model) => {
+    if (provider.authenticated === false) return;
+    editEditor({ ...editor, changeType: "set", provider: provider.id, model: model.id });
+    announce(`Route set to ${provider.id}/${model.id}`);
+    const rail = rootRef.current?.querySelector('[data-testid="change-editor"]');
+    const reduce = typeof window !== "undefined" && typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    rail?.scrollIntoView?.({ behavior: reduce ? "auto" : "smooth", block: "start" });
+    rail?.querySelector('[data-testid="provider-combobox"] input')?.focus({ preventScroll: true });
+  };
+
+  const catalogTriggerCount = catalog.data && catalog.profileId === catalogProfileId
+    ? (Array.isArray(catalog.data.providers) ? catalog.data.providers : [])
+      .reduce((n, p) => n + (Array.isArray(p.models) ? p.models.length : 0), 0)
+    : null;
 
   const applyPreview = async () => {
     if (!canApply) return;
@@ -1298,8 +2549,29 @@ function App() {
       <div className="hms-workspace-tools">
         <button data-testid="refresh-state" disabled={busy} onClick={() => load()}>Refresh state</button>
         {operation && !showOperation && <button onClick={openDrawer}>Show last operation</button>}
+        <button type="button" data-testid="catalog-toggle" aria-expanded={catalogOpen}
+          aria-controls="hms-model-catalog" onClick={toggleCatalog}>
+          {catalogTriggerCount === null
+            ? "Browse model catalog"
+            : `Browse model catalog · ${catalogTriggerCount} model${catalogTriggerCount === 1 ? "" : "s"}`}
+        </button>
         <span className="hms-note">Configuration changes apply after review. Existing sessions may keep their current model.</span>
       </div>
+
+      {/* Bird's-eye catalog: full width, directly below the tools row and
+          ABOVE the workspace grid. The section placeholder always exists so
+          aria-controls is valid; its content mounts only when opened and the
+          workspace is never remounted by the toggle. */}
+      <section id="hms-model-catalog" className="hms-catalog" data-testid="catalog-section"
+        aria-label="Model catalog" hidden={!catalogOpen}>
+        {catalogOpen && (
+          <ModelCatalogView catalog={catalog} profileId={catalogProfileId} slots={slots}
+            onRefresh={() => loadCatalog({ refresh: true })}
+            onRetry={() => loadCatalog({ force: true })}
+            onCollapse={() => setCatalogOpen(false)}
+            onUse={useCatalogRoute} />
+        )}
+      </section>
 
       {reviewedPreset && (
         <section aria-label="Preset review" data-testid="preset-review"
@@ -1339,7 +2611,12 @@ function App() {
         )}
         <ChangeEditor
           selection={selection} slots={slots}
-          editor={editor} setEditor={editEditor} picker={picker} onFetchModels={fetchModels}
+          editor={editor} setEditor={editEditor}
+          catalog={catalog} catalogProfileId={catalogProfileId}
+          onEnsureCatalog={() => loadCatalog()}
+          onRefreshCatalog={() => loadCatalog({ refresh: true })}
+          onRetryCatalog={() => loadCatalog({ force: true })}
+          announce={announce}
           onPreview={() => runPreview(customChanges, customFingerprint)}
           onApply={applyPreview}
           preview={activePreview && previewFor.startsWith("custom:") ? activePreview : null}

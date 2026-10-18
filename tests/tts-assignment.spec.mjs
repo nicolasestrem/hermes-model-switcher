@@ -6,6 +6,9 @@ const BASE = '/api/plugins/hermes-model-switcher';
 
 async function openAssignmentFixture(page) {
   await page.route('**/tests/mock-api.js', r => r.fulfill({ body: '', contentType: 'application/javascript' }));
+  await page.route('**' + BASE + '/catalog?*', r => r.fulfill({ json: {
+    ok: true, profileId: 'default', providers: [], cost: { pending: false, unavailableProviders: [] }, error: null,
+  } }));
   await page.route('**' + BASE + '/state', r => r.fulfill({ json: {
     ok: true, profiles: [{ id: 'default', name: 'Default', writable: true }], presets: [],
     slots: [
