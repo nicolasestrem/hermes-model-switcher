@@ -49,8 +49,12 @@ test("collapsed by default, opens without resetting the workspace, and fetches o
   // Build real workspace state: selection, editor values, acknowledgment and a
   // completed preview. Opening the catalog must preserve ALL of it.
   await page.getByLabel("Select default main", { exact: true }).check();
-  await providerInput(page).fill("nous");
-  await modelInput(page).fill("hermes-4-405b");
+  // The editor dropdown loads the shared catalog lazily on focus; the browser
+  // section below reuses that cache instead of fetching again.
+  await providerInput(page).focus();
+  await expect(providerInput(page).locator('option[value="nous"]')).toHaveCount(1);
+  await providerInput(page).selectOption("nous");
+  await modelInput(page).selectOption("hermes-4-405b");
   await page.getByLabel("I acknowledge unknown-cost routes").check();
   await page.getByRole("button", { name: "Preview changes", exact: true }).click();
   await expect(page.getByTestId("preview-panel")).toBeVisible();

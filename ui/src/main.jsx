@@ -43,362 +43,17 @@ function useOpaqueSurface() {
   return bg;
 }
 
-// ---------- ARIA 1.2 combobox ----------
-// Hand-rolled (no new dependency): an editable text input plus a listbox
-// popup. Free-text entry must keep working, so the input is never replaced by
-// a button. The popup is position:fixed and stays INSIDE the plugin root (not
-// document.body) so `.hms-root` tokens still apply while the 360px editor rail
-// and the matrix scroll region (overflow:auto) cannot clip it. Non-modal: no
-// focus trap, Escape returns focus to the input.
-let comboSeq = 0;
+// ---------- Native route dropdowns ----------
+// Provider and model are plain <select>s: one click shows every choice, the
+// browser handles keyboard and screen-reader behaviour, and nothing pops
+// outside the plugin root. Exact hand-typed ids (custom endpoints, routes the
+// catalog does not list) stay possible through an explicit "Other" entry that
+// reveals a labelled text field.
+const OTHER_VALUE = "__other__";
 
-function optionSearchText(option) {
-  return String(option.searchText || option.label || option.key || "");
-}
-
-function firstEnabledKey(list) {
-  const found = list.find((o) => !o.disabled);
-  return found ? found.key : null;
-}
-
-function lastEnabledKey(list) {
-  for (let i = list.length - 1; i >= 0; i -= 1) if (!list[i].disabled) return list[i].key;
-  return null;
-}
-
-function ComboBox({
-  label, value, onChange, onSelect, onCommit, options = [],
-  loading = false, error = null, note = null, onRetry = null,
-  emptyMessage = "No matches", loadingLabel = "Loading…",
-  placeholder = "", disabled = false, testId, listboxTestId,
-  errorTestId, retryTestId, noteTestId, skeletonTestId,
-  onOpenChange, minWidth = 360, renderOption = null, className = "",
-}) {
-  const seqRef = useRef(0);
-  if (!seqRef.current) seqRef.current = ++comboSeq;
-  const baseId = "hms-combo-" + seqRef.current;
-  const inputId = baseId + "-input";
-  const listId = baseId + "-listbox";
-  const inputRef = useRef(null);
-  const wrapRef = useRef(null);
-  const listRef = useRef(null);
-  const surface = useOpaqueSurface();
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState(value || "");
-  const [activeKey, setActiveKey] = useState(null);
-  const [rect, setRect] = useState(null);
-  // Filter text used while the popup is open. Usually the input value, but a
-  // pointer open on an already-committed value shows the full list (the user
-  // is browsing, not re-typing the selected slug).
-  const [filterText, setFilterText] = useState(value || "");
-  const openedValue = useRef(value || "");
-
-  useEffect(() => {
-    if (!open) setQuery(value || "");
-  }, [value, open]);
-
-  const q = String(filterText || "").trim().toLowerCase();
-  const visible = useMemo(
-    () => options.filter((o) => !q || optionSearchText(o).toLowerCase().includes(q)),
-    [options, q],
-  );
-
-  const anchor = () => {
-    const node = inputRef.current;
-    if (node) setRect(node.getBoundingClientRect());
-  };
-
-  const openWith = (where, typed) => {
-    if (disabled || open) return;
-    const text = typed === undefined ? (value || "") : typed;
-    openedValue.current = value || "";
-    // A committed value opens the whole list; arbitrary typed text filters it.
-    const committed = options.some((o) => o.key === value);
-    const filter = typed === undefined && committed ? "" : text;
-    const list = options.filter(
-      (o) => !filter.trim() || optionSearchText(o).toLowerCase().includes(filter.trim().toLowerCase()),
-    );
-    anchor();
-    setOpen(true);
-    setFilterText(filter);
-    setQuery(text);
-    setActiveKey(
-      where === "last" ? lastEnabledKey(list)
-        : where === "current" ? (list.find((o) => o.key === value && !o.disabled)?.key ?? firstEnabledKey(list))
-          : firstEnabledKey(list),
-    );
-    onOpenChange?.(true);
-  };
-
-  const close = ({ restore = false } = {}) => {
-    if (!open) return;
-    setOpen(false);
-    setActiveKey(null);
-    setFilterText("");
-    if (restore) {
-      setQuery(openedValue.current);
-      onChange?.(openedValue.current);
-    } else {
-      setQuery(value || "");
-    }
-    onOpenChange?.(false);
-  };
-
-  const selectOption = (option) => {
-    if (!option || option.disabled) return;
-    setQuery(option.key);
-    onChange?.(option.key);
-    onSelect?.(option);
-    setOpen(false);
-    setActiveKey(null);
-    setFilterText("");
-    onOpenChange?.(false);
-    inputRef.current?.focus();
-  };
-
-  const move = (delta) => {
-    const enabled = visible.filter((o) => !o.disabled);
-    if (!enabled.length) return;
-    const idx = enabled.findIndex((o) => o.key === activeKey);
-    const next = idx < 0
-      ? (delta > 0 ? 0 : enabled.length - 1)
-      : ((idx + delta) % enabled.length + enabled.length) % enabled.length;
-    setActiveKey(enabled[next].key);
-  };
-
-  const handleKeyDown = (event) => {
-    if (disabled) return;
-    const key = event.key;
-    if (key === "Escape") {
-      if (open) {
-        event.preventDefault();
-        event.stopPropagation();
-        close({ restore: true });
-        inputRef.current?.focus();
-      }
-      return;
-    }
-    if (event.altKey && (key === "ArrowDown" || key === "ArrowUp")) {
-      event.preventDefault();
-      if (!open) openWith(key === "ArrowDown" ? "first" : "last");
-      return;
-    }
-    if (key === "Enter") {
-      event.preventDefault();
-      if (!open) {
-        openWith("current");
-        return;
-      }
-      const active = visible.find((o) => o.key === activeKey);
-      if (active && !active.disabled) selectOption(active);
-      else {
-        onCommit?.(value || "");
-        close();
-      }
-      return;
-    }
-    if (key === "Tab") {
-      if (open) {
-        onCommit?.(value || "");
-        close();
-      }
-      return; // never trap Tab: the listbox is non-modal
-    }
-    if (!open && key === "ArrowDown") {
-      event.preventDefault();
-      openWith("current");
-      return;
-    }
-    if (!open && key === "ArrowUp") {
-      event.preventDefault();
-      openWith("last");
-      return;
-    }
-    if (key === "ArrowDown" || key === "ArrowUp") {
-      event.preventDefault();
-      move(key === "ArrowDown" ? 1 : -1);
-      return;
-    }
-    if (key === "Home" || key === "End") {
-      if (!open) return;
-      event.preventDefault();
-      setActiveKey(key === "Home" ? firstEnabledKey(visible) : lastEnabledKey(visible));
-      return;
-    }
-    if (key === "PageDown" || key === "PageUp") {
-      if (!open) return;
-      event.preventDefault();
-      move(key === "PageDown" ? 10 : -10);
-      return;
-    }
-    // Space opens an empty trigger; typing a space into a non-empty value is
-    // left to the browser (provider slugs / exact model ids never need it).
-    if (key === " " && !open && !value) {
-      event.preventDefault();
-      openWith("current");
-    }
-  };
-
-  const handleInput = (event) => {
-    const next = event.target.value;
-    setQuery(next);
-    onChange?.(next);
-    if (!open) {
-      openWith("current", next);
-    } else {
-      setFilterText(next);
-      const list = options.filter(
-        (o) => !next.trim() || optionSearchText(o).toLowerCase().includes(next.trim().toLowerCase()),
-      );
-      setActiveKey(firstEnabledKey(list));
-    }
-  };
-
-  // Options that arrive asynchronously (provider catalog / model catalog) must
-  // land on a real active option without stealing a still-valid one.
-  useEffect(() => {
-    if (!open) return;
-    if (!visible.length) {
-      if (activeKey !== null) setActiveKey(null);
-      return;
-    }
-    if (!visible.some((o) => o.key === activeKey && !o.disabled)) {
-      setActiveKey(firstEnabledKey(visible));
-    }
-  }, [open, visible, activeKey]);
-
-  // Keep the active option visible inside the popup (never scroll the page).
-  useEffect(() => {
-    if (!open || !activeKey || !listRef.current) return;
-    const list = listRef.current;
-    const el = list.querySelector('[data-active="true"]');
-    if (!el) return;
-    const top = el.offsetTop;
-    const bottom = top + el.offsetHeight;
-    if (top < list.scrollTop) list.scrollTop = top;
-    else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
-  }, [open, activeKey]);
-
-  // Outside click / scroll / resize. The popup is non-modal: a pointerdown
-  // anywhere outside closes it without touching the already-typed value.
-  useEffect(() => {
-    if (!open) return undefined;
-    const onDown = (event) => {
-      if (!wrapRef.current?.contains(event.target)) close();
-    };
-    const reposition = (event) => {
-      if (event && event.type === "scroll" && listRef.current?.contains(event.target)) return;
-      anchor();
-    };
-    document.addEventListener("pointerdown", onDown, true);
-    window.addEventListener("scroll", reposition, true);
-    window.addEventListener("resize", reposition);
-    return () => {
-      document.removeEventListener("pointerdown", onDown, true);
-      window.removeEventListener("scroll", reposition, true);
-      window.removeEventListener("resize", reposition);
-    };
-  });
-
-  const activeOption = visible.find((o) => o.key === activeKey);
-  let popupStyle = null;
-  if (open && rect && typeof window !== "undefined") {
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const width = Math.min(Math.max(rect.width, minWidth), Math.max(200, vw - 8));
-    const left = Math.min(Math.max(4, rect.left), Math.max(4, vw - width - 4));
-    const cap = vw < 1100 ? Math.round(vh * 0.5) : 320;
-    const spaceBelow = vh - rect.bottom - 8;
-    const spaceAbove = rect.top - 8;
-    const below = spaceBelow >= 160 || spaceBelow >= spaceAbove;
-    const maxHeight = Math.max(120, Math.min(cap, below ? spaceBelow : spaceAbove));
-    let top = below ? rect.bottom + 4 : rect.top - 4 - maxHeight;
-    top = Math.min(Math.max(4, top), Math.max(4, vh - maxHeight - 4));
-    popupStyle = { left, top, width, maxHeight, backgroundColor: surface };
-  }
-
-  return (
-    <div className={`hms-combo ${className}`.trim()} ref={wrapRef} data-testid={testId}>
-      <label htmlFor={inputId}>{label}</label>
-      <input
-        ref={inputRef}
-        id={inputId}
-        type="text"
-        role="combobox"
-        aria-label={label}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-controls={listId}
-        aria-autocomplete="list"
-        aria-activedescendant={open && activeOption ? `${baseId}-opt-${visible.indexOf(activeOption)}` : undefined}
-        aria-busy={loading || undefined}
-        autoComplete="off"
-        spellCheck={false}
-        value={value || ""}
-        placeholder={placeholder}
-        disabled={disabled}
-        onChange={handleInput}
-        onKeyDown={handleKeyDown}
-        onClick={() => { if (!open) openWith("current"); }}
-        onBlur={() => close()}
-      />
-      {open && popupStyle && (
-        <div className="hms-combo-popup" style={popupStyle}
-          data-testid={testId ? `${testId}-popup` : undefined}
-          onMouseDown={(event) => event.preventDefault()}>
-          <div className="hms-combo-list" role="listbox" id={listId} ref={listRef}
-            aria-label={`${label} options`} aria-busy={loading || undefined}
-            data-testid={listboxTestId}>
-            {loading && (
-              <div className="hms-combo-loading" role="status">{loadingLabel}</div>
-            )}
-            {loading && !visible.length && (
-              <div className="hms-combo-skeleton-wrap" aria-hidden="true" data-testid={skeletonTestId}>
-                {[0, 1, 2].map((i) => <div className="hms-combo-skeleton" key={i} />)}
-              </div>
-            )}
-            {error && (
-              <div className="hms-combo-error" role="alert" data-testid={errorTestId}>
-                <span>{error}</span>
-                {onRetry && (
-                  <button type="button" className="hms-combo-retry" data-testid={retryTestId}
-                    onClick={onRetry}>Retry</button>
-                )}
-              </div>
-            )}
-            {!error && note && (
-              <div className="hms-combo-note" role="note" data-testid={noteTestId}>{note}</div>
-            )}
-            {!error && !loading && visible.length === 0 && (
-              <div className="hms-combo-empty" role="presentation">
-                {typeof emptyMessage === "function" ? emptyMessage((filterText || "").trim()) : emptyMessage}
-              </div>
-            )}
-            {!error && visible.map((option, index) => (
-              <div
-                key={option.key}
-                role="option"
-                id={`${baseId}-opt-${index}`}
-                aria-selected={option.key === activeKey}
-                aria-disabled={option.disabled ? "true" : undefined}
-                data-active={option.key === activeKey ? "true" : "false"}
-                data-disabled={option.disabled ? "true" : "false"}
-                data-option-key={option.key}
-                data-testid={option.testId}
-                title={option.disabled ? (option.disabledReason || option.title) : option.title}
-                className="hms-combo-option"
-                onMouseEnter={() => { if (!option.disabled) setActiveKey(option.key); }}
-                onClick={() => selectOption(option)}
-              >
-                {renderOption ? renderOption(option) : <span className="hms-combo-option-label">{option.label || option.key}</span>}
-              </div>
-            ))}
-          </div>
-          {note && !error && !loading && visible.length > 0 && null}
-        </div>
-      )}
-    </div>
-  );
+function routeOptionText(text, max = 72) {
+  const v = String(text || "");
+  return v.length > max ? v.slice(0, max - 1) + "…" : v;
 }
 
 // Price hint for one model from the aggregate /catalog row. Provider display
@@ -435,14 +90,6 @@ function priceHint(catalogModel) {
   return unknown;
 }
 
-function providerStatus(provider) {
-  if (provider.authenticated === false) return "sign-in needed";
-  const hasPricing = (provider.models || []).some(
-    (m) => ["priced", "free", "included"].includes(m.pricingStatus),
-  );
-  return hasPricing ? "priced" : "no list price";
-}
-
 function freshnessText(value) {
   if (!value) return "no timestamp";
   return String(value);
@@ -450,7 +97,7 @@ function freshnessText(value) {
 
 // ---------- Model catalog browser ----------
 // A read-only, full-width bird's-eye view of the SAME aggregate /catalog DTO
-// the editor comboboxes consume. Collapsed until asked for; opening it never
+// the editor dropdowns consume. Collapsed until asked for; opening it never
 // touches selection, editor state, or a pending review. Prices are rendered
 // verbatim from ``cost.display`` (already formatted per 1M tokens) and an
 // unknown price is never coerced to "$0.00" or a free badge.
@@ -1241,8 +888,8 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
     return scoped.filter((s) => {
       if (filters.family !== "all" && s.family !== filters.family) return false;
       if (filters.subfamily !== "all" && subfamilyOf(s) !== filters.subfamily) return false;
-      if (filters.provider && !(s.provider || "").includes(filters.provider)) return false;
-      if (filters.model && !(s.model || "").includes(filters.model)) return false;
+      if (filters.provider && (s.provider || "") !== filters.provider) return false;
+      if (filters.model && (s.model || "") !== filters.model) return false;
       if (filters.state !== "all" && normalizeState(s.state) !== filters.state) return false;
       return true;
     });
@@ -1250,25 +897,23 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
 
   const setFilter = (patch) => setFilters({ ...filters, ...patch });
 
-  // Filter comboboxes are strictly local: their options are the distinct
+  // Filter dropdowns are strictly local: their options are the distinct
   // values already present in the loaded state. No network request is made.
-  const providerFilterOptions = useMemo(() => {
+  const providerFilterValues = useMemo(() => {
     const values = new Set();
     for (const s of slots) if (s.provider) values.add(s.provider);
-    return [...values].sort((a, b) => a.localeCompare(b)).map((v) => ({
-      key: v, label: v, searchText: v, testId: `filter-provider-option-${v}`,
-    }));
+    return [...values].sort((a, b) => a.localeCompare(b));
   }, [slots]);
-  const modelFilterOptions = useMemo(() => {
+  const modelFilterValues = useMemo(() => {
     const values = new Set();
-    for (const s of slots) if (s.model) values.add(s.model);
-    return [...values].sort((a, b) => a.localeCompare(b)).map((v) => ({
-      key: v, label: v, searchText: v, testId: `filter-model-option-${v}`,
-    }));
-  }, [slots]);
-  const filterEmpty = (kind) => (q) => (q
-    ? `No matching ${kind} — press Enter to filter by “${q}”.`
-    : `No ${kind} values in the loaded state.`);
+    for (const s of slots) {
+      if (!s.model) continue;
+      if (filters.provider && s.provider !== filters.provider) continue;
+      values.add(s.model);
+    }
+    if (filters.model) values.add(filters.model);
+    return [...values].sort((a, b) => a.localeCompare(b));
+  }, [slots, filters.provider, filters.model]);
 
   const rowKey = (s) => s.profileId + "/" + s.slotId;
   const writableInView = filtered.filter(canSelectSlot);
@@ -1320,18 +965,18 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
           <option value="all">All tasks</option>
           {subfamilies.map((sf) => <option key={sf} value={sf}>{taskLabel(scoped.find(s => subfamilyOf(s) === sf) || { slotId: sf })}</option>)}
         </select></label>
-        <ComboBox className="hms-filter" label="Filter by provider" value={filters.provider}
-          onChange={(v) => setFilter({ provider: v })}
-          onSelect={(o) => setFilter({ provider: o.key })}
-          options={providerFilterOptions} placeholder="provider…"
-          emptyMessage={filterEmpty("provider")}
-          testId="filter-provider-combobox" listboxTestId="filter-provider-listbox" />
-        <ComboBox className="hms-filter" label="Filter by model" value={filters.model}
-          onChange={(v) => setFilter({ model: v })}
-          onSelect={(o) => setFilter({ model: o.key })}
-          options={modelFilterOptions} placeholder="model…"
-          emptyMessage={filterEmpty("model")}
-          testId="filter-model-combobox" listboxTestId="filter-model-listbox" />
+        <label className="hms-filter">Provider<select aria-label="Filter by provider"
+          data-testid="filter-provider" value={filters.provider}
+          onChange={(e) => setFilter({ provider: e.target.value, model: "" })}>
+          <option value="">All providers</option>
+          {providerFilterValues.map((v) => <option key={v} value={v}>{v}</option>)}
+        </select></label>
+        <label className="hms-filter">Model<select aria-label="Filter by model"
+          data-testid="filter-model" value={filters.model}
+          onChange={(e) => setFilter({ model: e.target.value })}>
+          <option value="">All models</option>
+          {modelFilterValues.map((v) => <option key={v} value={v}>{routeOptionText(v, 48)}</option>)}
+        </select></label>
         <label className="hms-filter">State<select aria-label="Filter by state" value={filters.state}
           onChange={(e) => setFilter({ state: e.target.value })}>
           <option value="all">All states</option>
@@ -1492,155 +1137,118 @@ function ChangeEditor({
   const chainBad = editor.changeType === "chain" && chainInvalid(chainEntries);
   const writableSelected = selectedSlots.filter(canSelectSlot);
 
-  // ---- catalog-backed provider / model comboboxes -----------------------
-  // The aggregate catalog is shared app state, fetched lazily on the first
-  // provider-list open (or an explicit Refresh). Model rows come from the
-  // existing GET /models; price hints are joined from the cached catalog only
-  // when it is already loaded. No extra network call is made for prices.
-  const modelProvider = editor.provider.trim();
-  const [modelOpen, setModelOpen] = useState(false);
-  const [modelState, setModelState] = useState({
-    key: null, provider: "", data: null, error: null, loading: false,
-  });
-  const modelSeq = useRef(0);
-  const fetchModelsRef = useRef(() => {});
-  const modelKey = `${catalogProfileId}\u0000${modelProvider}`;
-  const modelData = modelState.key === modelKey ? modelState.data : null;
-  const modelError = modelState.key === modelKey ? modelState.error : null;
-  const modelLoading = Boolean(modelOpen && modelProvider && (!modelData && !modelError));
-
+  // ---- catalog-backed provider / model dropdowns ------------------------
+  // The aggregate /catalog is shared app state, fetched lazily (once per
+  // profile scope, then cached) the moment the provider dropdown is hovered,
+  // touched or focused — before the native list opens — or on Refresh. Model rows come from the
+  // catalog entry for the chosen provider; GET /models is the fallback only
+  // for a provider the catalog does not list (a hand-typed slug).
+  // An OpenRouter-only scalar selection pins the provider; its models still list.
+  const scalarPinned = writableSelected.length > 0 && writableSelected.every(isScalarSlot);
+  const modelProvider = scalarPinned ? "openrouter" : editor.provider.trim();
   const providerList = (catalog.data && Array.isArray(catalog.data.providers)) ? catalog.data.providers : [];
   const catalogModelCount = providerList.reduce((n, p) => n + (p.models || []).length, 0);
   const staleProviderCount = providerList.filter((p) => p.stale).length;
-  const catalogModels = useMemo(() => {
-    const map = new Map();
-    for (const p of providerList) {
-      for (const m of p.models || []) map.set(`${p.id}\u0000${m.id}`, m);
-    }
-    return map;
-  }, [catalog.data]);
+  const catalogProvider = providerList.find((p) => p.id === modelProvider) || null;
 
-  const providerOptions = useMemo(() => providerList.map((p) => ({
-    key: p.id,
-    label: p.id,
-    searchText: `${p.label || ""} ${p.id}`,
-    disabled: p.authenticated === false,
-    disabledReason: p.authenticated === false
-      ? (p.warning || "this provider is not authenticated in this profile")
-      : undefined,
-    data: p,
-    testId: `provider-option-${p.id}`,
-  })), [catalog.data]);
+  const [providerOther, setProviderOther] = useState(false);
+  const [modelOther, setModelOther] = useState(false);
+  const [modelState, setModelState] = useState({ key: null, data: null, error: null, loading: false });
+  const modelSeq = useRef(0);
+  const modelKey = `${catalogProfileId}\u0000${modelProvider}`;
+  const fallbackModels = modelState.key === modelKey ? modelState.data : null;
+  const modelError = modelState.key === modelKey ? modelState.error : null;
+  const needsModelFetch = Boolean(modelProvider && catalog.data && !catalog.loading &&
+    !(catalogProvider && (catalogProvider.models || []).length));
+  const modelLoading = needsModelFetch && !fallbackModels && !modelError;
 
-  const modelOptions = useMemo(() => {
-    const rows = modelData?.models || [];
-    const providerId = modelData?.provider || modelProvider;
-    return rows.map((m) => {
-      const hint = priceHint(catalogModels.get(`${providerId}\u0000${m.id}`));
-      return {
-        key: m.id,
-        label: m.id,
-        searchText: `${m.id} ${m.name || ""}`,
-        data: { ...m, hint },
-        testId: `model-option-${m.id}`,
-        title: hint.kind === "unknown" ? hint.title : undefined,
-      };
-    });
-  }, [modelData, catalogModels, modelProvider]);
 
-  const renderProviderOption = (option) => {
-    const p = option.data;
-    const status = providerStatus(p);
-    const reason = p.warning || "this provider is not authenticated in this profile";
-    return (
-      <>
-        <span className="hms-opt-main">
-          <strong className="hms-opt-name">{p.label || p.id}</strong>
-          <code className="hms-opt-slug">{p.id}</code>
-        </span>
-        <span className="hms-opt-status" data-status={status}>{status}</span>
-        {(p.authenticated === false || p.warning) && (
-          <span className="hms-opt-reason">
-            {p.authenticated === false ? `Sign-in needed — ${reason}` : reason}
-          </span>
-        )}
-      </>
-    );
-  };
-
-  const renderModelOption = (option) => {
-    const hint = option.data.hint;
-    return (
-      <>
-        <span className="hms-opt-main">
-          <code className="hms-opt-id">{option.data.id}</code>
-          {option.data.name && option.data.name !== option.data.id && (
-            <span className="hms-opt-name">{option.data.name}</span>
-          )}
-        </span>
-        <span className={`hms-price hms-price-${hint.kind}`} data-price-kind={hint.kind}
-          title={hint.title}
-          aria-label={hint.kind === "unknown" ? hint.title : undefined}>
-          {hint.kind === "free"
-            ? <span className="hms-badge hms-badge-free">free</span>
-            : hint.text}
-        </span>
-      </>
-    );
-  };
-
-  const chooseProvider = (option) => {
-    const p = option.data;
-    const knownModels = p.models || [];
-    const keepModel = !editor.model || knownModels.some((m) => m.id === editor.model);
-    set({ provider: p.id, model: keepModel ? editor.model : "" });
-    announce?.(`Provider set to ${p.id}${knownModels.length ? ` — ${knownModels.length} models` : ""}`);
-  };
-
-  const chooseModel = (option) => {
-    const provider = modelData?.provider || modelProvider;
-    set({ provider, model: option.key, changeType: "set" });
-    announce?.(`Route set to ${provider}/${option.key}`);
-  };
-
-  fetchModelsRef.current = async (provider, { retry = false } = {}) => {
-    if (!provider) return;
-    const pid = catalogProfileId;
-    const key = `${pid}\u0000${provider}`;
+  const fetchModels = async (provider, { retry = false } = {}) => {
+    const key = `${catalogProfileId}\u0000${provider}`;
     if (!retry && modelState.key === key && (modelState.loading || modelState.data || modelState.error)) return;
     const seq = ++modelSeq.current;
-    setModelState({ key, provider, data: null, error: null, loading: true });
+    setModelState({ key, data: null, error: null, loading: true });
     try {
       const data = await Promise.race([
-        api.getModels({ provider, profileId: pid }),
+        api.getModels({ provider, profileId: catalogProfileId }),
         new Promise((_, reject) => setTimeout(
-          () => reject(new Error("Model catalog timed out after 1.2s — retry or type an exact model id.")),
-          1200,
+          () => reject(new Error("Model list timed out — retry, or choose Other to type an exact model id.")),
+          4000,
         )),
       ]);
       if (seq !== modelSeq.current) return;
-      setModelState({ key, provider: data.provider || provider, data, error: null, loading: false });
+      setModelState({ key, data, error: null, loading: false });
     } catch (err) {
       if (seq !== modelSeq.current) return;
-      // ApiError already carries the sanitized server message; avoid rendering
-      // the literal "undefined" for unexpected throws.
       const message = err && typeof err.message === "string" && err.message
-        ? err.message : "model catalog request failed";
-      setModelState({ key, provider, data: null, error: message, loading: false });
+        ? err.message : "model list request failed";
+      setModelState({ key, data: null, error: message, loading: false });
     }
   };
-
-  // Debounce model-catalog loads while the combobox is open: 250ms after the
-  // provider settles, then one request (a 1200ms hard timeout lives above).
   useEffect(() => {
-    if (!modelOpen) return undefined;
-    const provider = editor.provider.trim();
-    if (!provider) return undefined;
-    const key = `${catalogProfileId}\u0000${provider}`;
-    if (modelState.key === key && (modelState.loading || modelState.data || modelState.error)) return undefined;
-    const timer = setTimeout(() => fetchModelsRef.current(provider), 250);
+    if (!needsModelFetch) return undefined;
+    const timer = setTimeout(() => fetchModels(modelProvider), 250);
     return () => clearTimeout(timer);
-  }, [modelOpen, editor.provider, catalogProfileId]);
+  }, [needsModelFetch, modelKey]);
+
+  const sortedProviders = useMemo(() => [...providerList].sort((x, y) => {
+    const ax = x.authenticated === false ? 1 : 0;
+    const ay = y.authenticated === false ? 1 : 0;
+    if (ax !== ay) return ax - ay;
+    return String(x.label || x.id).localeCompare(String(y.label || y.id));
+  }), [catalog.data]);
+
+  const catalogModelMap = useMemo(() => {
+    const map = new Map();
+    for (const p of providerList) for (const m of p.models || []) map.set(`${p.id}\u0000${m.id}`, m);
+    return map;
+  }, [catalog.data]);
+
+  const modelRows = useMemo(() => {
+    if (catalogProvider && (catalogProvider.models || []).length) {
+      return catalogProvider.models.map((m) => ({ id: m.id, name: m.label || m.name || "" }));
+    }
+    return (fallbackModels?.models || []).map((m) => ({ id: m.id, name: m.name || "" }));
+  }, [catalogProvider, fallbackModels]);
+
+  const providerInList = sortedProviders.some((p) => p.id === modelProvider);
+  const modelInList = modelRows.some((m) => m.id === editor.model);
+  const showProviderOther = providerOther || (Boolean(modelProvider) && !providerInList && Boolean(catalog.data));
+  const showModelOther = modelOther || (Boolean(editor.model) && !modelInList && !modelLoading && Boolean(modelProvider));
+
+  const modelOptionText = (m) => {
+    const hint = priceHint(catalogModelMap.get(`${modelProvider}\u0000${m.id}`));
+    const price = hint.kind === "unknown" ? "price not published"
+      : hint.kind === "priced" ? hint.text.replace(/^→\s*/, "").replace(/ (in|out)$/, "/1M $1") : hint.text;
+    const name = m.name && m.name !== m.id ? ` (${m.name})` : "";
+    return routeOptionText(`${m.id}${name} — ${price}`, 90);
+  };
+
+  const chooseProvider = (value) => {
+    if (value === OTHER_VALUE) {
+      setProviderOther(true);
+      set({ provider: "", model: "" });
+      return;
+    }
+    setProviderOther(false);
+    setModelOther(false);
+    const p = providerList.find((x) => x.id === value);
+    const known = p ? (p.models || []) : [];
+    const keepModel = editor.model && known.some((m) => m.id === editor.model);
+    set({ provider: value, model: keepModel ? editor.model : "" });
+    if (value) announce?.(`Provider set to ${value}${known.length ? ` — ${known.length} models` : ""}`);
+  };
+
+  const chooseModel = (value) => {
+    if (value === OTHER_VALUE) {
+      setModelOther(true);
+      set({ model: "" });
+      return;
+    }
+    setModelOther(false);
+    set({ model: value, changeType: "set" });
+    if (value) announce?.(`Route set to ${modelProvider}/${value}`);
+  };
 
   // Applicability is stated in words: a change type that cannot reach every
   // selected target names the excluded ones instead of silently dropping them
@@ -1661,9 +1269,9 @@ function ChangeEditor({
       return `${assignmentOnly.length} selected speech slot(s) have no current model field. Choose a model and an explicit model-bearing backend to switch; resetting, removing or disabling an imaginary model field is not supported.`;
     }
     if (editor.changeType === "set") {
-      if (scalarOnly) return "OpenRouter auxiliary fallback — enter the exact model ID only. OpenRouter is implicit; this setting affects the auxiliary auto-chain across tasks.";
+      if (scalarOnly) return "OpenRouter auxiliary fallback — choose the model only. OpenRouter is implicit; this setting affects the auxiliary auto-chain across tasks.";
       if (mixedScalar) return "The OpenRouter auxiliary fallback can only be combined with routes to OpenRouter. Choose OpenRouter or select these targets separately.";
-      return `Applies to ${writableSelected.length} of ${writableSelected.length} selected slots — sets provider and model. Enter New provider and New model, then Preview changes.`;
+      return `Applies to ${writableSelected.length} of ${writableSelected.length} selected slots — sets provider and model. Choose both, then Preview changes.`;
     }
     if (editor.changeType === "chain") {
       return `Applies to ${disableApplicable.length} of ${writableSelected.length} selected slots — fallback chain slots only; tried in order when earlier routes fail.` + (disableExcluded ? " Deselect non-chain targets to continue; no targets will be silently skipped." : "");
@@ -1701,47 +1309,87 @@ function ChangeEditor({
           </select></label>
 
         {editor.changeType === "set" && (
-          <>
-            <ComboBox label="New provider"
-              value={scalarOnly ? "openrouter" : editor.provider}
-              disabled={scalarOnly}
-              onChange={(v) => set({ provider: v })}
-              onSelect={chooseProvider}
-              onOpenChange={(isOpen) => { if (isOpen) onEnsureCatalog?.(); }}
-              options={providerOptions}
-              loading={Boolean(catalog.loading)}
-              error={catalog.error || null}
-              onRetry={onRetryCatalog}
-              errorTestId="catalog-error" retryTestId="catalog-retry"
-              loadingLabel="Loading provider catalog…"
-              placeholder="nous / opencode-go / …"
-              emptyMessage={(q) => (q
-                ? `No provider matches “${q}” — you can still type an exact provider slug.`
-                : "No providers in this profile’s catalog — type an exact provider slug.")}
-              testId="provider-combobox" listboxTestId="provider-listbox"
-              renderOption={renderProviderOption} />
-            <ComboBox label="New model"
-              value={editor.model}
-              onChange={(v) => set({ model: v })}
-              onSelect={chooseModel}
-              onOpenChange={setModelOpen}
-              options={modelOptions}
-              loading={modelLoading}
-              error={modelError}
-              note={modelData?.error || null}
-              onRetry={() => fetchModelsRef.current(modelProvider, { retry: true })}
-              errorTestId="model-combo-error" retryTestId="model-combo-retry"
-              noteTestId="model-combo-note" skeletonTestId="model-skeleton"
-              loadingLabel="Loading models…"
-              placeholder="provider-native model id"
-              emptyMessage={(q) => {
-                if (q) return `No catalog match — press Enter to use “${q}” as an exact model id.`;
-                if (!modelProvider) return "Choose a provider to browse models — or type an exact model id.";
-                return "No catalog models for this provider — press Enter to use the typed value as an exact model id.";
-              }}
-              testId="model-combobox" listboxTestId="model-listbox"
-              renderOption={renderModelOption} />
-          </>
+          <div className="hms-route-picks" data-testid="route-picks">
+            <label className="hms-route-field">Provider
+              <select aria-label="New provider" data-testid="provider-select"
+                value={scalarOnly ? "openrouter" : (showProviderOther ? OTHER_VALUE : modelProvider)}
+                disabled={scalarOnly}
+                onFocus={() => onEnsureCatalog?.()}
+                onPointerEnter={() => onEnsureCatalog?.()}
+                onMouseDown={() => onEnsureCatalog?.()}
+                onTouchStart={() => onEnsureCatalog?.()}
+                onChange={(e) => chooseProvider(e.target.value)}>
+                <option value="">
+                  {catalog.loading && !catalog.data ? "Loading providers…" : "Choose a provider…"}
+                </option>
+                {scalarOnly && <option value="openrouter">openrouter</option>}
+                {!scalarOnly && modelProvider && !providerInList && !showProviderOther && (
+                  <option value={modelProvider}>{modelProvider}</option>
+                )}
+                {sortedProviders.map((p) => (
+                  <option key={p.id} value={p.id} data-testid={`provider-option-${p.id}`}
+                    disabled={p.authenticated === false}
+                    title={p.authenticated === false ? (p.warning || "this provider is not authenticated in this profile") : undefined}>
+                    {routeOptionText(p.label && p.label !== p.id ? `${p.label} (${p.id})` : p.id)}
+                    {p.authenticated === false ? " — sign-in needed" : ""}
+                  </option>
+                ))}
+                <option value={OTHER_VALUE}>Other — type an exact provider slug…</option>
+              </select>
+            </label>
+            {showProviderOther && !scalarOnly && (
+              <label className="hms-route-field hms-route-exact">Exact provider slug
+                <input data-testid="provider-exact" value={editor.provider}
+                  placeholder="e.g. nous, opencode-go, custom:my-endpoint"
+                  onChange={(e) => set({ provider: e.target.value })} />
+              </label>
+            )}
+            {catalog.error && (
+              <div className="hms-route-status" role="alert" data-testid="catalog-error">
+                Provider list unavailable: {catalog.error}{" "}
+                <button type="button" data-testid="catalog-retry" onClick={() => onRetryCatalog?.()}>Retry</button>
+              </div>
+            )}
+
+            <label className="hms-route-field">Model
+              <select aria-label="New model" data-testid="model-select"
+                value={showModelOther ? OTHER_VALUE : editor.model}
+                disabled={!modelProvider && !scalarOnly}
+                onChange={(e) => chooseModel(e.target.value)}>
+                <option value="">
+                  {!modelProvider && !scalarOnly ? "Choose a provider first"
+                    : modelLoading ? "Loading models…"
+                    : modelRows.length ? `Choose a model (${modelRows.length})…` : "No listed models — choose Other"}
+                </option>
+                {modelRows.map((m) => (
+                  <option key={m.id} value={m.id} data-testid={`model-option-${m.id}`}>{modelOptionText(m)}</option>
+                ))}
+                <option value={OTHER_VALUE}>Other — type an exact model id…</option>
+              </select>
+            </label>
+            {showModelOther && (
+              <label className="hms-route-field hms-route-exact">Exact model id
+                <input data-testid="model-exact" value={editor.model}
+                  placeholder="provider-native model id"
+                  onChange={(e) => set({ model: e.target.value })} />
+              </label>
+            )}
+            {modelError && (
+              <div className="hms-route-status" role="alert" data-testid="model-error">
+                {modelError}{" "}
+                <button type="button" data-testid="model-retry"
+                  onClick={() => fetchModels(modelProvider, { retry: true })}>Retry</button>
+              </div>
+            )}
+            {!modelError && fallbackModels?.error && (
+              <div className="hms-route-status" role="note" data-testid="model-note">{fallbackModels.error}</div>
+            )}
+            {modelProvider && editor.model && (
+              <p className="hms-route-summary" data-testid="route-summary">
+                Route: <code>{modelProvider}/{editor.model}</code>
+              </p>
+            )}
+          </div>
         )}
 
         {editor.changeType === "chain" && (
@@ -1780,44 +1428,38 @@ function ChangeEditor({
           {removalTargets.length > 0 && <p role="note">Remove this exact route from {removalTargets.length} selected configured slot(s). Removal takes precedence over a model change for these targets.</p>}
         </details>
 
-        {/* Catalog controls replace the old collapsible picker: the provider
-            and model fields above ARE the catalog browser. Only an explicit
-            click sends refresh=1; opening the list never does. */}
+        {/* One compact catalog line; per-provider freshness stays collapsed.
+            Only an explicit click sends refresh=1. */}
         <div className="hms-catalog-tools" data-testid="picker-advanced">
           <div className="hms-catalog-actions">
+            <span className="hms-note" data-testid="catalog-summary">
+              {catalog.data
+                ? `${providerList.length} providers · ${catalogModelCount} models` +
+                  (catalog.data.cost?.pending ? " · cost pending" : "") +
+                  (staleProviderCount ? ` · ${staleProviderCount} stale` : " · fresh")
+                : catalog.loading ? "Loading catalog…" : "Catalog not loaded"}
+              {" · scope "}<code>{catalogProfileId}</code>
+            </span>
             <button type="button" data-testid="refresh-catalog"
               disabled={busy || catalog.loading}
               onClick={() => onRefreshCatalog?.()}>
-              {catalog.loading ? "Refreshing…" : "Refresh catalog"}
+              {catalog.loading ? "Refreshing…" : "Refresh"}
             </button>
-            <span className="hms-note">Scope: <code>{catalogProfileId}</code></span>
           </div>
-          <div className="hms-catalog-freshness" data-testid="catalog-freshness">
-            {catalog.error && (
-              <div role="alert" data-testid="catalog-inline-error">{catalog.error}</div>
-            )}
-            {!catalog.data && !catalog.error && (
-              <span className="hms-note">Catalog not loaded — open the provider list or refresh.</span>
-            )}
-            {catalog.data && (
-              <>
-                <span className="hms-note" data-testid="catalog-summary">
-                  {providerList.length} providers · {catalogModelCount} models ·{" "}
-                  {catalog.data.cost?.pending ? "cost pending · " : ""}
-                  {staleProviderCount ? `${staleProviderCount} stale` : "fresh"}
-                </span>
-                <ul className="hms-freshness-list" aria-label="Provider catalog freshness">
-                  {providerList.map((p) => (
-                    <li key={p.id} data-provider-freshness={p.id}>
-                      <code>{p.id}</code> — {freshnessText(p.fetchedAt)}
-                      {p.stale ? <strong> · stale</strong> : null}
-                      {p.warning ? <span> · {p.warning}</span> : null}
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-          </div>
+          {catalog.data && providerList.length > 0 && (
+            <details className="hms-catalog-freshness" data-testid="catalog-freshness">
+              <summary>Catalog details</summary>
+              <ul className="hms-freshness-list" aria-label="Provider catalog freshness">
+                {providerList.map((p) => (
+                  <li key={p.id} data-provider-freshness={p.id}>
+                    <code>{p.id}</code> — {freshnessText(p.fetchedAt)}
+                    {p.stale ? <strong> · stale</strong> : null}
+                    {p.warning ? <span> · {p.warning}</span> : null}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
         </div>
 
         <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -2405,7 +2047,7 @@ function App() {
     const reduce = typeof window !== "undefined" && typeof window.matchMedia === "function" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     rail?.scrollIntoView?.({ behavior: reduce ? "auto" : "smooth", block: "start" });
-    rail?.querySelector('[data-testid="provider-combobox"] input')?.focus({ preventScroll: true });
+    rail?.querySelector('[data-testid="provider-select"]')?.focus({ preventScroll: true });
   };
 
   const catalogTriggerCount = catalog.data && catalog.profileId === catalogProfileId

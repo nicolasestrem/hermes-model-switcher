@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { setProvider, setModel } from "./route-helpers.mjs";
 
 const URL = "/fixture.html";
 
@@ -69,8 +70,8 @@ test("select → preview → editor Apply → guarded undo; changing selection i
   // select two main slots
   await page.getByLabel("Select default main").check();
   await page.getByLabel("Select research main").check();
-  await page.getByLabel("New provider").fill("zhipu");
-  await page.getByLabel("New model").fill("glm-5.3-flash");
+  await setProvider(page, "zhipu");
+  await setModel(page, "glm-5.3-flash");
   await expect(page.getByTestId("preview-panel")).toHaveCount(0);
   await expect(apply).toBeDisabled(); // still no preview
   await expect(page.getByText("Preview required")).toBeVisible();
@@ -131,8 +132,8 @@ test("applying a custom preview after reviewing a preset sends no stale presetId
   await page.getByRole("button", { name: "Close operation drawer" }).click();
   await page.getByLabel("Select default main").check();
   await page.getByLabel("Select research main").check();
-  await page.getByLabel("New provider").fill("zhipu");
-  await page.getByLabel("New model").fill("glm-5.3-flash");
+  await setProvider(page, "zhipu");
+  await setModel(page, "glm-5.3-flash");
   await page.getByRole("checkbox", { name: /acknowledge unknown-cost/ }).check();
   await page.getByRole("button", { name: "Preview changes" }).click();
   await expect(page.getByTestId("preview-panel")).toContainText("2 changes");
@@ -400,7 +401,15 @@ test("detail and empty-state rows span exactly the rendered column count", async
   expect(Number(await detail.getAttribute("colspan"))).toBe(headerCount);
 
   // filter to zero rows: the empty-state cell spans every column too
-  await page.getByLabel("Filter by provider").fill("zzz-no-such-provider");
+  // Dropdown filters only offer values that exist, so reach zero rows by
+  // combining a provider with a state none of its slots are in.
+  await page.getByLabel("Filter by provider").selectOption("anthropic");
+  const states = await page.getByLabel("Filter by state").locator("option").evaluateAll(
+    (opts) => opts.map((o) => o.value).filter((v) => v !== "all"));
+  for (const state of states) {
+    await page.getByLabel("Filter by state").selectOption(state);
+    if (await page.locator('[data-testid="matrix-scroll"] tbody tr[data-row]').count() === 0) break;
+  }
   const empty = page.locator('[data-testid="matrix-scroll"] tbody td').first();
   await expect(empty).toContainText("No slots match");
   expect(Number(await empty.getAttribute("colspan"))).toBe(headerCount);

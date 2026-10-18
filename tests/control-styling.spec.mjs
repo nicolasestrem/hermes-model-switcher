@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { setProvider, setModel } from "./route-helpers.mjs";
 import fs from "node:fs";
 
 const metrics = (el) => {
@@ -25,8 +26,8 @@ for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 844 
     const before = await preview.evaluate(metrics);
     await expect(preview).toBeDisabled();
     await page.getByLabel("Select default main").check();
-    await page.getByLabel("New provider").fill("zhipu");
-    await page.getByLabel("New model").fill("glm-5.3-flash");
+    await setProvider(page, "zhipu");
+    await setModel(page, "glm-5.3-flash");
     await expect(preview).toBeEnabled();
     const enabled = await preview.evaluate(metrics);
     expect(Number(before.opacity)).toBeLessThan(Number(enabled.opacity));
@@ -100,15 +101,16 @@ for (const token of ["oklch(60% 0.1 200 / 0.5)", "rgba(240,240,240,0.5)"]) {
   });
 }
 
-// New catalog dropdowns must carry the same plugin-owned chrome as every other
-// control: real borders/padding/38px targets, an opaque scoped popup and the
-// global focus-visible ring. Added alongside (never replacing) the assertions
-// above so the pre-existing control contract stays pinned.
-test("catalog comboboxes and popups keep plugin-owned chrome", async ({ page }) => {
+// The native route and filter dropdowns, and the exact-id field revealed by
+// "Other", carry the same plugin-owned chrome as every other control: real
+// borders/padding/38px targets and the global focus-visible ring.
+test("route dropdowns and exact-id fields keep plugin-owned chrome", async ({ page }) => {
   await page.goto("/fixture-sdk.html");
-  await expect(page.getByLabel("New provider", { exact: true })).toBeVisible();
-  for (const control of [page.getByLabel("New provider", { exact: true }), page.getByLabel("New model", { exact: true }),
+  const provider = page.getByLabel("New provider", { exact: true });
+  await expect(provider).toBeVisible();
+  for (const control of [provider, page.getByLabel("New model", { exact: true }),
     page.getByLabel("Filter by provider", { exact: true }), page.getByLabel("Filter by model", { exact: true })]) {
+    expect(await control.evaluate(el => el.tagName)).toBe("SELECT");
     const c = await control.evaluate(metrics);
     expect(c.border).toBeGreaterThanOrEqual(1);
     expect(c.padding).toBeGreaterThanOrEqual(6);
@@ -116,25 +118,18 @@ test("catalog comboboxes and popups keep plugin-owned chrome", async ({ page }) 
     expect(c.bg).not.toBe("rgba(0, 0, 0, 0)");
   }
 
-  const provider = page.getByLabel("New provider", { exact: true });
-  await provider.click();
-  await expect(page.getByTestId("provider-listbox")).toBeVisible();
-  const active = page.locator('[role="option"][aria-selected="true"]');
-  const target = await active.evaluate(el => ({
-    height: el.getBoundingClientRect().height,
-    bg: getComputedStyle(el).backgroundColor,
-  }));
-  expect(target.height).toBeGreaterThanOrEqual(36);
-  expect(target.bg).not.toBe("rgba(0, 0, 0, 0)");
+  await provider.focus();
+  const ring = await provider.evaluate(metrics);
+  expect(ring.outline).not.toBe("none");
+  expect(ring.outlineWidth).toBeGreaterThanOrEqual(2);
 
-  const popup = await page.getByTestId("provider-combobox-popup").evaluate(el => {
-    const c = getComputedStyle(el);
-    return { position: c.position, bg: c.backgroundColor, z: Number(c.zIndex), width: el.getBoundingClientRect().width };
-  });
-  expect(popup.position).toBe("fixed");
-  expect(popup.z).toBeGreaterThan(0);
-  expect(popup.bg).not.toBe("rgba(0, 0, 0, 0)");
-  expect(popup.width).toBeGreaterThanOrEqual(360);
-  expect(await page.getByTestId("provider-combobox-popup").evaluate(el => Boolean(el.closest(".hms-root")))).toBe(true);
+  await provider.selectOption("__other__");
+  const exact = page.getByLabel("Exact provider slug", { exact: true });
+  await expect(exact).toBeVisible();
+  const e = await exact.evaluate(metrics);
+  expect(e.border).toBeGreaterThanOrEqual(1);
+  expect(e.padding).toBeGreaterThanOrEqual(6);
+  expect(e.height).toBeGreaterThanOrEqual(36);
+  expect(e.bg).not.toBe("rgba(0, 0, 0, 0)");
   expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
 });
