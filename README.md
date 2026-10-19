@@ -35,13 +35,28 @@ Built for the Hermes Dashboard, using its themes and authenticated transport. MI
 screenshot demonstrates the interface; it is not evidence of live Dashboard
 deployment or provider inference.*
 
+![The same interface following the host's light theme](docs/images/model-switcher-light-1440.png)
+
+*The plugin follows the host Dashboard's theme; the light theme is shown here.*
+
 ![Model catalog with list prices per 1M tokens](docs/images/model-switcher-catalog-1440.png)
+
+*The provider-grouped catalog in the Dashboard SDK fixture with synthetic lab profiles.
+List prices come from Hermes' pricing caches, not from provider probes or recorded spend.*
 
 ![Model catalog on a narrow screen](docs/images/model-switcher-catalog-375.png)
 
+*The same catalog on a narrow screen; a fixture render of the compiled plugin, not a
+live Dashboard deployment or provider execution.*
+
+![The routing matrix on a narrow screen](docs/images/model-switcher-dark-375.png)
+
+*On a narrow screen the matrix scrolls horizontally inside its own region.*
+
 ### In the real Hermes Dashboard
 
-The same plugin, running in an isolated one-profile lab with synthetic routes:
+The same plugin, running in an isolated lab with two synthetic profiles (default
+and research) and synthetic routes:
 
 ![Routing matrix in the real Hermes Dashboard](docs/images/model-switcher-real-dashboard.png)
 
@@ -118,10 +133,11 @@ when you rebuild the UI yourself.
 
 ## Make your first switch
 
-1. **Select targets.** Filter by profile, family, slot, or state, then select the
-   slots you want to change. Filtering changes the view only; checkboxes choose edit
-   targets. The selection summary includes selected slots hidden by filters.
-2. **Choose routing.** Pick a provider, then a model from its dropdown (each
+1. **Select your targets.** Narrow the matrix with the **Profiles shown** selector
+   and the **Family**, **Task**, **Provider**, **Model**, and **State** filters, then
+   select the slots you want to change. Filtering changes the view only; checkboxes
+   choose edit targets. The selection summary includes selected slots hidden by filters.
+2. **Choose your routing.** Pick a provider, then a model from its dropdown (each
    entry shows its list price), open **Browse model catalog** to compare options, or
    choose **Other** to enter an exact provider/model pair for custom routes. Model IDs belong to their provider,
    so keep the pair together.
