@@ -808,7 +808,7 @@ def _assert_removal_identity(desc, observed: Dict[str, Any],
         if want in (None, ""):
             continue
         if observed.get(key) != want:
-            raise ValueError(
+            raise RemovalStaleIdentity(
                 f"slot {desc.slot_id!r} changed since review: expected "
                 f"{key}={want!r}, found {observed.get(key)!r} — re-preview "
                 "before removing")
@@ -836,10 +836,10 @@ def _removal_changes_for(desc, cfg: Dict[str, Any],
     by moa.default_preset) — reject-don't-repair, nothing written.
     """
     if not desc.writable or desc.protected:
-        raise ValueError("slot is protected/read-only")
+        raise RemovalProtected("slot is protected/read-only")
     if (desc.family is SlotFamily.MOA
             and desc.storage_path.startswith("moa.presets.")):
-        raise ValueError("cannot remove a required aggregator route; remove the preset through Hermes")
+        raise RemovalMoaPreset("cannot remove a required aggregator route; remove the preset through Hermes")
     changes: Dict[str, Any] = {}
     current = _get_dotted(cfg, desc.storage_path)
     if isinstance(current, dict):
@@ -850,7 +850,7 @@ def _removal_changes_for(desc, cfg: Dict[str, Any],
             if key in current:
                 changes[f"{desc.storage_path}.{key}"] = None
         if not changes:
-            raise ValueError("change is a no-op for this slot")
+            raise RemovalNoOp("change is a no-op for this slot")
         return changes
     # Scalar / chain slots: unset the slot key plus its companions.
     # The reviewed ``from`` identity is validated against the CURRENT stored
@@ -878,7 +878,7 @@ def _removal_changes_for(desc, cfg: Dict[str, Any],
         elif _get_dotted(cfg, comp) is not _STORE_MISSING:
             changes[comp] = None
     if not changes:
-        raise ValueError("change is a no-op for this slot")
+        raise RemovalNoOp("change is a no-op for this slot")
     return changes
 
 
@@ -968,9 +968,14 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
             # P1 #3: to:null is a REMOVAL intent, not a route assignment.
             try:
                 stored = _removal_changes_for(desc, cfg, c.get("from"))
-            except ValueError as exc:
+            except RemovalRefused as exc:
+                # A fixed class-level reason, never str(exc) (py/stack-trace-exposure).
                 blocked.append({"profileId": pid, "slotId": c.get("slotId"),
-                                "reason": str(exc)})
+                                "reason": type(exc).public_reason})
+                continue
+            except ValueError:
+                blocked.append({"profileId": pid, "slotId": c.get("slotId"),
+                                "reason": "removal rejected for this slot"})
                 continue
             targets.append(RouteTarget(
                 profile=str(pid), store_kind="canonical_config", path=str(cfg_path),
@@ -992,7 +997,7 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
                 continue
             except Exception as exc:
                 blocked.append({"profileId": pid, "slotId": c.get("slotId"),
-                                "reason": str(exc)[:200] or "route rejected",
+                                "reason": f"route rejected ({type(exc).__name__})",
                                 "kind": "route_refusal"})
                 continue
         else:
@@ -1005,7 +1010,7 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
                 continue
             except Exception as exc:
                 blocked.append({"profileId": pid, "slotId": c.get("slotId"),
-                                "reason": str(exc)[:200] or "route rejected"})
+                                "reason": f"route rejected ({type(exc).__name__})"})
                 continue
             if cp.rejected:
                 blocked.append({"profileId": pid, "slotId": c.get("slotId"),
@@ -1229,6 +1234,36 @@ def _clean_detail(exc: HTTPException) -> str:
     detail = getattr(exc, "detail", "")
     text = detail if isinstance(detail, str) else str(detail)
     return (text or "route rejected")[:200]
+
+
+class RemovalRefused(ValueError):
+    """A removal that cannot bind, with a FIXED public reason.
+
+    The API must never echo ``str(exc)`` into a response (CodeQL
+    py/stack-trace-exposure): exception text may carry paths or config values.
+    Each subclass fixes its public wording as a class attribute, so the handler
+    reads ``type(exc).public_reason`` — a constant — instead of the message.
+    The message stays available to direct callers and tests.
+    """
+
+    public_reason = "removal rejected for this slot"
+
+
+class RemovalProtected(RemovalRefused):
+    public_reason = "slot is protected/read-only"
+
+
+class RemovalMoaPreset(RemovalRefused):
+    public_reason = ("cannot remove a required aggregator route; "
+                     "remove the preset through Hermes")
+
+
+class RemovalStaleIdentity(RemovalRefused):
+    public_reason = "route changed since review; re-preview before removing"
+
+
+class RemovalNoOp(RemovalRefused):
+    public_reason = "change is a no-op for this slot"
 
 
 def _observed_value(cfg: Dict[str, Any], dotted: str) -> Any:
