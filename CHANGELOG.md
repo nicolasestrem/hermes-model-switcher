@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Security
+
+- Fix `py/stack-trace-exposure` in the preview endpoint: a removal that cannot
+  bind now returns a fixed, class-level reason instead of `str(exc)`, and a
+  failing route seam reports its exception type only. Exception text can carry
+  config paths or secret neighbours and must never reach a response.
+- Fix `actions/unpinned-tag` in `claude.yml`: pin `anthropics/claude-code-action`
+  to the `v1` commit instead of the moving tag.
+
 ### Native route dropdowns
 
 - Replace the provider/model comboboxes with native `<select>` dropdowns. Provider

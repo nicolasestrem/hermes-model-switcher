@@ -429,3 +429,48 @@ def test_get_models_passthrough_no_store_and_unknown_profile(hermes_home, monkey
     r = tc.get("/models", params={"provider": "lablocal", "profileId": "ghost"})
     assert r.json()["ok"] is False
     assert "unknown profile" in r.json()["error"]
+
+
+# ----------------------- A12 exception text never reaches a preview response
+
+def test_preview_never_echoes_exception_text(hermes_home, monkeypatch):
+    """A failing seam must not surface str(exc) to the caller (py/stack-trace-exposure).
+
+    RED against the previous revision: the blocked reason carried the full
+    RuntimeError text (including the sentinel values below) back to the client.
+    """
+    _m(hermes_home, "default")
+
+    def boom(cfg, to):
+        raise RuntimeError("leaked-secret /etc/passwd token=sk-live-123")
+
+    monkeypatch.setattr(plugin_api, "_canonical_main_changes", boom)
+    tc = _client()
+    r = tc.post("/preview", json={"changes": [{
+        "profileId": "default", "slotId": "main.default", "action": "set",
+        "to": {"provider": "nous", "model": "hermes-4"}}]})
+
+    assert r.status_code == 200, r.text
+    assert "leaked-secret" not in r.text
+    assert "/etc/passwd" not in r.text
+    assert "sk-live-123" not in r.text
+    assert "route rejected (RuntimeError)" in r.text
+
+
+def test_preview_removal_refusal_uses_a_fixed_reason(hermes_home, monkeypatch):
+    """Unknown removal ValueErrors are reported generically, never verbatim."""
+    _m(hermes_home, "default")
+
+    def boom(desc, cfg, from_payload=None):
+        raise ValueError("leaked-secret internal path /srv/private")
+
+    monkeypatch.setattr(plugin_api, "_removal_changes_for", boom)
+    tc = _client()
+    r = tc.post("/preview", json={"changes": [{
+        "profileId": "default", "slotId": "delegation.fallback_chain", "action": "remove",
+        "to": None}]})
+
+    assert r.status_code == 200, r.text
+    assert "leaked-secret" not in r.text
+    assert "/srv/private" not in r.text
+    assert "removal rejected for this slot" in r.text
