@@ -55,7 +55,8 @@ live Dashboard deployment or provider execution.*
 
 ### In the real Hermes Dashboard
 
-The same plugin, running in an isolated one-profile lab with synthetic routes:
+The same plugin, running in an isolated lab with two synthetic profiles (default
+and research) and synthetic routes:
 
 ![Routing matrix in the real Hermes Dashboard](docs/images/model-switcher-real-dashboard.png)
 

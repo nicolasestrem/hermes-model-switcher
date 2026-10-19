@@ -25,11 +25,11 @@ operation results are displayed in these fixture shots.
 ## Actual Hermes Dashboard lab captures
 
 The three `real-*` PNGs are captures from an isolated lab Hermes Dashboard running
-a single synthetic default profile. The browser drove Preview, Apply and guarded
-Undo through the real host UI: the configuration bytes were unchanged by Preview,
-changed by Apply, and restored exactly by Undo, and separate HTTP checks confirmed
-authenticated API responses and served-asset hashes. No provider inference was
-performed.
+two synthetic profiles, default and research. The browser drove Preview, Apply and
+guarded Undo through the real host UI: the configuration bytes were unchanged by
+Preview, changed by Apply, and restored exactly by Undo, and separate HTTP checks
+confirmed authenticated API responses and served-asset hashes. No provider inference
+was performed.
 
 - `model-switcher-real-dashboard.png`: the loaded routing matrix and editor.
 - `model-switcher-real-preview.png`: a real preview of the synthetic main-model change.
