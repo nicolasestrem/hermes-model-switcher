@@ -39,6 +39,8 @@
 - New backend tests (catalog pricing and catalog API) and browser specs
   (`dropdowns.spec.mjs`, `models-catalog.spec.mjs`, `real-catalog.spec.mjs`).
 
+## 0.2.0 — 2026-10-14
+
 ### Removed
 
 - The `/probe` HTTP route is gone. It previously always refused and never performed an inference probe, so removing it loses no supported inference capability.

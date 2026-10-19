@@ -1,5 +1,6 @@
 {
   "name": "hermes-model-switcher",
+  "description": "Choose models across Hermes profiles, preview changes, and reuse your setup with presets.",
   "version": "0.2.0",
   "private": true,
   "license": "MIT",
