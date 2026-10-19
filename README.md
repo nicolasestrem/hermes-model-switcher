@@ -41,7 +41,13 @@ deployment or provider inference.*
 
 ![Model catalog with list prices per 1M tokens](docs/images/model-switcher-catalog-1440.png)
 
+*The provider-grouped catalog in the Dashboard SDK fixture with synthetic lab profiles.
+List prices come from Hermes' pricing caches, not from provider probes or recorded spend.*
+
 ![Model catalog on a narrow screen](docs/images/model-switcher-catalog-375.png)
+
+*The same catalog on a narrow screen; a fixture render of the compiled plugin, not a
+live Dashboard deployment or provider execution.*
 
 ![The routing matrix on a narrow screen](docs/images/model-switcher-dark-375.png)
 

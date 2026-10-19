@@ -55,7 +55,7 @@
 - Add `docs/backlog.md`; scope the privacy audit's history statement around the remote-identity cleanup (no full-erasure claim).
 - Reflect the backend review changes in the docs: no fleet-wide transaction or always-undo promise; compensated/partial/recovery_required results report `ok=false`; preset corruption quarantines the original and salvages valid entries with a `presetsCorrupt` warning.
 
-## Earlier unreleased notes
+## Pre-0.2.0 notes
 
 - Rewrite the README around profile selection, reviewed model changes, and reusable presets.
 - Separate advanced routing and Dashboard integration details into a technical reference.
