@@ -2225,8 +2225,11 @@ def apply(body: ApplyIn):
     except HTTPException:
         raise
     except ApplyBlocked as exc:
+        # Fixed class-level reason, never str(exc) (py/stack-trace-exposure):
+        # preflight messages can carry store paths and config values.
         raise HTTPException(status_code=409, detail={
-            "ok": False, "error": f"apply blocked: {exc}"}) from None
+            "ok": False,
+            "error": f"apply blocked: {type(exc).public_reason}"}) from None
     except Exception as exc:
         raise HTTPException(status_code=500, detail={
             "ok": False, "error": f"apply failed: {type(exc).__name__}"}) from None
@@ -2301,8 +2304,10 @@ def undo(op_id: str):
             finally:
                 journal.close()
     except ApplyBlocked as exc:
+        # See apply(): a fixed public reason, never the exception message.
         raise HTTPException(status_code=409, detail={
-            "ok": False, "error": f"undo blocked: {exc}"}) from None
+            "ok": False,
+            "error": f"undo blocked: {type(exc).public_reason}"}) from None
     except Exception as exc:
         raise HTTPException(status_code=500, detail={
             "ok": False, "error": f"undo failed: {type(exc).__name__}"}) from None
