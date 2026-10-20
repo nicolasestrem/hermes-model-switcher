@@ -51,7 +51,53 @@ from .journal import (
 
 
 class ApplyBlocked(RuntimeError):
-    """Preflight failed; no writes were started."""
+    """Preflight failed; no writes were started.
+
+    The API must never echo ``str(exc)`` into a response (CodeQL
+    py/stack-trace-exposure): preflight messages carry store paths, YAML parser
+    text and ``repr()`` of target dicts (which can hold config values). Each
+    subtype therefore fixes its public wording as a class attribute, so the
+    handlers read ``type(exc).public_reason`` -- a constant -- instead of the
+    message. The detail stays available to direct callers and tests.
+    """
+
+    public_reason = "operation blocked"
+
+
+class ApplyTargetProfileGone(ApplyBlocked):
+    public_reason = "target profile no longer exists"
+
+
+class ApplyTargetUnbound(ApplyBlocked):
+    public_reason = "write target is missing its store binding"
+
+
+class ApplyTargetConflict(ApplyBlocked):
+    public_reason = "conflicting values for a merged target key"
+
+
+class ApplyAdapterUnavailable(ApplyBlocked):
+    public_reason = "target store is not writable in this runtime"
+
+
+class ApplyStoreUnreadable(ApplyBlocked):
+    public_reason = "a target store could not be read"
+
+
+class ApplySnapshotRace(ApplyBlocked):
+    public_reason = "a target store changed while the recovery snapshot was captured"
+
+
+class ApplyRevisionMoved(ApplyBlocked):
+    public_reason = "the reviewed revision changed before planning"
+
+
+class ApplyUnknownOperation(ApplyBlocked):
+    public_reason = "unknown operation"
+
+
+class ApplyNothingToUndo(ApplyBlocked):
+    public_reason = "operation has no applied steps to undo"
 
 
 class StepFailure(RuntimeError):
@@ -135,10 +181,13 @@ def plan_operation(journal: OperationJournal,
             from hermes_adapter import discover_profiles
             identity = discover_profiles().get(t.get("profile") or "")
             if identity is None:
-                raise ApplyBlocked("target profile vanished before planning")
+                raise ApplyTargetProfileGone(
+                    "target profile vanished before planning")
             t["identity"] = asdict(identity)
         if "store_kind" not in t or "path" not in t:
-            raise ApplyBlocked(f"target missing store binding: {t!r}")
+            # Never repr() the target: it carries the store path and the
+            # change values (which can be credentials).
+            raise ApplyTargetUnbound("target missing store binding")
         # Coalesce targets that address the same (profile, store_kind, path):
         # multi-slot presets against one config store become ONE journalled
         # step, so a single pre_revision guards every change atomically.
@@ -154,26 +203,27 @@ def plan_operation(journal: OperationJournal,
                 if dotted in merged and merged[dotted] != value:
                     # Report only the (non-secret) dotted key name — a value
                     # such as base_url may embed credentials.
-                    raise ApplyBlocked(
+                    raise ApplyTargetConflict(
                         "conflicting values for merged target key %r" % dotted)
                 merged[dotted] = value
             continue
         try:
             adapter = _adapter_for_step(t)
         except RuntimeError as exc:
-            raise ApplyBlocked(str(exc)) from exc
+            raise ApplyAdapterUnavailable(str(exc)) from exc
         try:
             snapshot_revision = adapter.revision()
             snap = snapshot_adapter(adapter)
         except StoreUnreadable as exc:
             # an unreadable raw file is a preflight failure, not empty state
-            raise ApplyBlocked(str(exc)) from exc
+            raise ApplyStoreUnreadable(str(exc)) from exc
         group_index[key] = len(prepared)
         revision = adapter.revision()
         if revision != snapshot_revision:
-            raise ApplyBlocked("store revision changed while capturing recovery snapshot")
+            raise ApplySnapshotRace(
+                "store revision changed while capturing recovery snapshot")
         if t.get("expected_revision") is not None and t["expected_revision"] != revision:
-            raise ApplyBlocked("reviewed revision changed before planning")
+            raise ApplyRevisionMoved("reviewed revision changed before planning")
         prepared.append({
             "profile": t.get("profile"),
             "store_kind": t["store_kind"],
@@ -242,7 +292,7 @@ def apply_operation(journal: OperationJournal, op_id: str,
     """
     op = journal.get(op_id)
     if op is None:
-        raise ApplyBlocked(f"unknown operation {op_id}")
+        raise ApplyUnknownOperation("unknown operation")
     if op["state"] not in (OP_PENDING, "applying"):
         # completed / already-compensated / recovery: a retry with the same
         # op_id returns the existing record instead of duplicating writes
@@ -358,7 +408,7 @@ def reconcile(journal: OperationJournal, op_id: str) -> Dict[str, Any]:
     """
     op = journal.get(op_id)
     if op is None:
-        raise ApplyBlocked(f"unknown operation {op_id}")
+        raise ApplyUnknownOperation("unknown operation")
     if op["state"] in (OP_COMMITTED, OP_COMPENSATED, OP_UNDONE,
                        OP_RECOVERY_REQUIRED):
         return op
@@ -446,10 +496,10 @@ def undo_operation(journal: OperationJournal, op_id: str) -> Dict[str, Any]:
     revision. A later external edit is preserved -> conflict, not clobber."""
     op = journal.get(op_id)
     if op is None:
-        raise ApplyBlocked(f"unknown operation {op_id}")
+        raise ApplyUnknownOperation("unknown operation")
     applied = [s for s in op["steps"] if s["state"] == STEP_APPLIED]
     if not applied:
-        raise ApplyBlocked("operation has no applied steps to undo")
+        raise ApplyNothingToUndo("operation has no applied steps to undo")
     conflicts = 0
     for step in reversed(applied):
         adapter = _adapter_for_step(step)
