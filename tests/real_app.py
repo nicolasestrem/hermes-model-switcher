@@ -34,16 +34,23 @@ for p in (str(REPO), str(REPO / "src"), str(HERMES_SRC)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+# ``model_catalog.enabled: false`` is Hermes' own offline switch for the remote
+# model-catalog manifest (hermes_cli.model_catalog.get_catalog: disabled ->
+# returns {} and fetches nothing). The lab never wants that fetch.
+_OFFLINE_BLOCK = "model_catalog:\n  enabled: false\n"
+
 PROFILES = {
     "default": (
         "model:\n  provider: anthropic\n  default: claude-sonnet-4-6\n"
         "providers:\n"
         "  zhipu:\n    base_url: http://127.0.0.1:8080/v1\n"
+        + _OFFLINE_BLOCK
     ),
     "research": (
         "model:\n  provider: openai\n  default: gpt-5.1\n"
         "providers:\n"
         "  zhipu:\n    base_url: http://127.0.0.1:8080/v1\n"
+        + _OFFLINE_BLOCK
     ),
 }
 # Deterministic mock credentials (lab-only, never a real provider key; no
@@ -134,9 +141,43 @@ def assert_seed_target_isolated(target: Path) -> Path:
     return resolved
 
 
+def lab_parent_dir() -> Path:
+    """The directory a lab home is minted under: ``TMPDIR`` when it is usable, else ``/tmp``.
+
+    ``TMPDIR`` is honoured only when the Hermes resolver treats a path beneath it
+    as its own root. A ``TMPDIR`` nested under the native ``~/.hermes`` resolves
+    back to the live home (``_hermes_root_of``: anything under ``~/.hermes`` *is*
+    ``~/.hermes``), so a lab there would mean profile writes against the real
+    tree — the exact thing this harness must never do. Nothing is created to
+    decide: the resolver is asked about a hypothetical child path.
+    """
+    from hermes_constants import get_default_hermes_root
+
+    native = get_default_hermes_root(home="").resolve(strict=False)
+    seen: list[Path] = []
+    for raw in (os.environ.get("TMPDIR"), "/tmp"):
+        if not raw:
+            continue
+        parent = Path(raw).expanduser().resolve(strict=False)
+        if parent in seen:
+            continue
+        seen.append(parent)
+        probe = parent / "msw-e2e-isolation-probe"
+        if parent == native:
+            continue
+        if get_default_hermes_root(home=str(probe)).resolve(strict=False) == probe:
+            return parent
+    return Path("/tmp")
+
+
 def create_lab_home() -> Path:
+    parent = lab_parent_dir()
+    declared = os.environ.get("TMPDIR")
+    if declared and Path(declared).expanduser().resolve(strict=False) != parent:
+        print(f"lab home: TMPDIR={declared} is not an isolated Hermes root, "
+              f"minting under {parent}", file=sys.stderr)
     home = assert_seed_target_isolated(
-        Path(tempfile.mkdtemp(prefix="msw-e2e-", dir="/tmp")))
+        Path(tempfile.mkdtemp(prefix="msw-e2e-", dir=str(parent))))
     seed_home(home)
     return home
 
@@ -155,9 +196,14 @@ def _cli() -> None:
     ap.add_argument("--home-file", default=str(REPO / "tests" / "real-home.json"))
     ap.add_argument("--print-profiles", action="store_true",
                     help="print the seed documents as JSON and exit")
+    ap.add_argument("--print-lab-parent", action="store_true",
+                    help="print the directory a lab home may be minted under and exit")
     args = ap.parse_args()
     if args.print_profiles:
         print(json.dumps(PROFILES))
+        raise SystemExit(0)
+    if args.print_lab_parent:
+        print(lab_parent_dir())
         raise SystemExit(0)
     if args.seed:
         if args.seed == "auto":
@@ -195,20 +241,233 @@ def assert_lab_isolation() -> None:
 if __name__ != "__main__":
     assert_lab_isolation()
 
+
+# -- offline lab ------------------------------------------------------------
+# The lab must never touch the network. Three layers, in the order Hermes itself
+# uses them:
+#   1. config switches (``model_catalog.enabled: false`` in the seeded config),
+#   2. warm on-disk caches — models.dev, the per-provider model-id cache and the
+#      reasoning-caps mirror — so every read path serves cache and no
+#      stale-while-revalidate / background warmer fires,
+#   3. a socket-level guard that refuses any remaining non-loopback connect, so
+#      a missed path fails loudly (and is recorded) instead of leaking out.
+# Layer 3 is the guarantee; 1+2 are what keep it from being exercised.
+NETWORK_ATTEMPTS: list[dict] = []
+_LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost", "0.0.0.0", "")
+
+
+def block_outbound_network() -> None:
+    """Refuse every connection that leaves this machine; record the attempt.
+
+    Loopback stays allowed (the harness talks to the lab over 127.0.0.1) and
+    non-IP families (AF_UNIX, used by subprocess plumbing) pass through. A
+    refused attempt raises inside the caller exactly like an unreachable
+    network would, so Hermes' own fail-soft paths behave normally.
+    """
+    import socket as _socket
+    import threading as _threading
+
+    if getattr(_socket.socket.connect, "_hms_lab_offline_guard", False):
+        return
+    real_connect = _socket.socket.connect
+
+    def guarded_connect(self, address, *args, **kwargs):
+        host = address[0] if isinstance(address, tuple) and address else None
+        if not isinstance(host, str):
+            return real_connect(self, address, *args, **kwargs)
+        if host in _LOOPBACK_HOSTS or host.startswith("127."):
+            return real_connect(self, address, *args, **kwargs)
+        NETWORK_ATTEMPTS.append({
+            "host": host,
+            "port": address[1] if len(address) > 1 else None,
+            "thread": _threading.current_thread().name,
+        })
+        raise OSError(f"lab is offline: outbound connection to {host} refused")
+
+    guarded_connect._hms_lab_offline_guard = True  # type: ignore[attr-defined]
+    _socket.socket.connect = guarded_connect
+
+
+def _profile_homes(home: Path) -> list[Path]:
+    """The launch home plus every named profile home that holds a config."""
+    homes = [home]
+    profiles = home / "profiles"
+    if profiles.is_dir():
+        for child in sorted(profiles.iterdir()):
+            if child.is_dir() and (child / "config.yaml").exists():
+                homes.append(child)
+    return homes
+
+
+def install_offline_caches() -> dict:
+    """Warm the caches Hermes' model read paths consult (no network involved).
+
+    Every value is derived from local data — the in-repo curated provider tables
+    (``hermes_cli.models_catalog_static._PROVIDER_MODELS``) and empty registries
+    that say "unknown" rather than inventing per-model facts. Rows are written
+    with the credential fingerprint the SERVING process resolves, which is why
+    this runs at app import and not in the seed CLI.
+
+    Caches are per HOME, and the routers run each request inside the requested
+    profile's home (``_profile_scope``), so every profile home gets its own set —
+    a cache only in the launch home leaves a ``?profile=`` read cold and it would
+    probe the network.
+    """
+    import time as _time
+
+    from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+    from hermes_cli.models import _credential_fingerprint
+    from hermes_cli.models_catalog_static import _PROVIDER_MODELS
+
+    launch_home = Path(get_hermes_home())
+    written: dict[str, object] = {}
+    written["homes:"] = [str(p) for p in _profile_homes(launch_home)]
+
+    # 1) models.dev registry: present and fresh. Providers carry no models, so
+    #    capability lookups answer "unknown" instead of fabricating metadata.
+    models_dev = {
+        slug: {"id": slug, "name": slug, "models": {}}
+        for slug in ("anthropic", "openai", "openrouter", "nous")
+    }
+
+    # 2) reasoning-capability mirror: a warm entry per catalog URL, so
+    #    _warm_caps_async never spawns its fetch thread. The single placeholder
+    #    id cannot collide with a real model, so nothing real is asserted about.
+    caps_ts = _time.time()
+    caps = {"lab-offline-placeholder": {"supports_reasoning": False}}
+    mirror: dict[str, object] = {
+        "https://openrouter.ai/api/v1/models": {"ts": caps_ts, "caps": caps},
+    }
+    try:
+        from hermes_cli.models_reasoning_caps import nous_catalog_url
+        mirror[nous_catalog_url()] = {"ts": caps_ts, "caps": caps}
+    except Exception:
+        # Unresolvable Portal URL: the guard still catches that fetch.
+        pass
+
+    for home in _profile_homes(launch_home):
+        token = set_hermes_home_override(str(home))
+        try:
+            home.mkdir(parents=True, exist_ok=True)
+            # Hermes materialises $HERMES_HOME/auth.json on the first credential
+            # read (env-seeded pool rows are persisted), and ``auth.json``'s
+            # existence/mtime is part of the provider fingerprint — so the first
+            # real request would invalidate rows fingerprinted before it. Read a
+            # pool first, exactly as the picker does, then fingerprint.
+            for slug in ("openai-api", "openai", "anthropic", "openrouter"):
+                try:
+                    from agent.credential_pool import load_pool
+                    load_pool(slug)
+                except Exception:
+                    pass
+            (home / "models_dev_cache.json").write_text(json.dumps(models_dev))
+            # 3) per-provider model-id cache: rows come from the curated static
+            #    tables (Hermes' own offline catalog), fingerprinted for THIS
+            #    home's credentials, so cached_provider_model_ids serves "fresh"
+            #    and probes nothing.
+            rows: dict[str, object] = {}
+            now = _time.time()
+            for slug, models in _PROVIDER_MODELS.items():
+                if not models:
+                    continue
+                try:
+                    rows[slug] = {"fp": _credential_fingerprint(slug), "at": now,
+                                  "models": list(models)}
+                except Exception:
+                    continue
+            (home / "provider_models_cache.json").write_text(json.dumps(rows))
+            cache_dir = home / "cache"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            (cache_dir / "reasoning_caps.json").write_text(json.dumps(mirror))
+            # 4) OpenRouter model-metadata mirror (pricing/context lookups):
+            #    fresh placeholder row, so an expensive-model guard asking for
+            #    pricing reads the cache instead of fetching openrouter.ai.
+            (cache_dir / "openrouter_model_metadata.json").write_text(json.dumps({
+                "lab-offline-placeholder": {"context_length": 0, "pricing": {}},
+            }))
+        finally:
+            reset_hermes_home_override(token)
+
+    written["models_dev"] = sorted(models_dev)
+    written["reasoning_caps"] = sorted(mirror)
+    written["provider_models"] = "curated static tables per provider"
+    return written
+
+
+_OFFLINE_CACHES: dict = {}
+block_outbound_network()
+_OFFLINE_CACHES = install_offline_caches()
+
+
+# -- real host model routes -------------------------------------------------
+# The dashboard's /api/model/* surface is Hermes' own extracted router
+# (hermes_cli/web_routers/models.py): route bodies, request validation, catalog
+# assembly and the config writes are Hermes' code, mounted unmodified. A host
+# has to supply the process state those routers resolve late from
+# ``hermes_cli.web_server`` (hermes_cli.web_deps). For these routes that is one
+# symbol — the config-mutation lock — so the lab supplies exactly that instead
+# of assembling the whole dashboard app (whose upload routers need
+# python-multipart, absent here). If a future Hermes route starts resolving more
+# web_server state, calls fail with AttributeError and the host-route tests fail:
+# nothing is silently stubbed.
+HOST_STATE_SYMBOLS = ("_CONFIG_MUTATION_LOCK",)
+
+
+def install_host_state():
+    """Install the minimal ``hermes_cli.web_server`` state the routers late-bind."""
+    import threading
+    import types
+
+    existing = sys.modules.get("hermes_cli.web_server")
+    if existing is not None:
+        return existing
+    module = types.ModuleType("hermes_cli.web_server")
+    module.__doc__ = "Lab-host state for hermes_cli.web_routers.* (tests/real_app.py)."
+    setattr(module, "_CONFIG_MUTATION_LOCK", threading.RLock())
+    sys.modules["hermes_cli.web_server"] = module
+    import hermes_cli
+    setattr(hermes_cli, "web_server", module)
+    return module
+
+
 from fastapi import FastAPI  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
 
 import dashboard.plugin_api as plugin_api  # noqa: E402
+from hermes_cli.web_routers import models as host_model_routes  # noqa: E402
 
 API_PREFIX = "/api/plugins/hermes-model-switcher"
 
 app = FastAPI()
 app.include_router(plugin_api.router, prefix=API_PREFIX)
+install_host_state()
+app.include_router(host_model_routes.router)
 
 
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
+
+
+@app.get("/lab/offline")
+async def lab_offline():
+    """What the lab is holding the network off with — for tests and evidence."""
+    return {
+        # Structural, not observational: every non-loopback connect raises in
+        # block_outbound_network, so nothing can reach the network from here.
+        "offline": True,
+        "outbound_connections": 0,
+        "guard": "socket.connect refuses every non-loopback address",
+        "refused_network_attempts": list(NETWORK_ATTEMPTS),
+        "config_switches": {"model_catalog.enabled": False},
+        "host_routes": [
+            "GET /api/model/options",
+            "GET /api/model/auxiliary",
+            "GET /api/model/moa",
+            "POST /api/model/set",
+        ],
+        "caches": _OFFLINE_CACHES,
+    }
 
 
 def _repo_file(rel: str) -> FileResponse:
