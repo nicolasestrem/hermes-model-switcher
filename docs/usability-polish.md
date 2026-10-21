@@ -60,16 +60,13 @@ Distinct, individually labelled actions — no silent equivalences:
 
 ## Runtime-derived auxiliary and plugin tasks
 
-- Auxiliary selectors are **derived from the installed runtime**, never frozen:
-  built-in tasks come from the installed Hermes auxiliary defaults and
-  additional tasks come from plugins registered through the plugin auxiliary
-  API.
-- Plugin task registration is resolved against **the profile being inventoried**
-  — its own context-local Hermes home, not one machine-global registry — so two
-  profiles can legitimately show different plugin task rows.
-- A **failed discovery is reported, not hidden**: an unconsumable discovery
-  surfaces as an inventory warning on the profile so a broken scan can never be
-  mistaken for an empty selector set (fail-closed).
+- Built-in auxiliary selectors use the public config defaults and a local mirror
+  of the host's inheritance rules. Plugin task rows come from SDK-authenticated
+  `GET /api/model/auxiliary?profile=...`, not a plugin-side registry import.
+- The host payload belongs to **the profile being inventoried**, so two profiles
+  can legitimately show different plugin task rows.
+- Missing or malformed host auxiliary data hides plugin-registered rows and adds
+  an inventory warning; it is never mistaken for a successful empty task list.
 - `goal_judge` stays a **judge-owned single row** (it is not duplicated as an
   auxiliary selector). Other auxiliary policy keys and obsolete ignored blocks
   are not task selectors, and a plugin task cannot shadow them. The scalar
@@ -142,8 +139,8 @@ The polish does not relax the review pipeline:
 
 ## Evidence boundary and verification
 
-Observed evidence for this pass is bounded and must not be read more broadly
-than it is:
+The following evidence is historical, from the pre-0.3.0 usability pass. It does
+not verify the public-seams refactor or its host-step protocol:
 
 - **Compiled UI in an SDK / host-reset fixture** (theme-light and theme-dark at
   1440/768/375 px, plus the interactive layout captures at desktop and mobile
@@ -157,7 +154,7 @@ than it is:
   exercised, and fixture checks do not establish deployment or merge status.
   Hosted-isolation mode remains read-only.
 
-Local verification for this change completed with exit code 0:
+Historical local verification for that usability pass completed with exit code 0:
 
 - `npm run build`
 - `env -u PYTHONPATH HMS_PYTHON="$PWD/.venv/bin/python" npm run test -- --workers=1` →

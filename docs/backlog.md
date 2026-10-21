@@ -14,13 +14,14 @@ Nothing here contains private host data.
 
 ## Compatibility
 
-- **Private Hermes seams.** `hermes plugins validate` warns under catalog rule 9 that
-  the integration imports private core modules (model catalog, profile scope, canonical
-  writer, and others). Validation passes, but these can break on later Hermes releases.
-  Migrate to supported public equivalents when they exist; do not add new private
-  imports casually. The catalog pricing seam (`hermes_cli.models_pricing`,
-  `agent.usage_pricing`, `agent.models_dev`) is import-probed behind `hermes_adapter`
-  and degrades to "unknown price" rather than failing when a seam drifts.
+- **Public host contract drift.** Version 0.3.0 uses public modules and authenticated
+  `/api/model/*` routes. Keep the private-import gate clean and reverify payload and
+  host-write semantics when Hermes changes. Missing public capabilities make the
+  plugin read-only; missing catalog evidence stays unknown. The old private-seam
+  migration item is resolved by this refactor, not retained as an exemption.
+- **Host-write concurrency.** The public assignment route has no expected-revision
+  parameter. Readback detects foreign edits and requires recovery rather than blind
+  rollback; it is not an atomic compare-and-swap. Avoid concurrent config writers.
 - **Platforms.** Linux is the verification target. macOS and native Windows are
   unverified, and the lab shell helpers are GNU/Linux-only.
 
@@ -56,5 +57,5 @@ Nothing here contains private host data.
 ## Distribution
 
 - **Catalog submission.** Readiness, entry template, and the exact submission procedure
-  live in [catalog-submission.md](catalog-submission.md). Status: ready-for-submission,
-  not submitted.
+  live in [catalog-submission.md](catalog-submission.md). The 0.3.0 entry is a draft
+  addressing the earlier catalog review; final-candidate checks remain pending.

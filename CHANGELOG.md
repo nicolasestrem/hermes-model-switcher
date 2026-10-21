@@ -1,52 +1,63 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
+
+### Public Hermes integration
+
+- Use public seams only. The UI obtains catalog, authentication and pricing data
+  from SDK-authenticated `GET /api/model/options`, profile-specific plugin tasks
+  from `/api/model/auxiliary`, and MoA presets from `/api/model/moa`. Catalog code
+  only transforms supplied host data; it no longer reads provider caches or
+  models.dev files directly.
+- Main and compatible auxiliary assignments use public `POST /api/model/set`,
+  including the host's separate expensive-model confirmation. Other slots use
+  public `hermes_cli.config` load/read-guard/save under the target home's scope.
+- Journal host steps as `awaiting_host`; the UI executes an allowlisted call and
+  returns a one-time-token result. Readback, not HTTP success, determines whether
+  the write committed. Recovery reconciles abandoned steps; Undo/compensation uses
+  the revision-guarded public backend writer.
+- Replace the version baseline and install-stamp dependency with a capability-based
+  runtime check. The tested reference is Hermes **v0.22.2+canary.20261020T065957Z**,
+  commit `c5a3c0f8`; it is a reproducibility pin, not a minimum-version floor.
+- Remove `plugin_backend_allowed` (the host gates plugin requests) and
+  `_profile_env_entries` (credential presence uses public scoped helpers, never
+  another profile's environment file).
+- Remove `HERMES_MODEL_SWITCHER_STATE_DIR` and the `~/.local/state` fallback.
+  State lives only at `<hermes home>/state/hermes-model-switcher/`; a location
+  inside the plugin tree or a Git worktree makes the plugin read-only.
+- Disclose that the undo journal copies each complete pre-change config, which
+  can contain sensitive fields, not just the model selection.
+
+### Accepted limits
+
+- Host write routes have no expected-revision check. Pre-call checks cannot make
+  the request atomic; foreign edits detected by readback end in
+  `recovery_required`, never silent success or blind overwrite during recovery.
+  Readback cannot prove every possible race was observable; avoid concurrent edits.
+- Main-slot preview shows provider/model intent. The exact persisted config diff
+  is available only after host readback, not predicted with private host helpers.
+
+### Model catalog and native dropdowns
+
+- Add a collapsible, provider-grouped catalog with per-1M-token list prices,
+  free/included/unknown badges, "Configured in" slots and preview-gated "Use".
+  Missing or pending pricing stays unknown, never free or `$0.00`; prices remain
+  informational and plugin billing approval is unchanged.
+- Provider/model editors and matrix filters use native `<select>` controls.
+  Authenticated providers come first; an explicit "Other" entry keeps custom
+  endpoints and exact model IDs available. Remove the hand-rolled ARIA combobox.
+- Plugin `POST /catalog` and `POST /models` transform the supplied host options.
+  Their old GET variants return 410 `hostCatalogRequired`; missing/malformed host
+  options return a fixed unavailable result, not empty success. Refresh goes
+  through the public host options route.
 
 ### Security
 
 - Fix `py/stack-trace-exposure` in the preview endpoint: a removal that cannot
-  bind now returns a fixed, class-level reason instead of `str(exc)`, and a
-  failing route seam reports its exception type only. Exception text can carry
-  config paths or secret neighbours and must never reach a response.
+  bind returns a fixed class-level reason, and a failing route seam reports its
+  exception type only. Exception text must never reach a response.
 - Fix `actions/unpinned-tag` in `claude.yml`: pin `anthropics/claude-code-action`
   to the `v1` commit instead of the moving tag.
-
-### Native route dropdowns
-
-- Replace the provider/model comboboxes with native `<select>` dropdowns. Provider
-  entries read "Label (slug)", authenticated providers first; providers needing
-  sign-in are listed but disabled. Model entries show the id, name and catalog
-  price per 1M tokens; a missing price reads "price not published", never free.
-- An explicit "Other — type an exact…" entry reveals an exact-id field, so custom
-  endpoints and uncatalogued routes remain first-class.
-- Model rows come from the cached `/catalog`; `GET /models` is used only for a
-  provider the catalog does not list. The catalog still loads lazily, on first
-  hover/focus of the provider dropdown.
-- Matrix provider/model filters are native dropdowns of values present in the
-  matrix, with exact matching; the model filter narrows to the chosen provider.
-- The editor's per-provider freshness list collapses into "Catalog details" under
-  a one-line summary (providers · models · stale · scope) with Refresh.
-- Remove the hand-rolled ARIA combobox and its styles; browser specs drive the
-  selects through `tests/route-helpers.mjs`.
-
-### Model catalog and dropdowns
-
-- Add a read-only `GET /catalog` route aggregating every provider's models with
-  per-1M-token list prices (picker pricing caches, then the official-pricing
-  snapshot, then the local models.dev registry), behind an import-probed seam in
-  `hermes_adapter`; seam drift degrades to "unknown price" instead of failing.
-  `/models` is unchanged.
-- Replace blind free-text provider/model entry with searchable ARIA comboboxes at
-  the point of editing and in the matrix filters; exact-ID typing stays
-  first-class for custom routes.
-- Add a collapsible bird's-eye model catalog: provider-grouped table with
-  input/output prices, free/included/unknown badges, a "Configured in" slot
-  cross-reference, a summary strip, and a preview-gated "Use" prefill.
-- Cost honesty throughout: unknown is never rendered as free or `$0.00`, no price
-  timestamps are invented, and the catalog stays informational — billing approval
-  is unchanged and re-derived server-side.
-- New backend tests (catalog pricing and catalog API) and browser specs
-  (`dropdowns.spec.mjs`, `models-catalog.spec.mjs`, `real-catalog.spec.mjs`).
 
 ## 0.2.0 — 2026-10-14
 

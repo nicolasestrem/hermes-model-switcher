@@ -17,8 +17,8 @@ what is configured and check a change before writing it.
 - Inspect supported routes across profiles in one filterable matrix. Configured
   routes stay separate from recorded usage; an open session may still use its old model.
 - See what you could switch to in the model catalog: a bird's-eye, provider-grouped
-  view of every model the profile can route to, with list prices per 1M tokens, free
-  and no-list-price entries marked distinctly, and which slots already use each model.
+  view of the host-listed models, with list prices per 1M tokens, free and unknown-price
+  entries marked distinctly, and which slots already use each model. A listing is not a routability test.
 - Select individual slots or a matching group, pick a provider and then one of
   its models from plain dropdowns (or choose "Other" for an exact pair), then preview the change.
   Filters change the view; checkboxes choose edit targets.
@@ -42,7 +42,8 @@ deployment or provider inference.*
 ![Model catalog with list prices per 1M tokens](docs/images/model-switcher-catalog-1440.png)
 
 *The provider-grouped catalog in the Dashboard SDK fixture with synthetic lab profiles.
-List prices come from Hermes' pricing caches, not from provider probes or recorded spend.*
+This is a pre-0.3.0 capture; current catalog prices come from the public host options
+payload, not direct plugin cache reads, inference or recorded spend.*
 
 ![Model catalog on a narrow screen](docs/images/model-switcher-catalog-375.png)
 
@@ -55,8 +56,9 @@ live Dashboard deployment or provider execution.*
 
 ### In the real Hermes Dashboard
 
-The same plugin, running in an isolated lab with two synthetic profiles (default
-and research) and synthetic routes:
+These pre-0.3.0 captures show an isolated lab with two synthetic profiles (default
+and research) and synthetic routes. They are historical evidence, not verification
+of the refactored host-step protocol:
 
 ![Routing matrix in the real Hermes Dashboard](docs/images/model-switcher-real-dashboard.png)
 
@@ -64,7 +66,8 @@ and research) and synthetic routes:
 
 ![A real preview of one synthetic main-model change](docs/images/model-switcher-real-preview.png)
 
-*Review the provider/model diff before any configuration is written.*
+*Review provider/model intent before writing. In 0.3.0, the main slot
+shows semantic intent; the exact persisted config diff appears only after readback.*
 
 ![A real committed operation with verified readback](docs/images/model-switcher-real-operation.png)
 
@@ -76,7 +79,15 @@ bytes exactly. These captures show configuration changes, not provider inference
 You need a running Hermes installation with the Web Dashboard and plugin support, and
 a Python version compatible with your Hermes release. This plugin declares Python
 `>=3.10`; the Hermes runtime it integrates with requires Python `>=3.11`. Linux is the
-verification target; macOS and native Windows are unverified. See
+verification target; macOS and native Windows are unverified.
+
+Version **0.3.0** needs the public Dashboard `/api/model/options`,
+`/api/model/auxiliary`, `/api/model/moa` and `/api/model/set` routes. The UI uses
+the authenticated Dashboard SDK; no private Hermes imports or direct pricing-cache
+reads are used by plugin runtime code. Missing required capabilities or host write
+routes leave affected changes read-only/unavailable. Compatibility is capability-based,
+not a minimum-version comparison. The tested reference is Hermes
+**v0.22.2+canary.20261020T065957Z**, commit `c5a3c0f8`; see
 [release readiness](docs/release-readiness.md) for evidence and remaining checks.
 
 ### From this repository
@@ -141,11 +152,14 @@ when you rebuild the UI yourself.
    entry shows its list price), open **Browse model catalog** to compare options, or
    choose **Other** to enter an exact provider/model pair for custom routes. Model IDs belong to their provider,
    so keep the pair together.
-3. **Preview changes.** Review the affected profiles and side effects. Resolve blocked
+3. **Preview changes.** Review the affected profiles and proposed routing. Main-slot
+   preview shows provider/model intent, not an exact future config diff. Resolve blocked
    entries and acknowledge unknown-cost routes when required. Changing the selection
    or routing requires a fresh preview.
-4. **Apply and inspect.** Check each profile's readback in the operation drawer, then
-   save the setup as a preset for next time.
+4. **Apply and inspect.** Main and compatible auxiliary assignments run through the
+   host write route. If Hermes requests expensive-model confirmation, approve or cancel
+   its separate dialog; plugin billing approval does not bypass it. Check each profile's
+   readback and exact persisted diff, then save the setup as a preset for next time.
 
 Favorites open a preset preview before application. **Refresh state** reloads external
 edits. Advanced controls cover inherited/default routing, ordered fallback sequences,
@@ -157,25 +171,31 @@ and exact-model removal; see [advanced routing](docs/technical-reference.md).
   configuration; an already-running session keeps its previous routing until a new
   session starts. Configured routing is **not** proof of inference or of recorded
   usage.
-- **Does it manage or copy credentials?** No. Credentials stay in Hermes and are read
-  through its authenticated routes. If a target profile has no connected credential,
-  the change is blocked rather than routed around.
+- **Does it manage credentials?** It does not copy credentials between profiles or
+  modify authentication stores. Presence checks use public profile-scoped secret helpers
+  and authenticated host options; it never reads another profile's environment file
+  directly. Missing credential evidence blocks the change. Recovery snapshots do copy
+  complete pre-change configs, which can include embedded credentials; keep them private.
 - **What if the model list looks stale or a provider is missing?** Model catalog
   refresh can contact provider services; a catalog result is a listing, not an
   inference test. Missing providers usually mean a missing credential on that profile.
-- **Where do the catalog prices come from?** List prices per 1M tokens come from the
-  installed Hermes pricing caches and official pricing snapshots — not from provider
-  probes, inference, or your recorded spend. They can lag behind provider pricing
-  pages; a missing price is shown as unknown, never as free or `$0.00`.
+- **Where do the catalog prices come from?** List prices per 1M tokens come only from
+  `GET /api/model/options` pricing fields. The plugin does not open pricing registries
+  or provider caches. Host prices can lag behind provider pages; missing or pending
+  prices stay unknown, never free or `$0.00`. They are not inference or recorded spend.
 - **Someone edited a config while I was reviewing — what happens?** Each operation
-  validates profiles and revisions. Avoid concurrent CLI or editor edits during Apply
-  or Undo, and use **Refresh state** to reload external changes.
+  validates profiles and revisions, but the host write route has no expected-revision
+  check. Readback detects foreign edits and ends in `recovery_required`, not silent
+  success or blind rollback. It cannot prove every possible race was observable. Avoid
+  concurrent CLI/editor edits during Apply or Undo and use **Refresh state** afterwards.
 - **Can I undo anything?** Undo is explicit, per-operation, and revision-guarded: it
   refuses to overwrite conflicting external edits. Disabling or uninstalling the plugin
   does **not** reverse changes already applied.
-- **Where does recovery data live?** In a private local SQLite journal outside Git
-  worktrees and browser assets, created `0600` inside a `0700` directory. Keep it
-  private — snapshots can contain sensitive configuration.
+- **Where does recovery data live?** Only under `<hermes home>/state/hermes-model-switcher/`,
+  with a private SQLite journal (`0600` in a `0700` directory). If that location is
+  inside the plugin tree or a Git worktree, the plugin is read-only; no alternate
+  location is chosen. The journal keeps a copy of each complete pre-change config,
+  including any sensitive fields, not just the model selection.
 - **What if my saved presets get corrupted?** The original preset store is quarantined
   (kept, not deleted) and valid entries are salvaged with a visible `presetsCorrupt`
   warning, so a damaged file is not silently swallowed and is not silently overwritten.
@@ -201,17 +221,22 @@ and exact-model removal; see [advanced routing](docs/technical-reference.md).
   synthetic profiles took about seven seconds in the lab. See
   [release readiness](docs/release-readiness.md) and
   [backlog](docs/backlog.md).
-- **Platform scope.** Linux is verified; macOS and native Windows are unverified.
-- **Private Hermes APIs.** Integration uses private Hermes seams and may need updates
-  for future Hermes releases.
+- **Platform scope.** Linux is the verification target; macOS and native Windows are
+  unverified. Earlier green results do not establish final 0.3.0 compatibility.
+- **Host capabilities required.** Missing public config/home/secret capabilities make
+  the plugin read-only; missing host payloads show notices and unknown data. Main and
+  compatible auxiliary writes need `/api/model/set`; other slots use public config
+  load/save under the target home. No private-core compatibility shim is used.
 
 ## Privacy
 
 The plugin does not copy credentials between profiles or rewrite authentication stores,
 memories, skills, or transcripts. It uses the Dashboard's authenticated transport.
-Before writing, it saves private recovery snapshots in the local journal described
-above; public operation responses expose status and outcomes without raw
-configurations, snapshots, store paths, or exception strings. Read the
+Before writing, it copies each complete pre-change config into the private undo
+journal described above. Those snapshots can contain sensitive data even if only
+the model was changed; never publish journals, sidecars or backups. Public operation
+responses expose status, outcomes and only the current host call's allowlisted
+fields/token, without raw configurations, snapshots, store paths or exception strings. Read the
 [privacy audit](docs/privacy-audit.md) for scope and limits.
 
 ## Recovery
@@ -223,6 +248,13 @@ matches; a conflict stops compensation and the operation reports `recovery_requi
 compensated, partial, or `recovery_required` outcome is reported as `ok=false` with a
 fixed failure category and the operation's final state — a success is never claimed for
 a fleet that did not fully apply.
+
+Main and compatible auxiliary steps pause at `awaiting_host` while the UI calls
+`POST /api/model/set` through the Dashboard SDK and returns a one-time-token result.
+The backend verifies the actual config before committing; an HTTP success alone is
+not enough. Abandoned host steps are reconciled during recovery/restart. The host
+route cannot perform an expected-revision check, so foreign changes detected at
+readback require recovery rather than blind restoration.
 
 **Undo is explicit and per-operation.** It refuses to overwrite conflicting external
 edits. After a crash, recovery reconciles recorded intent with the actual files. Keep

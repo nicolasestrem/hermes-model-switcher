@@ -3,7 +3,7 @@
 This page separates local checks from CI, real host behavior and deployment.
 No production configuration, inference call or live plugin installation is used by these checks.
 
-## Observed integrated checks
+## Historical integrated checks (pre-0.3.0)
 
 Candidate `feat/model-catalog` (release-candidate tree; commit id recorded in the
 release PR) was checked on Linux, Python 3.13 and Node 26:
@@ -39,5 +39,8 @@ A workflow existing in this repository is not evidence that a GitHub runner pass
 
 - No inference benchmark or live-session model switch is claimed.
 - Linux is the exercised platform; macOS and native Windows remain unverified.
-- Private Hermes imports remain a documented compatibility risk; see [catalog submission](catalog-submission.md).
+- Version 0.3.0 uses public Hermes seams only; require a clean private-import gate,
+  real SDK host-step readback/confirmation checks and the new reference pin. Earlier
+  results above are not acceptance evidence for that refactor. See
+  [release readiness](release-readiness.md) and [catalog submission](catalog-submission.md).
 - A ready PR is not a merged release, official endorsement, curated catalog listing or live deployment.
