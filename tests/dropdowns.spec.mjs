@@ -119,9 +119,14 @@ test("model options state the catalog price and never render unknown as free", a
   await expect(option("hermes-4-70b")).toHaveText(/— free$/);
   await expect(option("hermes-4-70b")).not.toContainText("$0.00");
   await expect(option("hermes-4-mini")).toHaveText(/— included in subscription$/);
-  await expect(option("hermes-unknown")).toHaveText(/— price not published$/);
+  // An unknown price is no longer repeated per row: the row ends with the model
+  // name and the provider states it once (below), only when EVERY model of the
+  // provider is unknown — nous publishes real prices, so no note here.
+  await expect(option("hermes-unknown")).toHaveText("hermes-unknown (Hermes Unknown)");
+  await expect(option("hermes-unknown")).not.toContainText("price not published");
   await expect(option("hermes-unknown")).not.toContainText("free");
   await expect(option("hermes-unknown")).not.toContainText("$0.00");
+  await expect(page.getByTestId("model-price-note")).toHaveCount(0);
 
   // A catalogued provider needs no extra /models request.
   expect((await modelRequests(page)).length).toBe(0);
