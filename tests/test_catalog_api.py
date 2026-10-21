@@ -26,10 +26,13 @@ if str(REPO) not in sys.path:
 LAB_HOST_PATH = str(Path("/home") / "lab" / "config.yaml")
 
 import dashboard.plugin_api as api  # noqa: E402
+import dashboard.model_catalog as mc  # noqa: E402
 
 PROVIDER_KEYS = {"id", "label", "authenticated", "configured", "isCurrent",
                  "modelCount", "fetchedAt", "stale", "warning", "models"}
-MODEL_KEYS = {"id", "label", "pricingStatus", "cost"}
+# ``capabilities`` is optional on a model entry, so it is asserted separately.
+MODEL_REQUIRED_KEYS = {"id", "label", "pricingStatus", "cost"}
+CAPABILITY_KEYS = {"fast", "reasoning", "canDisableReasoning"}
 COST_KEYS = {"unit", "input", "output", "cacheRead", "display", "free",
              "source", "pricingVersion"}
 
@@ -114,7 +117,8 @@ def test_catalog_returns_aggregate_dto_with_no_store(fake):
     assert provider["label"] == "Nous"
     assert provider["modelCount"] == 1
     model = provider["models"][0]
-    assert set(model) == MODEL_KEYS
+    assert set(model) == MODEL_REQUIRED_KEYS
+    assert set(model) <= set(mc.MODEL_KEYS)
     assert model["pricingStatus"] == "priced"
     assert set(model["cost"]) == COST_KEYS
     assert model["cost"]["display"] == {
@@ -343,3 +347,116 @@ def test_pending_host_prices_are_unknown_not_invented_free(fake):
     assert body["cost"] == {"pending": True, "unavailableProviders": []}
     model = body["providers"][0]["models"][0]
     assert model["pricingStatus"] == "unknown" and model["cost"] is None
+
+
+# -- per-model capability flags ---------------------------------------------
+# The host's shape (`hermes_cli/inventory.py::_apply_capabilities`): one
+# row-level `capabilities` dict keyed by the exact model id, each entry
+# `{fast, reasoning[, can_disable_reasoning]}` plus non-forwarded extras such
+# as `ultrafast`. The DTO allowlists it to camelCased booleans.
+
+
+def _catalog_models(options, provider="nous"):
+    r = _client().post("/catalog", json={"provider": provider, "options": options})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True, body
+    return body["providers"][0]["models"]
+
+
+def _catalog_model(options, provider="nous", model_id="hermes-4-405b"):
+    r = _client().post("/catalog", json={"provider": provider, "options": options})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True, body
+    return next(m for m in body["providers"][0]["models"] if m["id"] == model_id)
+
+
+def test_model_capabilities_pass_through_with_camelcase_names(fake):
+    fake["providers"][0]["capabilities"] = {
+        "hermes-4-405b": {"fast": True, "reasoning": False,
+                          "can_disable_reasoning": True}}
+    model = _catalog_model(fake)
+    assert model["capabilities"] == {
+        "fast": True, "reasoning": False, "canDisableReasoning": True}
+    assert set(model["capabilities"]) == CAPABILITY_KEYS
+    assert set(model) <= set(mc.MODEL_KEYS)
+
+
+def test_missing_capability_evidence_omits_the_object_instead_of_defaulting(fake):
+    # No map at all, an empty map, and an empty entry for this model are all
+    # "the host said nothing" — never a synthesized False.
+    for capabilities in (None, {}, {"hermes-4-405b": {}}):
+        provider = fake["providers"][0]
+        if capabilities is None:
+            provider.pop("capabilities", None)
+        else:
+            provider["capabilities"] = capabilities
+        model = _catalog_model(fake)
+        assert "capabilities" not in model
+        assert set(model) == MODEL_REQUIRED_KEYS
+
+
+def test_non_boolean_capability_values_are_dropped_not_coerced(fake):
+    fake["providers"][0]["capabilities"] = {
+        "hermes-4-405b": {"fast": 1, "reasoning": "yes",
+                          "can_disable_reasoning": None}}
+    assert "capabilities" not in _catalog_model(fake)
+
+    fake["providers"][0]["capabilities"] = {
+        "hermes-4-405b": {"fast": True, "reasoning": "yes",
+                          "can_disable_reasoning": 0}}
+    assert _catalog_model(fake)["capabilities"] == {"fast": True}
+
+
+def test_only_allowlisted_capability_keys_reach_the_dto(fake):
+    fake["providers"][0]["capabilities"] = {
+        "hermes-4-405b": {"fast": True, "reasoning": True, "ultrafast": True,
+                          "supported_efforts": ["low", "high"], "tools": True,
+                          "vision": {"supported": True}, "context": 131072}}
+    model = _catalog_model(fake)
+    assert model["capabilities"] == {"fast": True, "reasoning": True}
+    dumped = json.dumps(model)
+    for forbidden in ("ultrafast", "supported_efforts", "can_disable_reasoning",
+                      "tools", "vision", "context", "131072"):
+        assert forbidden not in dumped
+
+
+def test_capabilities_attach_to_the_exact_host_model_id_only(fake):
+    # The host keys the map by the id it listed; a near-miss (" hermes-4-405b ")
+    # must not be guessed onto this model.
+    fake["providers"][0]["capabilities"] = {
+        " hermes-4-405b ": {"fast": True},
+        "hermes-4-405b": {"reasoning": True},
+    }
+    model = _catalog_model(fake)
+    assert model["capabilities"] == {"reasoning": True}
+    fake["providers"][0]["capabilities"] = {" hermes-4-405b ": {"fast": True}}
+    assert "capabilities" not in _catalog_model(fake)
+
+
+def test_capability_maps_are_not_shared_across_models(fake):
+    fake["providers"][0]["models"] = ["hermes-4-405b", "hermes-4-mini"]
+    fake["providers"][0]["capabilities"] = {
+        "hermes-4-405b": {"fast": True, "reasoning": True},
+        "hermes-4-mini": {"fast": False, "reasoning": True,
+                          "can_disable_reasoning": False},
+        "unlisted-model": {"fast": True},
+    }
+    models = {m["id"]: m for m in _catalog_models(fake)}
+    assert models["hermes-4-405b"]["capabilities"] == {"fast": True, "reasoning": True}
+    assert models["hermes-4-mini"]["capabilities"] == {
+        "fast": False, "reasoning": True, "canDisableReasoning": False}
+    assert "unlisted-model" not in models
+
+
+def test_models_route_carries_the_same_capability_object(fake):
+    fake["providers"][0]["capabilities"] = {
+        "hermes-4-405b": {"fast": True, "reasoning": True,
+                          "can_disable_reasoning": False}}
+    r = _client().post("/models", json={"provider": "nous", "options": fake})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["models"] == [{"id": "hermes-4-405b", "name": "hermes-4-405b",
+                               "capabilities": {"fast": True, "reasoning": True,
+                                                "canDisableReasoning": False}}]

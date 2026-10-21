@@ -2378,8 +2378,11 @@ def models_legacy():
 def models(body: Dict[str, Any], response: Response):
     """Provider-aware model ids — the catalog module's own DTO, verbatim.
 
-    Shape: ``{ok, provider, models:[{id,name}], fetchedAt, source, stale,
-    error, providers}``. The host ``options`` payload is required evidence;
+    Shape: ``{ok, provider, models:[{id,name[, capabilities]}], fetchedAt,
+    source, stale, error, providers}``. A model entry carries a
+    ``capabilities`` object of allowlisted booleans (``fast``, ``reasoning``,
+    ``canDisableReasoning``) only when the host reported it; absent means
+    unknown, never False. The host ``options`` payload is required evidence;
     ``ok=False`` (with an explanatory ``error``) is a visible failure, never a
     silently empty success. When no payload exists and the UI declares its
     fixed ``optionsFailure: "hostRestartRequired"`` category (the host's 503
@@ -2421,7 +2424,11 @@ def catalog(body: Dict[str, Any], response: Response):
 
     Shape: ``{ok, profileId, providers:[{id, label, authenticated, configured,
     isCurrent, modelCount, fetchedAt, stale, warning, models:[{id, label,
-    pricingStatus, cost}]}], cost:{pending, unavailableProviders}, error}``.
+    pricingStatus, cost[, capabilities]}]}], cost:{pending,
+    unavailableProviders}, error}``. A model entry carries a ``capabilities``
+    object of allowlisted booleans (``fast``, ``reasoning``,
+    ``canDisableReasoning``) only when the host reported it; absent means
+    unknown, never False.
     No host options -> ``ok=false`` with ``hostCatalogUnavailable``; unknown
     profile / module failure / zero provider rows are ``ok=false`` with a
     sanitized ``error`` (HTTP 200), never an empty success. When no payload
