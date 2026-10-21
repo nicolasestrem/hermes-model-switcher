@@ -12,14 +12,14 @@ const t = (v, fb) => `var(--${v}, ${fb})`;
 // an overlay token and may be fully transparent; do not use it for text.
 // Legacy surface/text aliases remain supported for older hosts and fixtures.
 const THEME = {
-  accent: t("accent-color", "#6f9bff"),
+  accent: "var(--color-ring, var(--accent-color, #6f9bff))",
   bg: "var(--background, var(--surface-color, #16181d))",
   fg: "var(--midground, var(--text-color, #e6e8ee))",
   muted: t("text-muted-color", "#9aa1ad"),
-  border: t("border-color", "#2c3038"),
-  danger: t("danger-color", "#e5534b"),
-  ok: t("success-color", "#3fb950"),
-  warn: t("warning-color", "#d29922"),
+  border: "var(--color-border, var(--border-color, #2c3038))",
+  danger: "var(--danger-color, var(--hms-danger-text, #e5534b))",
+  ok: "var(--success-color, var(--hms-success-text, #3fb950))",
+  warn: "var(--warning-color, var(--hms-warning-text, #d29922))",
 };
 
 // Theme-reactive opaque colour for the sticky matrix header. Never a

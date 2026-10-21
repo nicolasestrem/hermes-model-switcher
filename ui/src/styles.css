@@ -18,6 +18,12 @@
   --hms-surface: var(--background, var(--surface-color, #1b1e24));
   --hms-border: var(--color-border, var(--border-color, #3a3f48));
   --hms-radius: 6px;
+  /* Host semantic tokens win. For hosts supplying only the foreground/surface
+     pair, tint the established fallback toward text so light surfaces remain
+     readable too. Undefined --midground preserves the legacy fallbacks. */
+  --hms-danger-text: color-mix(in srgb, #e5534b 65%, var(--midground));
+  --hms-success-text: color-mix(in srgb, #3fb950 50%, var(--midground));
+  --hms-warning-text: color-mix(in srgb, #d29922 50%, var(--midground));
 
   color: var(--midground, var(--text-color, #e6e8ee));
   font-size: 14px;
@@ -224,16 +230,6 @@
   min-width: 0;
 }
 
-/* Human-readable state badges — text-backed semantics, colour is support only */
-.hms-root .hms-badge {
-  display: inline-block;
-  padding: 1px 8px;
-  border: 1px solid var(--hms-border);
-  border-radius: 999px;
-  font-size: 13px;
-  line-height: 1.6;
-  white-space: nowrap;
-}
 
 /* Inline explanatory notes (read-only reasons, hidden-selection counts) */
 .hms-root .hms-note {
@@ -319,6 +315,7 @@
 /* Preserve readable route columns while the narrow viewport scrolls the table. */
 .hms-root [data-testid="matrix-scroll"] table {
   min-width: 850px;
+  font-size: 14px;
 }
 
 .hms-root td,
@@ -366,7 +363,7 @@
   padding: 0 6px;
   border: 1px solid var(--hms-border);
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 600;
   line-height: 18px;
 }
@@ -431,7 +428,7 @@
 .hms-root .hms-catalog-freshness {
   display: grid;
   gap: 4px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
 
@@ -501,7 +498,7 @@
 
 .hms-root .hms-catalog-heading .hms-note {
   margin: 4px 0 0;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .hms-root .hms-catalog-actions {
@@ -510,7 +507,7 @@
 
 .hms-root .hms-catalog-provenance {
   margin: 0;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
 
@@ -551,7 +548,7 @@
 }
 
 .hms-root .hms-catalog-summary dt {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
 
@@ -564,7 +561,7 @@
 
 .hms-root .hms-catalog-summary dd span {
   display: block;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 400;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
@@ -572,7 +569,7 @@
 .hms-root .hms-catalog-pending-note,
 .hms-root .hms-catalog-notices p {
   margin: 0;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
 
@@ -598,7 +595,7 @@
   flex: 1 1 260px;
   display: grid;
   gap: 4px;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .hms-root .hms-catalog-search input {
@@ -620,7 +617,7 @@
 .hms-root .hms-catalog-sort {
   display: grid;
   gap: 4px;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .hms-root .hms-catalog-sort select {
@@ -678,7 +675,7 @@
 
 .hms-root .hms-catalog-model-id {
   display: block;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
   overflow-wrap: anywhere;
 }
@@ -689,7 +686,7 @@
   padding: 0 6px;
   border: 1px solid var(--hms-border);
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
 
@@ -715,12 +712,12 @@
 }
 
 .hms-root .hms-catalog-group-head code {
-  font-size: 11px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
 
 .hms-root .hms-catalog-group-head > span {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
 
@@ -728,7 +725,7 @@
 .hms-root .hms-catalog-unavailable {
   display: block;
   margin-top: 4px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
   overflow-wrap: anywhere;
 }
@@ -744,7 +741,7 @@
 }
 
 .hms-root .hms-catalog-included {
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .hms-root .hms-catalog-unknown {
@@ -756,13 +753,13 @@
   display: block;
   margin-top: 4px;
   max-width: 190px;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
 
 .hms-root .hms-catalog-no-models {
   color: var(--text-muted-color, var(--midground, #9aa1ad));
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .hms-root .hms-catalog-panel {
@@ -848,14 +845,14 @@
   margin: 0 0 8px;
   font-size: 13px;
 }
-.hms-root .hms-apply-progress [data-step-status="applied"] { color: var(--success-color, #3fb950); }
+.hms-root .hms-apply-progress [data-step-status="applied"] { color: var(--success-color, var(--hms-success-text, #3fb950)); }
 .hms-root .hms-apply-progress [data-step-status="failed"],
-.hms-root .hms-apply-progress [data-step-status="recovery_required"] { color: var(--danger-color, #e5534b); }
+.hms-root .hms-apply-progress [data-step-status="recovery_required"] { color: var(--danger-color, var(--hms-danger-text, #e5534b)); }
 .hms-root .hms-apply-progress [data-step-status="compensated"],
 .hms-root .hms-apply-progress [data-step-status="conflict"],
 .hms-root .hms-apply-progress [data-step-status="awaiting_host"],
 .hms-root .hms-apply-progress [data-step-status="confirm"],
-.hms-root .hms-host-notice:not([data-state="loading"]) { color: var(--warning-color, #d29922); }
+.hms-root .hms-host-notice:not([data-state="loading"]) { color: var(--warning-color, var(--hms-warning-text, #d29922)); }
 .hms-root .hms-host-notice[data-state="loading"] { color: var(--text-muted-color, #9aa1ad); }
 .hms-root button[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
 @media (prefers-reduced-motion: reduce) {

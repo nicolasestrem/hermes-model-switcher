@@ -74,6 +74,48 @@ test("transparent host overlay never becomes invisible plugin text", async ({ pa
   await expect(page.locator("thead th").first()).toHaveCSS("background-color", "rgb(4, 28, 28)");
 });
 
+for (const theme of ["light", "dark"]) {
+  test(`operational text and rules follow the host contract in ${theme}`, async ({ page }) => {
+    const light = theme === "light";
+    await page.route("**/fixture.html", async route => {
+      const response = await route.fetch();
+      const tokens = light
+        ? "--background:#fafafa;--midground:#151515;--text-muted-color:#595959;--color-border:#777;--color-ring:#0055aa"
+        : "--background:#16181d;--midground:#e6e8ee;--text-muted-color:#a5acb8;--color-border:#515965;--color-ring:#6f9bff";
+      await route.fulfill({ response, body: (await response.text()).replace("</head>", `<style>:root{${tokens};--border-color:#2c3038}body{background:var(--background);color:var(--midground)}</style></head>`) });
+    });
+    await page.goto("/fixture.html");
+    const table = page.getByTestId("matrix-scroll").locator("table");
+    await expect(table).toHaveCSS("font-size", "14px");
+    await expect(table.locator("th").first()).toHaveCSS("border-bottom-color", light ? "rgb(119, 119, 119)" : "rgb(81, 89, 101)");
+    await page.evaluate(() => { window.__mockApi.catalogPortalModels = true; });
+    await page.getByTestId("catalog-toggle").click();
+    await expect(page.getByTestId("catalog-table")).toBeVisible();
+    for (const selector of [".hms-badge", ".hms-catalog-model-id", ".hms-catalog-provenance", ".hms-catalog-use-reason", ".hms-catalog-freshness"]) {
+      const sizes = await page.locator(selector).evaluateAll(elements => elements.map(el => parseFloat(getComputedStyle(el).fontSize)));
+      expect(sizes.length).toBeGreaterThan(0);
+      expect(Math.min(...sizes)).toBeGreaterThanOrEqual(13);
+    }
+    // Missing host evidence remains actionable text, not an unreadable amber
+    // fallback over a light surface. The existing state notice supplies it.
+    await page.evaluate(() => sessionStorage.setItem("hms-mock-flags", JSON.stringify({ hostMissing: true })));
+    await page.reload();
+    const notice = page.getByTestId("host-notice");
+    await expect(notice).toHaveAttribute("data-state", "unavailable");
+    const contrast = await notice.evaluate(el => {
+      const sample = document.createElement("canvas").getContext("2d");
+      const rgb = color => {
+        sample.fillStyle = color; sample.fillRect(0, 0, 1, 1);
+        return [...sample.getImageData(0, 0, 1, 1).data].slice(0, 3);
+      };
+      const luminance = color => rgb(color).map(v => v / 255).map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4).reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0);
+      const fg = luminance(getComputedStyle(el).color), bg = luminance(getComputedStyle(document.body).backgroundColor);
+      return (Math.max(fg, bg) + .05) / (Math.min(fg, bg) + .05);
+    });
+    expect(contrast).toBeGreaterThanOrEqual(4.5);
+  });
+}
+
 test("modern theme overrides a stale opaque legacy surface", async ({ page }) => {
   await page.route("**/fixture-sdk.html", async route => {
     const response = await route.fetch();
