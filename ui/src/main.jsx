@@ -3,7 +3,7 @@
 // (--hms reads Dashboard theme tokens with sane fallbacks).
 import React, { useEffect, useMemo, useRef, useState } from "shims/react.js";
 import { createRoot } from "shims/react-dom-client.js";
-import { api, ApiError, hostFailureText, hostStatusOf, loadHostBundle, validateHostCall } from "./api.js";
+import { api, ApiError, catalogErrorText, hostFailureText, hostStatusOf, HOST_RESTART_REQUIRED, loadHostBundle, validateHostCall } from "./api.js";
 import { resolveOpaqueSurface } from "./theme.js";
 
 const t = (v, fb) => `var(--${v}, ${fb})`;
@@ -649,7 +649,7 @@ function ModelCatalogView({ catalog, profileId, slots, onRefresh, onRetry, onCol
       {!data && !loading && error && (
         <div className="hms-catalog-panel" data-kind="error" role="alert"
           data-testid="catalog-view-error">
-          <span><strong>Catalog failed to load:</strong> {error}</span>
+          <span><strong>Catalog failed to load:</strong> {catalogErrorText(error)}</span>
           <button type="button" data-testid="catalog-view-retry" onClick={() => onRetry?.()}>
             Retry
           </button>
@@ -666,7 +666,7 @@ function ModelCatalogView({ catalog, profileId, slots, onRefresh, onRetry, onCol
       {data && error && (
         <div className="hms-catalog-panel" data-kind="error" role="alert"
           data-testid="catalog-view-error">
-          <span><strong>Catalog refresh failed:</strong> {error} — showing the last loaded catalog.</span>
+          <span><strong>Catalog refresh failed:</strong> {catalogErrorText(error)} — showing the last loaded catalog.</span>
           <button type="button" data-testid="catalog-view-retry" onClick={() => onRetry?.()}>
             Retry
           </button>
@@ -1372,7 +1372,7 @@ function ChangeEditor({
             )}
             {catalog.error && (
               <div className="hms-route-status" role="alert" data-testid="catalog-error">
-                Provider list unavailable: {catalog.error}{" "}
+                Provider list unavailable: {catalogErrorText(catalog.error)}{" "}
                 <button type="button" data-testid="catalog-retry" onClick={() => onRetryCatalog?.()}>Retry</button>
               </div>
             )}
@@ -1411,7 +1411,7 @@ function ChangeEditor({
               </div>
             )}
             {!modelError && fallbackModels?.error && (
-              <div className="hms-route-status" role="note" data-testid="model-note">{fallbackModels.error}</div>
+              <div className="hms-route-status" role="note" data-testid="model-note">{catalogErrorText(fallbackModels.error)}</div>
             )}
             {modelProvider && editor.model && (
               <p className="hms-route-summary" data-testid="route-summary">
@@ -2177,15 +2177,17 @@ function App() {
   };
   // Host parts for one profile, fetched on demand (catalog / model lists) when
   // the mount-time load has not reached it yet, or refetched on refresh.
+  // Resolves to `{ parts, failures }` so the caller can carry a FIXED failure
+  // category (e.g. hostRestartRequired) into its own request.
   const ensureHostFor = async (profileId, { refresh = false } = {}) => {
     const pid = profileId || "";
     const current = hostRef.current && hostRef.current.profiles ? hostRef.current.profiles[pid] : null;
-    if (current && !refresh) return current;
+    if (current && !refresh) return { parts: current, failures: [] };
     const { host: bundle, failures } = await loadHostBundle([pid], { refresh });
     const merged = { profiles: { ...(hostRef.current.profiles || {}), ...bundle.profiles } };
     adoptHost(merged);
     if (failures.length) setHostNotice({ text: hostFailureText(failures), kind: "partial" });
-    return merged.profiles[pid];
+    return { parts: merged.profiles[pid], failures };
   };
   // Resolve the pending host cost confirmation. `true` = Confirm, `false` =
   // Cancel; the loop reports `declined` and the backend compensates.
@@ -2339,9 +2341,16 @@ function App() {
       // host part for this profile is fetched (or refetched with refresh=1 on
       // an explicit Refresh) BEFORE the plugin route is asked. A missing host
       // route leaves `options: null`: the backend then answers its truthful
-      // hostCatalogUnavailable DTO instead of an invented catalog.
-      await ensureHostFor(pid, { refresh });
-      const data = await api.getCatalog({ profileId: pid, refresh, host: hostRef.current });
+      // hostCatalogUnavailable DTO instead of an invented catalog. When the
+      // read failed with the host's 503 restart-required guard, the UI also
+      // sends its ONE fixed category token (`optionsFailure:
+      // "hostRestartRequired"`) so the DTO can name the case — a category the
+      // plugin chose, never host response text.
+      const { failures } = await ensureHostFor(pid, { refresh });
+      const optionsFailure = (failures || []).some((f) =>
+        f && f.part === "options" && f.category === HOST_RESTART_REQUIRED)
+        ? HOST_RESTART_REQUIRED : null;
+      const data = await api.getCatalog({ profileId: pid, refresh, host: hostRef.current, optionsFailure });
       if (seq !== catalogSeq.current) return;
       catalogCache.current.set(pid, data);
       setCatalog({ profileId: pid, data, error: null, loading: false, refreshed: refresh });

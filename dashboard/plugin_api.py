@@ -2348,6 +2348,26 @@ def _catalog_options(body: Dict[str, Any], host: HostBundle,
     return host.options(profile_id) if profile_id else None
 
 
+def _catalog_failure(body: Dict[str, Any], module: Any) -> Optional[str]:
+    """The UI's declared failure category for the options read, sanitized.
+
+    Closed vocabulary: only the exact fixed token ``hostRestartRequired`` (the
+    transform's own constant) is accepted, and only when NO options payload is
+    present. Everything else — arbitrary strings, host-shaped text — is
+    ignored, so this route can never echo unknown content back into the DTO.
+    The token is a category the PLUGIN UI chose; the host's 503 detail sentence
+    itself never crosses this boundary.
+    """
+    if not isinstance(body, dict):
+        return None
+    if isinstance(body.get("options"), dict):
+        return None
+    value = body.get("optionsFailure")
+    if value == getattr(module, "HOST_RESTART_REQUIRED", None):
+        return value
+    return None
+
+
 @router.get("/models")
 def models_legacy():
     """Legacy GET: the model catalog requires the host's options payload."""
@@ -2361,8 +2381,10 @@ def models(body: Dict[str, Any], response: Response):
     Shape: ``{ok, provider, models:[{id,name}], fetchedAt, source, stale,
     error, providers}``. The host ``options`` payload is required evidence;
     ``ok=False`` (with an explanatory ``error``) is a visible failure, never a
-    silently empty success. The response is never cached, and no
-    journal/preset/state path is touched.
+    silently empty success. When no payload exists and the UI declares its
+    fixed ``optionsFailure: "hostRestartRequired"`` category (the host's 503
+    code-skew guard), ``error`` names that case instead. The response is never
+    cached, and no journal/preset/state path is touched.
     """
     response.headers["Cache-Control"] = "no-store"
     host = host_bundle(body)
@@ -2378,7 +2400,8 @@ def models(body: Dict[str, Any], response: Response):
     try:
         result = module.models_response(
             _catalog_options(body, host, profile_id), provider,
-            profile_id=profile_id, refresh=bool(body.get("refresh")))
+            profile_id=profile_id, refresh=bool(body.get("refresh")),
+            options_failure=_catalog_failure(body, module))
     except Exception as exc:
         return {**failure, "error": "catalog lookup failed"}
     if not isinstance(result, dict):
@@ -2401,7 +2424,10 @@ def catalog(body: Dict[str, Any], response: Response):
     pricingStatus, cost}]}], cost:{pending, unavailableProviders}, error}``.
     No host options -> ``ok=false`` with ``hostCatalogUnavailable``; unknown
     profile / module failure / zero provider rows are ``ok=false`` with a
-    sanitized ``error`` (HTTP 200), never an empty success. Deliberately NOT
+    sanitized ``error`` (HTTP 200), never an empty success. When no payload
+    exists and the UI declares its fixed
+    ``optionsFailure: "hostRestartRequired"`` category (the host's 503
+    code-skew guard), ``error`` names that case instead. Deliberately NOT
     gated on ``_runtime_writable()``: reading a catalog is safe on a read-only
     runtime. The response is never cached and this path performs no
     journal/preset/state writes.
@@ -2422,7 +2448,8 @@ def catalog(body: Dict[str, Any], response: Response):
     try:
         result = module.catalog_response(
             _catalog_options(body, host, profile_id), provider,
-            profile_id=profile_id, refresh=bool(body.get("refresh")))
+            profile_id=profile_id, refresh=bool(body.get("refresh")),
+            options_failure=_catalog_failure(body, module))
     except Exception as exc:
         return {**failure, "error": "catalog lookup failed"}
     if not isinstance(result, dict):
