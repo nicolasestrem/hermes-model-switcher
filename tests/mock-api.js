@@ -15,6 +15,8 @@
       catalogPending: false, catalogEmpty: false, catalogDuplicateModel: false,
       catalogManyModels: false, catalogPortalModels: false, catalogLinkedSlots: false,
       catalogNoPrices: false, catalogZeroPriced: false,
+      // Real provider catalogs (e.g. Nous Portal) send label === id.
+      catalogIdLabels: false,
       // ---- host route emulation (Hermes' own /api/model/*) ----------------
       // `hostMissing` / `hostMissingParts` = the route is not served at all
       // (an older host, or a plugin running without it). `hostSetHttp` = the
@@ -176,7 +178,7 @@
     const providers = rows.map((p) => {
       const models = (p.models || []).map((m) => {
         const mapped = {
-          id: m.id, label: m.label, pricingStatus: m.pricingStatus, cost: m.cost,
+          id: m.id, label: M.catalogIdLabels ? m.id : m.label, pricingStatus: m.pricingStatus, cost: m.cost,
         };
         // Every row unknown: exercises the "no cheapest tile when no prices"
         // branch without inventing a provider-specific shape.

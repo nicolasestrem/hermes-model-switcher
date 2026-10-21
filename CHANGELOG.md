@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Catalog rows no longer show the model id twice in a solid bar
+
+- Real provider catalogs (Nous Portal, OpenRouter-style) send `label === id`,
+  so every row rendered the id twice; the second copy is a `<code>`, which the
+  host dashboard's bare `code { background: var(--selection-bg); color:
+  var(--background) }` chip rule turned into a full-width bar (unreadable in
+  some themes). The id line now renders only when it adds information, and
+  `.hms-root code` neutralises the host chip.
+- Why it escaped: fixtures hand-copied part of the host preflight and the mock
+  always sent distinct labels. New `tests/host-css-guard.spec.mjs` renders the
+  plugin under the REAL host stylesheet from the pinned Hermes checkout, with
+  `catalogIdLabels` mock data, plus a screenshot baseline.
+- `npm run check:live` (`scripts/live-catalog-check.mjs`) runs the same checks
+  against a running dashboard in Chromium and Firefox after install/update;
+  `npm run check:design` runs the Impeccable detector over `ui/src/`.
+
 ### Host 503 "Restart required" is now named and actionable
 
 - When the running Hermes dashboard process is older than the checkout on disk,

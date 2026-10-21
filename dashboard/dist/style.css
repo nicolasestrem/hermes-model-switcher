@@ -747,6 +747,16 @@
   overflow-wrap: anywhere;
 }
 
+/* The host ships a bare `code { background: var(--selection-bg); color:
+   var(--background) }` chip rule meant for prose. Inside the plugin every
+   <code> is quiet metadata, so neutralise the chip before styling it. */
+.hms-root code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  border-radius: 0;
+}
+
 .hms-root .hms-catalog-model-id {
   display: block;
   font-size: 13px;

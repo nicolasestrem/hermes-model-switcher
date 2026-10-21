@@ -215,8 +215,12 @@ function CatalogRow({ provider, model, pending, grouped, routeIndex, onUse, prof
     <tr data-model-row data-provider-id={provider.id} data-model-id={model.id}
       data-pricing-status={catalogStatusText(model.pricingStatus)}>
       <td data-column="model">
-        <span className="hms-catalog-model-label">{model.label || model.id}</span>{" "}
-        <code className="hms-catalog-model-id">{model.id}</code>
+        <span className="hms-catalog-model-label">{model.label || model.id}</span>
+        {/* Real catalogs often send label === id; the id line only earns its
+            place when it adds information. */}
+        {model.label && model.label !== model.id && (
+          <code className="hms-catalog-model-id">{model.id}</code>
+        )}
         {!grouped && <span className="hms-catalog-provider-tag">{provider.id}</span>}
       </td>
       <td className="hms-catalog-price" data-column="input">
