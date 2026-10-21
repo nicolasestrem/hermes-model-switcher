@@ -19,6 +19,30 @@
     <div data-plugin-root="hermes-model-switcher"></div>
   </main>
   <script src="tests/vendor.js"></script>
+  <script>
+    // Minimal shell transport over the real, same-origin lab routes. Resolve
+    // window.fetch at call time, just like the SDK fixture (no API responses
+    // are synthesized here, including host confirmation/error payloads).
+    window.__realSdkCalls = [];
+    window.__HERMES_PLUGIN_SDK__ = {
+      React: window.React,
+      ReactDOM: window.ReactDOM,
+      authedFetch: (url, init) => {
+        window.__realSdkCalls.push({ url: String(url), method: init?.method || "GET" });
+        return window.fetch(url, init);
+      },
+      async fetchJSON(url, init) {
+        const response = await this.authedFetch(url, init);
+        const body = await response.json();
+        if (!response.ok) {
+          const error = new Error(String(response.status));
+          error.status = response.status;
+          throw error;
+        }
+        return body;
+      },
+    };
+  </script>
   <script src="ui/dist/plugin.js"></script>
 </body>
 </html>
