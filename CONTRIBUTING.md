@@ -10,7 +10,8 @@ Thanks for helping improve Model Switcher — a community Hermes Web Dashboard p
 - Every write target must be a discovered profile's config; refuse anything else
   before writing.
 - Public operation views are allowlists: never expose raw configs, paths, snapshots,
-  payloads, secrets, or exception strings.
+  stored payloads, secrets, or exception strings. The only request body a view
+  carries is the allowlisted `hostCall.body` the UI forwards to the host route.
 - Keep preview, apply, per-profile readback, and revision-guarded Undo working
   together. Do not weaken the journal's fail-closed privacy behaviour.
 - Tests use lab homes and fake credentials only. Never touch a live Hermes home and

@@ -36,6 +36,18 @@
   Readback cannot prove every possible race was observable; avoid concurrent edits.
 - Main-slot preview shows provider/model intent. The exact persisted config diff
   is available only after host readback, not predicted with private host helpers.
+- Backend-slot saves send changed leaves through `save_config(merge_existing=True)`,
+  so concurrent edits to unrelated keys survive. A same-key edit landing between
+  the revision check and Hermes' own lock can still be overwritten undetected, and
+  deletions need a full-state save. Closing this needs an upstream compare-and-save seam.
+- When a host save normalizes legacy raw config aliases, Undo cannot recreate them
+  exactly and stops at `recovery_required` instead of claiming a restore.
+
+### Verification
+
+Against Hermes `c5a3c0f8`: 743 Python tests and 185 browser tests (mock fixture
+and real backend with Hermes' own `/api/model/*` routers) pass with nothing
+skipped; `hermes plugins validate` passes with no private-core-import warning.
 
 ### Model catalog and native dropdowns
 

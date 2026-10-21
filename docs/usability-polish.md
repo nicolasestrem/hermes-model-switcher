@@ -177,7 +177,7 @@ The polish does not relax the review pipeline:
 
 This refinement preserves the host-native design contract, native selects, editor-first DOM, pinned first Tab target, seven matrix columns, exact DTOs and every preview/apply/readback/undo guard. It restores 14px matrix body / 13px secondary text, modern host-token precedence, readable semantic fallbacks on both prescribed host themes, 16px root gutters, two-column narrow filters and compact tablet picks. It removes duplicate no-selection prose, both thick side borders, nested advanced-disclosure chrome, metric-card boxes and smooth scrolling. Empty-state copy is concrete; unavailable Apply no longer receives enabled hover/primary emphasis.
 
-Evidence is in the profile scratch `impeccable-polish/` folder, not committed screenshots:
+Screenshot and detector evidence was captured locally and is not committed:
 
 | Evidence | Observed result |
 |---|---|
@@ -189,7 +189,7 @@ Evidence is in the profile scratch `impeccable-polish/` folder, not committed sc
 | States | Initial, selected matrix, editor, preview, host loading/partial/unavailable, host-step apply progress, confirm, host error, recovery required, catalog + priced/free/unknown/unauthenticated rows |
 | Enabled-text contrast samples, light / dark | Foreground 17.495 / 14.496; muted 6.711 / 7.774; danger 6.411 / 6.876; success 6.523 / 9.948; warning 6.473 / 10.170 |
 | Build | `npm run build`, exit 0 |
-| Mock specs | `env -u PYTHONPATH HMS_FXT_PORT=8951 node_modules/.bin/playwright test --config=/home/hermes/.hermes/profiles/brian/cache/scratch/ps-ui-mock.config.mjs --workers=2`, exit 0; **138 passed, 0 failed** |
+| Mock specs | Playwright, mock fixture project only, `--workers=2`, exit 0; **138 passed, 0 failed** |
 | Stylesheet contract | `ui/src/styles.css`, `dashboard/dist/style.css`, `ui/dist/style.css` byte-equal; scoped-style spec green |
 
 The new regression tests assert actual host-rule colors, 14/13px type, sampled warning-text contrast in both themes, compact two-column filters, flat disclosure/notices/counts and no smooth-scroll dependency. Existing behavior assertions were not weakened. Build outputs were generated only with the build command.
