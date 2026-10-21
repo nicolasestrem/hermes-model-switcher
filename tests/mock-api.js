@@ -54,6 +54,13 @@
     mk("research", "delegation.fallback_providers", "fallback", "openai", "gpt-5-mini"),
     mk("archived", "main", "main", "anthropic", "claude-sonnet-4-6", { writable: false }),
   ];
+  // These optional rows are real mutable fixture assignments, not fresh copies
+  // appended to each read (host writes and recovery must remain observable).
+  if (window.__mockApi.catalogLinkedSlots) slots.push(
+    mk("default", "auxiliary.vision", "auxiliary", "nous", "hermes-4-405b"),
+    mk("research", "cron.model", "automation", "nous", "hermes-4-405b"),
+    mk("research", "auxiliary.vision", "auxiliary", "nous", "hermes-4-405b"),
+  );
 
   const presets = [{
     id: "p-fast", name: "Fast lane",
@@ -273,7 +280,7 @@
       .filter((s) => s.profileId === profileId && s.slotId.startsWith("auxiliary."))
       .map((s) => ({
         task: s.slotId.slice("auxiliary.".length), label: s.slotId,
-        provider: s.provider, model: s.model, base_url: "",
+        provider: s.provider, model: s.model, base_url: s.base_url || "",
         reasoning_effort: null, local_endpoint: false, plugin: false, inherit_from: null,
       }));
     return { tasks, main: { provider: main.provider, model: main.model } };
@@ -333,7 +340,10 @@
     // refreshed /state shows the new route exactly like the real host would.
     const slotId = scope === "main" ? "main" : `auxiliary.${body.task || ""}`;
     const target = slots.find((s) => s.profileId === profileId && s.slotId === slotId);
-    if (target && !M.hostNoWrite) { target.provider = body.provider || target.provider; target.model = body.model || target.model; }
+    if (target && !M.hostNoWrite) {
+      target.provider = body.provider || target.provider; target.model = body.model || target.model;
+      if (scope === "auxiliary" && body.base_url) target.base_url = body.base_url;
+    }
     return { status: 200, body: {
       ok: true, scope, provider: body.provider || "", model: body.model || "",
       tasks: scope === "auxiliary" ? [body.task || ""] : [],
@@ -360,35 +370,99 @@
   }
 
   // ---- host-step protocol (operation → hostCall → host-result → …) ------
-  // Mirrors section D of the shared contract: the engine journals a step per
-  // (profile, slot); host-owned slots are handed to the browser one at a time
-  // with a single-use token, and the backend continues on `host-result`.
-  function isHostSlot(slotId) {
-    const id = String(slotId || "");
-    return id === "main" || id.startsWith("auxiliary.");
-  }
-
-  function hostSetBodyFor(step) {
-    const to = (step.change && step.change.to) || {};
-    const route = to.provider ? to : (Array.isArray(to.chain) && to.chain.length ? to.chain[0] : {});
-    const main = String(step.slotId) === "main";
-    const body = { scope: main ? "main" : "auxiliary", provider: route.provider || "", model: route.model || "" };
-    if (!main) body.task = String(step.slotId).replace(/^auxiliary\./, "");
+  // Match plugin_api.py::aux_host_route/_host_execution_plan and the engine's
+  // ONE step per (profile, canonical_config), not one step per selected slot.
+  function hostBodyFor(change) {
+    const to = change.to;
+    if (change.action === "remove" || !to || typeof to !== "object" || Array.isArray(to)) return null;
+    const target = slots.find((s) => s.profileId === change.profileId && s.slotId === change.slotId);
+    if (!target || !target.writable || target.protected) return null;
+    const provider = typeof to.provider === "string" ? to.provider.trim() : "";
+    const model = typeof to.model === "string" ? to.model.trim() : "";
+    if (!provider || !model) return null;
+    if (change.slotId === "main") return { scope: "main", provider, model };
+    if (target.family !== "auxiliary" || !/^auxiliary\.[^.]+$/.test(change.slotId) || change.slotId === "auxiliary.openrouter_model") return null;
+    if (Object.keys(to).some((key) => !["provider", "model", "base_url"].includes(key))) return null;
+    const body = { scope: "auxiliary", provider, model, task: change.slotId.slice("auxiliary.".length) };
+    if (to.base_url !== undefined && to.base_url !== null && to.base_url !== "") {
+      const base = String(to.base_url).trim();
+      try {
+        const url = new URL(base);
+        if (!["http:", "https:"].includes(url.protocol) || !url.host || url.username || url.password || url.search || url.hash) return null;
+      } catch { return null; }
+      body.base_url = base;
+    } else {
+      if (Object.hasOwn(to, "base_url")) return null; // explicit clear, not assignment
+      if (provider.toLowerCase() !== String(target.provider || "").trim().toLowerCase() && provider !== "custom") return null;
+    }
     return body;
   }
 
-  // Per-profile aggregate of the journal steps — the same `results` shape a
-  // single-shot operation reports, so the drawer renders both identically.
+  function executionPlan(changes) {
+    const planned = (changes || []).map((c) => ({ ...c, executor: hostBodyFor(c) ? "host" : "backend" }));
+    const blocked = [];
+    const refused = new Set();
+    for (const profileId of dedupeProfiles(planned)) {
+      const group = planned.filter((c) => c.profileId === profileId);
+      const host = group.filter((c) => c.executor === "host");
+      if (!host.length || group.length === 1) continue;
+      if (host.some((c) => c.slotId === "main")) {
+        refused.add(profileId);
+        blocked.push({ profileId, slotId: "main", kind: "host_scope", reason:
+          "the main assignment must be applied on its own for this profile: a host assignment and another config change cannot share one atomic step — apply them separately" });
+      } else {
+        for (const c of group) c.executor = "backend";
+      }
+    }
+    return { changes: planned.filter((c) => !refused.has(c.profileId)), blocked };
+  }
+
+  function writeChange(change) {
+    const target = slots.find((s) => s.profileId === change.profileId && s.slotId === change.slotId);
+    if (!target) return;
+    if (change.action === "remove") {
+      target.provider = ""; target.model = "";
+      delete target.base_url; delete target.api_mode;
+      return;
+    }
+    const to = change.to || {};
+    const route = to.provider ? to : (Array.isArray(to.chain) && to.chain.length ? to.chain[0] : {});
+    Object.assign(target, route);
+  }
+
+  function stepChanged(step) {
+    return step.snapshots.some(({ index, value }) => JSON.stringify(slots[index]) !== JSON.stringify(value));
+  }
+
+  function restoreStep(step) {
+    for (const { index, value } of step.snapshots) slots[index] = structuredClone(value);
+    step.status = "compensated";
+  }
+
+  function failHostOperation(op, category) {
+    const step = op.steps.find((s) => s.status === "awaiting_host");
+    step.status = "failed";
+    // A lost/error response may follow a successful host write. Treat that
+    // written-but-failed step as compensation-owned too (engine.py:518-523).
+    const written = op.steps.filter((s) => s.status === "applied" || (s === step && stepChanged(s)));
+    for (const s of written.reverse()) { s.postWritten = true; restoreStep(s); }
+    op.awaiting = null; op.token = null;
+    op.state = written.length ? "compensated" : "pending";
+    op.finalState = op.state; op.failure = category;
+    return hostEnvelope(op, null);
+  }
+
+  // Public journal-step projection, matching plugin_api.py::_op_dto.
   function operationDto(op) {
     if (!op || !Array.isArray(op.steps)) return op; // already a plain DTO
-    const results = op.steps.map((step) => ({
-      profileId: step.profileId, status: step.status, store: "config",
+    const results = op.steps.map((step, seq) => ({
+      profileId: step.profileId, status: step.status, seq, store: "canonical_config",
       revisionBefore: "rev" + step.profileId + "-a",
-      revisionAfter: "rev" + step.profileId + (step.status === "applied" ? "-b" : "-a"),
+      revisionAfter: step.postWritten ? "rev" + step.profileId + "-b" : null,
     }));
     return {
       id: op.id, state: op.state, results,
-      undoable: results.some((r) => r.status === "applied"),
+      undoable: op.state === "committed" && results.some((r) => r.status === "applied"),
       final_state: op.finalState || op.state,
       failure: op.failure || null,
     };
@@ -406,11 +480,15 @@
   function startHostOperation(id, changes) {
     const op = {
       id, state: "pending", finalState: "pending", failure: null,
-      steps: (changes || []).map((c) => ({
-        profileId: c.profileId, slotId: c.slotId,
-        executor: isHostSlot(c.slotId) ? "host" : "backend",
-        change: c, status: "pending",
-      })),
+      steps: dedupeProfiles(changes || []).map((profileId) => {
+        const group = changes.filter((c) => c.profileId === profileId);
+        return {
+          profileId, changes: group,
+          executor: group[0].executor, hostBody: group[0].executor === "host" ? hostBodyFor(group[0]) : null,
+          snapshots: slots.flatMap((row, index) => row.profileId === profileId ? [{ index, value: structuredClone(row) }] : []),
+          status: "pending",
+        };
+      }),
       seq: 0, token: null, awaiting: null,
     };
     operations[id] = op;
@@ -434,9 +512,11 @@
           seq: op.seq, token: op.token, method: "POST",
           path: "/api/model/set",
           query: { profile: next.profileId },
-          body: hostSetBodyFor(next),
+          body: next.hostBody,
         });
       }
+      for (const c of next.changes) writeChange(c);
+      next.postWritten = true;
       next.status = "applied";
     }
     op.awaiting = null;
@@ -489,14 +569,7 @@
       return { status: 200, body: modelsFor(body.provider || "") };
     }
     const stateBody = () => {
-      const linked = M.catalogLinkedSlots
-        ? [
-          mk("default", "auxiliary.vision", "auxiliary", "nous", "hermes-4-405b"),
-          mk("research", "cron.model", "automation", "nous", "hermes-4-405b"),
-          mk("research", "auxiliary.vision", "auxiliary", "nous", "hermes-4-405b"),
-        ]
-        : [];
-      return { ok: true, profiles, slots: [...slots, ...linked], presets };
+      return { ok: true, profiles, slots: [...slots], presets };
     };
     if (path === BASE + "/state" && method === "GET") {
       if (M.failState) return { status: 200, body: { ok: false, error: "raw config unreadable" } };
@@ -526,14 +599,14 @@
       return { status: 200, body: dto };
     }
     if (path === BASE + "/preview" && method === "POST") {
-      const changes = (body.changes || []).map((c) => ({
+      const plan = executionPlan(body.changes || []);
+      const changes = plan.changes.map((c) => ({
         ...c,
-        sideEffects: c.action === "set" && c.to.provider === "zhipu" ? ["canonical tool defaults seeded"] : [],
+        sideEffects: c.action === "set" && c.to?.provider === "zhipu" ? ["canonical tool defaults seeded"] : [],
       }));
-      const blocked = changes.filter((c) => !profiles.find((p) => p.id === c.profileId && p.writable))
-        .map((c) => ({ profileId: c.profileId, reason: "profile is read-only" }));
-      if (blocked.length) return { status: 200, body: { ok: true, preview: { id: "prev-x", changes: [], blocked } } };
-      const preview = { id: "prev-" + (++previewSeq), changes };
+      const blocked = [...plan.blocked, ...changes.filter((c) => !profiles.find((p) => p.id === c.profileId && p.writable))
+        .map((c) => ({ profileId: c.profileId, reason: "profile is read-only" }))];
+      const preview = { id: "prev-" + (++previewSeq), changes: changes.filter((c) => !blocked.some((b) => b.profileId === c.profileId)), blocked };
       lastPreview = preview;
       return { status: 200, body: { ok: true, preview } };
     }
@@ -551,9 +624,13 @@
         error: "apply blocked: the canonical route was rejected",
         reasons: ["Nous Portal is not connected: no API key or login was found for it."],
       } } };
-      const preview = lastPreview;
+      const preview = body.previewId ? lastPreview : body.changes ? executionPlan(body.changes) : lastPreview;
       if (!preview || (body.previewId && body.previewId !== preview.id))
         return { status: 200, body: { ok: false, error: "unknown or stale preview" } };
+      if (preview.blocked?.length) return body.previewId
+        ? { status: 409, body: { detail: { ok: false, blocked: true,
+          error: "apply blocked: the preview contained blocked changes", reasons: preview.blocked.map((b) => b.reason) } } }
+        : { status: 422, body: { detail: { ok: false, error: "preview blocked for some profiles", blocked: preview.blocked } } };
       const failed = Boolean(M.failReadback);
       const rollback = M.rollbackMode || null; // "compensated" | "partial" | "recovery_required"
       const noWrite = Boolean(M.noWrite); // F1 known no-write conflict
@@ -620,7 +697,7 @@
         const status = statusFor(i);
         const changed = status === "applied";
         return {
-          profileId: pid, status,
+          profileId: pid, status, seq: i, store: "canonical_config",
           revisionBefore: "rev" + pid + "-a",
           revisionAfter: changed ? "rev" + pid + "-b" : "rev" + pid + "-a",
         };
@@ -631,7 +708,7 @@
         results,
         // A non-committed operation is not undoable through the drawer; the
         // backend exposes that as ``undoable: false``.
-        undoable: results.some((r) => r.status === "applied"),
+        undoable: state === "committed" && results.some((r) => r.status === "applied"),
         // Terminal classification + a FIXED failure category (never raw text).
         final_state: state,
         failure,
@@ -648,51 +725,24 @@
       if (!op || !Array.isArray(op.steps)) return { status: 200, body: { ok: false, error: "unknown operation" } };
       // Single-use token: a replay or a foreign token changes no state.
       if (!op.awaiting || body.seq !== op.awaiting.seq || body.token !== op.awaiting.token) {
-        return { status: 409, body: { ok: false, error: "host_token_mismatch" } };
+        return { status: 409, body: { detail: { ok: false, error: "host_token_mismatch", failure: "host_token_mismatch" } } };
       }
       const step = op.steps.find((s) => s.status === "awaiting_host");
-      op.awaiting = null;
-      op.token = null;
-      const compensateApplied = () => {
-        for (const s of op.steps) if (s.status === "applied") {
-          const target = slots.find((row) => row.profileId === s.profileId && row.slotId === s.slotId);
-          if (target && s.change?.from) Object.assign(target, s.change.from);
-          s.status = "compensated";
-        }
-      };
-      const fail = (status, category) => {
-        step.status = status;
-        op.failure = category;
-        compensateApplied();
-        op.state = "compensated";
-        op.finalState = "compensated";
-        return hostEnvelope(op, null);
-      };
       if (body.outcome === "ok") {
-        // The host answered ok but nothing changed: the backend detects this by
-        // re-reading the store (`host_no_write`), never by trusting `ok`.
-        if (M.hostNoWrite) return fail("failed", "host_no_write");
+        // Readback, not the reported HTTP outcome, proves a write landed.
+        if (!stepChanged(step)) return failHostOperation(op, "host_no_write");
+        step.postWritten = true;
         step.status = "applied";
+        op.awaiting = null; op.token = null;
         return advanceHostOperation(op);
       }
-      if (body.outcome === "declined") return fail("compensated", "host_declined");
-      return fail("failed", "host_error");
+      return failHostOperation(op, body.outcome === "declined" ? "host_declined" : "host_error");
     }
     const opRecover = path.match(new RegExp("^" + BASE + "/operations/([^/]+)/recover$"));
     if (opRecover && method === "POST") {
       const op = operations[opRecover[1]];
       if (!op) return { status: 404, body: { ok: false, error: "unknown operation" } };
-      if (op.awaiting) {
-        for (const s of op.steps) {
-          if (s.status === "applied") {
-            const target = slots.find((row) => row.profileId === s.profileId && row.slotId === s.slotId);
-            if (target && s.change?.from) Object.assign(target, s.change.from);
-            s.status = "compensated";
-          } else if (s.status === "awaiting_host") s.status = "failed";
-        }
-        op.awaiting = null; op.token = null;
-        op.state = "compensated"; op.finalState = "compensated"; op.failure = "host_error";
-      }
+      if (op.awaiting) return failHostOperation(op, "host_error");
       return hostEnvelope(op, null);
     }
     const opUndo = path.match(new RegExp("^" + BASE + "/operations/([^/]+)/undo$"));

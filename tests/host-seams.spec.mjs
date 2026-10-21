@@ -67,14 +67,13 @@ test("host data loads through the SDK with an explicit profile per profile and r
   await expect(page.getByTestId("host-notice")).toHaveCount(0);
 });
 
-test("apply performs two host steps plus a mixed backend step, shown per step", async ({ page }) => {
+test("apply performs a backend step then a host step on different profiles, shown per store", async ({ page }) => {
   await open(page);
-  // Slot order decides step order: default/main (host), research/main (host),
-  // research/delegation.fallback_providers (backend — a chain the engine owns).
+  // Same-profile main + another config target is refused by the real API.
+  // Cross-profile mixed execution is valid; backend seq 0 means host seq 1.
   await selectAndReview(page, [
-    "Select default main",
+    "Select default cron.model",
     "Select research main",
-    "Select research delegation.fallback_providers",
   ], "nous", "hermes-4-405b");
 
   const progress = page.getByTestId("apply-progress");
@@ -84,17 +83,16 @@ test("apply performs two host steps plus a mixed backend step, shown per step", 
   // Each host step was performed with the host route, its explicit profile and
   // the exact assignment the engine asked for.
   const hostSets = (await requests(page)).filter((r) => r.host && r.path === "/api/model/set");
-  expect(hostSets.length).toBe(2);
-  expect(hostSets.map((r) => r.body.scope)).toEqual(["main", "main"]);
+  expect(hostSets.length).toBe(1);
+  expect(hostSets.map((r) => r.body.scope)).toEqual(["main"]);
   expect(hostSets.map((r) => new URLSearchParams(r.search).get("profile")))
-    .toEqual(["default", "research"]);
+    .toEqual(["research"]);
   expect(hostSets[0].body).toMatchObject({ provider: "nous", model: "hermes-4-405b" });
 
   // Each outcome was reported back with its sequence number and the token the
   // envelope handed out; the status is numeric only.
   const results = (await requests(page)).filter((r) => r.path.endsWith("/host-result"));
   expect(results.map((r) => r.body)).toEqual([
-    { seq: 0, token: "tok-op-1-0", outcome: "ok" },
     { seq: 1, token: "tok-op-1-1", outcome: "ok" },
   ]);
 
@@ -106,14 +104,13 @@ test("apply performs two host steps plus a mixed backend step, shown per step", 
   expect(operationRequests[0].body.host).toEqual(previewRequest.body.host);
   expect(hostSets.every((r) => r.sessionHeader === "fixture-session")).toBe(true);
 
-  // Per-step progress, and the final per-profile truth from the DTO.
+  // Per-store journal progress, with no invented extra result for a slot.
   await expect(progress).toContainText("Apply progress — finished");
-  await expect(progress.locator("li")).toHaveCount(3);
-  for (const seq of [0, 1, 2]) await expect(page.getByTestId(`apply-step-step-${seq}`)).toHaveAttribute("data-step-status", "applied");
+  await expect(progress.locator("li")).toHaveCount(2);
+  for (const seq of [0, 1]) await expect(page.getByTestId(`apply-step-step-${seq}`)).toHaveAttribute("data-step-status", "applied");
   await expect(page.getByTestId("result-default")).toContainText("Applied + read back");
-  await expect(page.getByTestId("result-research")).toHaveCount(2);
-  await expect(page.getByTestId("result-research").first()).toContainText("Applied + read back");
-  await expect(page.getByTestId("result-research").last()).toContainText("Applied + read back");
+  await expect(page.getByTestId("result-research")).toHaveCount(1);
+  await expect(page.getByTestId("result-research")).toContainText("Applied + read back");
   await expect(page.getByTestId("live-status")).toContainText("finished");
 });
 
@@ -160,7 +157,10 @@ test("the host's expensive-model guard: Confirm applies with confirm_expensive_m
   expect(declined.body.outcome).toBe("declined");
   await expect(page.getByTestId("operation-failure")).toHaveAttribute("data-failure-category", "host_declined");
   await expect(page.getByTestId("operation-failure")).toContainText("declined at the model confirmation");
-  await expect(page.getByTestId("result-default")).toContainText("Rolled back after failed apply");
+  // Cancel wrote nothing: engine.py leaves a failed step in a pending op,
+  // requiring fresh review. No restore was performed or may be claimed.
+  await expect(page.getByTestId("result-default")).toContainText("FAILED — not verified");
+  await expect(page.getByTestId("operation-state")).toContainText("Not changed — review again");
 });
 
 test("a host error during apply is reported by fixed category, never the host's text", async ({ page }) => {
