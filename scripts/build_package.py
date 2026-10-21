@@ -47,6 +47,13 @@ STYLES = "dist/style.css"
 DOC_FILES = [
     "usability-polish.md", "technical-reference.md", "privacy-audit.md",
     "release-readiness.md", "verification.md", "backlog.md", "catalog-submission.md", "images/README.md",
+    "images/catalog-captures.json",
+    "images/model-switcher-0.3.0-dashboard.png",
+    "images/model-switcher-0.3.0-preview.png",
+    "images/model-switcher-0.3.0-operation.png",
+    "images/model-switcher-0.3.0-catalog.png",
+    "images/model-switcher-0.3.0-light.png",
+    "images/model-switcher-0.3.0-narrow.png",
     "images/model-switcher-dark-1440.png", "images/model-switcher-light-1440.png",
     "images/model-switcher-dark-375.png",
     "images/model-switcher-catalog-1440.png", "images/model-switcher-catalog-375.png",
