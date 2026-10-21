@@ -119,8 +119,10 @@ def test_catalog_returns_aggregate_dto_with_no_store(fake):
     assert set(model["cost"]) == COST_KEYS
     assert model["cost"]["display"] == {
         "input": "$10.00", "output": "$50.00", "cache": "$0.25"}
-    for key in ("input", "output", "cacheRead", "pricingVersion"):
-        assert model["cost"][key] is None
+    assert model["cost"]["input"] == 10.0
+    assert model["cost"]["output"] == 50.0
+    assert model["cost"]["cacheRead"] == 0.25
+    assert model["cost"]["pricingVersion"] is None
     assert model["cost"]["source"] == "picker"
     assert provider["fetchedAt"] is None and provider["stale"] is True
 

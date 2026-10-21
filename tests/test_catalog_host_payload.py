@@ -118,7 +118,7 @@ def test_models_response_returns_the_hosts_exact_model_ids(host_payload):
     assert res["fetchedAt"] is None and res["stale"] is True
 
 
-def test_priced_rows_keep_host_display_and_stay_numeric_free(host_payload):
+def test_priced_rows_keep_host_display_and_numeric_rates(host_payload):
     body = host_payload()
     dto = _dto(body, "nous")
     by_id = {m["id"]: m for m in dto["models"]}
@@ -126,8 +126,8 @@ def test_priced_rows_keep_host_display_and_stay_numeric_free(host_payload):
     assert alpha["pricingStatus"] == "priced"
     assert alpha["cost"]["display"] == {"input": "$3.00", "output": "$15.00",
                                         "cache": "$0.30"}
-    assert alpha["cost"]["input"] is None and alpha["cost"]["output"] is None
-    assert alpha["cost"]["cacheRead"] is None
+    assert alpha["cost"]["input"] == 3.0 and alpha["cost"]["output"] == 15.0
+    assert alpha["cost"]["cacheRead"] == 0.3
     assert alpha["cost"]["source"] == "picker"
     beta = by_id["lab-beta"]
     assert beta["pricingStatus"] == "priced"

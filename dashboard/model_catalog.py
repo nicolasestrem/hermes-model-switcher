@@ -64,11 +64,10 @@ Contract of :func:`catalog_response` (frozen ``/catalog`` DTO)::
 Pricing truthfulness (the host payload is the ONLY source):
 
   * Display strings (``$x.xx`` / ``free`` / ``null``) pass through verbatim.
-  * Numeric per-1M rates are NOT in the host payload, so ``cost.input`` /
-    ``cost.output`` / ``cost.cacheRead`` are always ``None`` — never parsed out
-    of ``$`` text, never guessed.  ``pricingVersion`` is likewise ``None``; the
-    DTO's ``source`` reports where THIS module got the price ("picker"), never
-    where the host originally resolved it.
+  * Exact ``$digits[.digits]`` tokens yield per-million numeric rates;
+    ``free`` yields zero for that direction. All other tokens stay unknown.
+    ``pricingVersion`` is ``None``; ``source`` is "picker" (not an invented
+    claim about the host's upstream pricing source).
   * ``free`` requires the host's explicit both-directions-free flag; a
     per-direction "free" string is a zero for that direction only.
   * A missing/empty pricing entry, and every model of a ``pricing_pending``
@@ -102,6 +101,9 @@ input is whatever the caller already fetched.
 """
 
 from __future__ import annotations
+
+import math
+import re
 
 from typing import Any, Dict, List, Optional
 
@@ -255,7 +257,20 @@ def _provider_warning(row: dict) -> Optional[str]:
     return text or None
 
 
-# -- pricing: display text only, never a parsed number ----------------------
+# -- pricing ---------------------------------------------------------------
+
+
+_PRICE_PER_MTOK = re.compile(r"\$\d+(\.\d+)?")
+
+
+def _parse_price_per_mtok(value: Any) -> Optional[float]:
+    """Parse only Hermes' exact per-million display tokens; unknown is not zero."""
+    if value == "free":
+        return 0.0
+    if not isinstance(value, str) or _PRICE_PER_MTOK.fullmatch(value) is None:
+        return None
+    price = float(value[1:])
+    return price if math.isfinite(price) else None
 
 
 def _display_string(value: Any) -> Optional[str]:
@@ -274,15 +289,10 @@ def _pricing_display(entry: dict) -> dict:
     }
 
 
-def _display_only_cost(display: dict, free: bool) -> dict:
-    """Cost DTO from the host's own display strings (no numeric rates).
-
-    ``free`` requires the host's explicit both-directions-free flag: a
-    per-direction ``"free"`` is a zero for THAT direction only, so
-    ``free input + $5.00 output`` stays ``priced``, and an all-``free`` display
-    without the flag remains ``unknown`` (zero cannot prove a free model).
-    Numeric fields stay ``None``: display text is never parsed into a number.
-    """
+def _display_cost(entry: dict) -> dict:
+    """Keep model-level free status separate from per-direction numeric rates."""
+    display = _pricing_display(entry)
+    free = entry.get("free") is True
     has_price_display = any(
         isinstance(value, str) and value.strip().startswith("$")
         for value in display.values())
@@ -292,9 +302,9 @@ def _display_only_cost(display: dict, free: bool) -> dict:
         "pricingStatus": "free" if free else "priced",
         "cost": {
             "unit": COST_UNIT,
-            "input": None,
-            "output": None,
-            "cacheRead": None,
+            "input": _parse_price_per_mtok(entry.get("input")),
+            "output": _parse_price_per_mtok(entry.get("output")),
+            "cacheRead": _parse_price_per_mtok(entry.get("cache")),
             "display": display,
             "free": bool(free),
             "source": "picker",
@@ -315,7 +325,7 @@ def _model_cost(row: dict, model_id: str) -> dict:
     entry = pricing.get(model_id)
     if not isinstance(entry, dict):
         return _unknown_cost()
-    return _display_only_cost(_pricing_display(entry), entry.get("free") is True)
+    return _display_cost(entry)
 
 
 def _pricing_unavailable(row: dict, ids: List[str]) -> bool:

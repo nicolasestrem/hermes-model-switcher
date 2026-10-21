@@ -1,12 +1,4 @@
-"""``catalog_response`` pricing — display text passes through, numbers never invented.
-
-Every fixture is a HOST OPTIONS PAYLOAD row (``GET /api/model/options``): the
-pricing map the host picker builds, whose entries are DISPLAY strings plus an
-explicit both-directions ``free`` flag.  There are no raw per-token rates and
-no billing-route provenance in that payload, so the DTO's numeric cost fields
-are always ``None`` — this suite pins that, and pins the rules that keep an
-unknown price from ever rendering as ``free``/``$0.00``.
-"""
+"""Host display prices parse to per-million rates; unknown is never zero."""
 from __future__ import annotations
 
 import json
@@ -59,37 +51,37 @@ def model_of(provider_dto, model_id):
 # -- display text is the only price evidence --------------------------------
 
 
-def test_priced_model_keeps_the_host_display_verbatim_and_carries_no_numeric_rate():
+def test_priced_model_keeps_host_display_and_numeric_per_million_rates():
     r = row("alpha", ["m1"], pricing={"m1": entry("$3.00", "$15.00", "$0.30")})
     _, dto = one_provider(r)
     m = model_of(dto, "m1")
     assert m["pricingStatus"] == "priced"
     assert m["cost"]["display"] == {"input": "$3.00", "output": "$15.00", "cache": "$0.30"}
-    assert m["cost"]["input"] is None
-    assert m["cost"]["output"] is None
-    assert m["cost"]["cacheRead"] is None
+    assert m["cost"]["input"] == 3.0
+    assert m["cost"]["output"] == 15.0
+    assert m["cost"]["cacheRead"] == 0.3
     assert m["cost"]["free"] is False
-    assert m["cost"]["unit"] == mc.COST_UNIT
+    assert m["cost"]["unit"] == mc.COST_UNIT == "USD_per_1M_tokens"
     assert m["cost"]["source"] == "picker"
     assert m["cost"]["pricingVersion"] is None
 
 
-def test_sub_cent_display_is_never_rounded_or_parsed_into_a_number():
+def test_sub_cent_display_retains_precision_in_the_numeric_rate():
     r = row("alpha", ["m1"], pricing={"m1": entry("$0.00009", "$0.30", None)})
     _, dto = one_provider(r)
     m = model_of(dto, "m1")
     assert m["cost"]["display"]["input"] == "$0.00009"
     assert m["cost"]["display"]["cache"] is None
-    assert m["cost"]["input"] is None
+    assert m["cost"]["input"] == 0.00009
 
 
-def test_numeric_rates_are_never_reconstructed_from_display_text():
+def test_numeric_rates_use_the_ui_cost_fields():
     r = row("alpha", ["m1"], pricing={"m1": entry("$3.00", "$15.00", "$0.30")})
     _, dto = one_provider(r)
     cost = model_of(dto, "m1")["cost"]
-    assert cost["input"] is None
-    assert cost["output"] is None
-    assert cost["cacheRead"] is None
+    assert cost["input"] == 3.0
+    assert cost["output"] == 15.0
+    assert cost["cacheRead"] == 0.3
     assert cost["display"]["input"] == "$3.00"
 
 
@@ -99,6 +91,9 @@ def test_explicit_free_flag_is_the_only_free_evidence():
     m = model_of(dto, "freebie")
     assert m["pricingStatus"] == "free"
     assert m["cost"]["free"] is True
+    assert m["cost"]["input"] == 0.0
+    assert m["cost"]["output"] == 0.0
+    assert m["cost"]["cacheRead"] is None
     assert m["cost"]["display"] == {"input": "free", "output": "free", "cache": None}
 
 
@@ -110,6 +105,9 @@ def test_per_direction_free_is_a_priced_model_not_a_free_one():
     assert m["cost"]["free"] is False
     assert m["cost"]["display"]["input"] == "free"       # verbatim, that direction only
     assert m["cost"]["display"]["output"] == "$5.00"
+    assert m["cost"]["input"] == 0.0
+    assert m["cost"]["output"] == 5.0
+    assert m["cost"]["cacheRead"] is None
 
 
 def test_all_free_display_without_the_host_flag_stays_unknown():
@@ -270,7 +268,7 @@ def test_sale_chrome_from_the_host_is_not_turned_into_rates():
     _, dto = one_provider(r, "nous")
     cost = model_of(dto, "m1")["cost"]
     assert cost["display"] == {"input": "$1.50", "output": "$7.50", "cache": None}
-    assert cost["input"] is None
+    assert cost["input"] == 1.5
     assert "discount_percent" not in cost and "was_input" not in cost
 
 
@@ -331,3 +329,39 @@ def test_refresh_never_manufactures_freshness():
         res = mc.catalog_response(body, "alpha", refresh=refresh)
         assert res["providers"][0]["fetchedAt"] is None
         assert res["providers"][0]["stale"] is True
+
+
+@pytest.mark.parametrize("per_token, display, expected", [
+    ("1e-9", "$0.001", 0.001),
+    ("3e-6", "$3.00", 3.0),
+    ("1.5e-5", "$15.00", 15.0),
+    ("0", "free", 0.0),
+    ("garbage", "?", None),
+])
+def test_real_host_formatter_round_trips(per_token, display, expected):
+    from hermes_cli.models_pricing import _format_price_per_mtok
+
+    formatted = _format_price_per_mtok(per_token)
+    assert formatted == display
+    assert mc._parse_price_per_mtok(formatted) == expected
+
+
+@pytest.mark.parametrize("token", [
+    "?", "", None, "garbage", "$", "$1.", "$.5", "$-1", "$+1", "$1e3",
+    "$1,000.00", "USD 3.00", "$3.00 sale", "$3.00\n", " $3.00", "$3.00 ",
+    "free ", "FREE", "0", 0, True, [], {}, "$NaN", "$inf", "$" + "9" * 400,
+])
+def test_unknown_or_malformed_prices_never_become_zero(token):
+    assert mc._parse_price_per_mtok(token) is None
+    _, dto = one_provider(row("alpha", ["m1"], pricing={
+        "m1": entry(token, "$5.00", token),
+    }))
+    cost = model_of(dto, "m1")["cost"]
+    assert cost["input"] is None
+    assert cost["cacheRead"] is None
+    assert cost["output"] == 5.0
+
+
+@pytest.mark.parametrize("token, expected", [("$0.00", 0.0), ("$12", 12.0), ("free", 0.0)])
+def test_exact_price_tokens_are_numeric(token, expected):
+    assert mc._parse_price_per_mtok(token) == expected
