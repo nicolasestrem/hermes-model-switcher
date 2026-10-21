@@ -31,7 +31,7 @@ Built for the Hermes Dashboard, using its themes and authenticated transport. MI
 
 ## Screenshots
 
-Current **0.3.0** captures, taken 2026-10-21 at 1280x800 (the last one at 390x844).
+Current **0.3.0** captures, taken 2026-10-21 at 1280x800 (the last one at 390x844); the UI is unchanged in 0.3.1.
 Boundary: *Dashboard SDK fixture with the plugin's real backend and Hermes' own
 `/api/model/*` routers over an isolated lab home.* That is not a live Dashboard
 deployment and not provider execution: the plugin's real FastAPI backend performs
@@ -139,13 +139,13 @@ a Python version compatible with your Hermes release. This plugin declares Pytho
 `>=3.10`; the Hermes runtime it integrates with requires Python `>=3.11`. Linux is the
 verification target; macOS and native Windows are unverified.
 
-Version **0.3.0** needs the public Dashboard `/api/model/options`,
+Version **0.3.1** needs the public Dashboard `/api/model/options`,
 `/api/model/auxiliary`, `/api/model/moa` and `/api/model/set` routes. The UI uses
 the authenticated Dashboard SDK; no private Hermes imports or direct pricing-cache
 reads are used by plugin runtime code. Missing required capabilities or host write
 routes leave affected changes read-only/unavailable. Compatibility is capability-based,
 not a minimum-version comparison. The tested reference is Hermes
-**v0.22.2+canary.20261020T065957Z**, commit `c5a3c0f8`; see
+**v0.22.3**, commit `5b147ab0`; see
 [release readiness](docs/release-readiness.md) for evidence and remaining checks.
 
 ### From this repository
@@ -276,11 +276,11 @@ and exact-model removal; see [advanced routing](docs/technical-reference.md).
   not spend estimates, not cost approvals, and unknown cost is never treated as free.
 - **Scale.** Large profile sets increase first-request (cold discovery) time. No
   performance measurement from the pre-refactor candidate is carried forward as
-  0.3.0 acceptance. See
+  0.3.1 acceptance. See
   [release readiness](docs/release-readiness.md) and
   [backlog](docs/backlog.md).
 - **Platform scope.** Linux is the verification target; macOS and native Windows are
-  unverified. Earlier green results do not establish final 0.3.0 compatibility.
+  unverified. Earlier green results do not establish final 0.3.1 compatibility.
 - **Host capabilities required.** Missing public config, home or secret capabilities make
   the plugin read-only; missing host payloads show notices and unknown data. Main and
   compatible auxiliary writes need `/api/model/set`; other slots use public config

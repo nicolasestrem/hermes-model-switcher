@@ -7,16 +7,18 @@ included.
 
 ## Runtime reference
 
-The tested Hermes reference is **v0.22.2+canary.20261020T065957Z**, commit
-`c5a3c0f8767a72203363d249add14142dbcf3cc7`. See CONTRIBUTING.md for checkout and
+The tested Hermes reference is **v0.22.3**, commit
+`5b147ab036d6d19131bff8d20701b5001eab844a`. See CONTRIBUTING.md for checkout and
 suite setup. This pin makes tests reproducible; it is not a version gate.
 `probe_runtime()` requires callable public config, home/profile and secret-scope
 capabilities. Package version is informational, and no install stamp is required.
 Missing capabilities and hosted isolation remain read-only.
 
-The reference pin and this documentation update are not fresh integrated 0.3.0
-verification. Record final commands, environment, exit codes and unresolved
-failures in the release handoff; no new suite result is asserted here.
+The 0.3.1 reference re-pin was verified fresh: the backend and browser suites,
+the private-import gate, the privacy guard and the package build all ran against
+`5b147ab0` on the release commit, with the raw results recorded in the
+CHANGELOG. Final commands, environment, exit codes and unresolved failures
+still belong in the release handoff; no new suite result is asserted here.
 
 ## 0.3.0 integration boundaries
 

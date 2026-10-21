@@ -52,8 +52,14 @@ def lab():
     """Seed a lab home, import the lab app against it, yield (client, home)."""
     parent = Path(_run("--print-lab-parent").stdout.strip())
     home = Path(tempfile.mkdtemp(prefix="hms-host-routes-", dir=str(parent)))
+    # Seed with a pytest-private --home-file beside the lab home. The CLI's
+    # default home-file is the shared tests/real-home.json the browser suite
+    # reads; this suite deletes its lab home in teardown, so the default
+    # leaves a dangling pointer that fails browser specs with ENOENT when
+    # both suites run in the same tree.
+    home_file = parent / f"{home.name}-home.json"
     try:
-        _run("--seed", str(home))
+        _run("--seed", str(home), "--home-file", str(home_file))
         previous_home = os.environ.get("HERMES_HOME")
         os.environ["HERMES_HOME"] = str(home)
         # The app module mounts routers at import, so it must be imported AFTER
@@ -85,6 +91,7 @@ def lab():
             os.environ["HERMES_HOME"] = previous_home
     finally:
         shutil.rmtree(home, ignore_errors=True)
+        home_file.unlink(missing_ok=True)
 
 
 def _providers(client, profile: str) -> dict:

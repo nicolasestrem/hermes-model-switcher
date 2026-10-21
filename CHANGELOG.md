@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.3.1
+
+### Upstream reference re-pin (Hermes v0.22.3)
+
+- Re-pin the tested Hermes reference from `v0.22.2+canary.20261020T065957Z`
+  (`c5a3c0f8`) to the stable **v0.22.3** release, commit
+  `5b147ab036d6d19131bff8d20701b5001eab844a`. Upstream moved to
+  `NousResearch/hermes-agent` (the old `NousResearch/hermes` name is gone) and
+  shipped two releases past the old pin. No seam the plugin uses changed in a
+  breaking way: `hermes_cli.config`, `set_hermes_home_override`, the
+  `/api/model/*` routers and their config writer, `plugin_validate_private_imports`
+  and the Dashboard mounting path are byte-identical between the pins;
+  `hermes_constants` and `agent.secret_scope` gained fail-closed additions only.
+  The pin stays a reproducibility reference, not a minimum version.
+- The three upstream seam gaps documented in 0.3.0
+  ([#142339](https://github.com/NousResearch/hermes-agent/issues/142339),
+  [#142340](https://github.com/NousResearch/hermes-agent/issues/142340),
+  [#142341](https://github.com/NousResearch/hermes-agent/issues/142341))
+  are still open upstream; the documented limits stand unchanged.
+
+### Packaging
+
+- Bound the runtime PyYAML dependency to `>=6.0,<7`, replacing the bare `>=6`
+  floor, per the plugin-catalog dependency rule (bare floors receive a change
+  request).
+
+### Test harness
+
+- The real host-routes pytest fixture now seeds through `real_app.py --seed`
+  with a pytest-private `--home-file` beside its throwaway lab home instead of
+  the CLI's default, the shared `tests/real-home.json`. The backend suite
+  deletes its lab home in teardown, so the previous default left a dangling
+  pointer in the shared file that made three browser specs fail with ENOENT
+  when both suites ran in the same tree; the shared file is now written only
+  by the browser harness, which seeds it fresh at the start of every run.
+
+### Verification
+
+- Against Hermes v0.22.3 (`5b147ab0`), the release commit passes 777 Python
+  tests and 209 browser tests locally (Python 3.12.3, Node 22; backend suite
+  then browser suite in the same tree — exactly the previously failing order),
+  with the private-import gate returning `[]`, the privacy guard clean, the
+  package build assembling, and the committed dashboard bundle matching a
+  fresh build. The backend suite also passes against upstream main at
+  `3427ff9fd2` (post-v0.22.4-rc) as a forward-compat signal.
+
 ## 0.3.0
 
 ### Public Hermes integration
