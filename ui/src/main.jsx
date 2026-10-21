@@ -3,7 +3,7 @@
 // (--hms reads Dashboard theme tokens with sane fallbacks).
 import React, { useEffect, useMemo, useRef, useState } from "shims/react.js";
 import { createRoot } from "shims/react-dom-client.js";
-import { api, ApiError } from "./api.js";
+import { api, ApiError, hostFailureText, hostStatusOf, loadHostBundle } from "./api.js";
 import { resolveOpaqueSurface } from "./theme.js";
 
 const t = (v, fb) => `var(--${v}, ${fb})`;
@@ -1123,7 +1123,7 @@ export function chainInvalid(entries) {
 
 function ChangeEditor({
   selection, slots, editor, setEditor, onPreview, onApply, preview, previewInvalid,
-  busy, catalog, catalogProfileId, onEnsureCatalog, onRefreshCatalog, onRetryCatalog, announce,
+  busy, host, catalog, catalogProfileId, onEnsureCatalog, onRefreshCatalog, onRetryCatalog, announce,
 }) {
   const selectedSlots = slots.filter((s) => selection.has(s.profileId + "/" + s.slotId));
   const hasSelection = selectedSlots.length > 0;
@@ -1176,7 +1176,7 @@ function ChangeEditor({
     setModelState({ key, data: null, error: null, loading: true });
     try {
       const data = await Promise.race([
-        api.getModels({ provider, profileId: catalogProfileId }),
+        api.getModels({ provider, profileId: catalogProfileId, host }),
         new Promise((_, reject) => setTimeout(
           () => reject(new Error("Model list timed out — retry, or choose Other to type an exact model id.")),
           4000,
@@ -1611,6 +1611,14 @@ const FAILURE_COPY = {
   blocked: "Apply blocked before any write",
   io_error: "Storage error while writing the change",
   step_failed: "A step failed before it could be verified",
+  // Host-owned steps: the browser performed the host route, the backend
+  // classified the result by re-reading the store. The host's own response
+  // text never reaches this map — only these fixed categories do.
+  host_no_write: "The host reported success but wrote nothing — not applied",
+  host_declined: "Host write declined at the cost confirmation",
+  host_error: "The host refused the write",
+  host_token_mismatch: "Host step out of sequence — nothing was changed",
+  external_edit: "The host route was changed by something else during apply",
 };
 const STATE_COPY = {
   compensated: "rolled back after a failed apply",
@@ -1858,6 +1866,107 @@ const EMPTY_EDITOR = {
   removeExact: "", ackUnknownCost: false,
 };
 
+// ---------- host step surfacing ----------
+
+// The host's own cost guard answers a main/aux assignment with
+// `{confirm_required: true, confirm_message}`. That message is backend text:
+// it is rendered as TEXT (React escapes it), never as HTML, and the dialog
+// offers exactly two actions. Cancel resolves the step as `declined` — the
+// plugin backend compensates; the UI never guesses what "no" means.
+function ConfirmDialog({ ask, onConfirm, onCancel }) {
+  const confirmRef = useRef(null);
+  useEffect(() => {
+    if (!ask) return undefined;
+    confirmRef.current?.focus();
+    const onKey = (event) => {
+      if (event.key === "Escape") { event.preventDefault(); onCancel(); }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [ask]);
+  if (!ask) return null;
+  return (
+    <div className="hms-confirm-backdrop" style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
+      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30,
+    }}>
+      <div role="dialog" aria-modal="true" aria-labelledby="hms-confirm-title"
+        data-testid="confirm-dialog" className="hms-confirm"
+        style={{
+          background: THEME.bg, color: THEME.fg, border: `1px solid ${THEME.border}`,
+          borderRadius: 6, padding: 16, maxWidth: 520, width: "calc(100% - 32px)",
+          boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+        }}>
+        <h3 id="hms-confirm-title" style={{ margin: "0 0 8px" }}>Confirm this assignment</h3>
+        <p data-testid="confirm-message" style={{ margin: "0 0 12px", whiteSpace: "pre-wrap" }}>
+          {String(ask.message || "The host flagged this model as more expensive than the usual route.")}
+        </p>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button type="button" data-testid="confirm-cancel" onClick={onCancel}>Cancel</button>
+          <button type="button" ref={confirmRef} data-testid="confirm-accept"
+            className="hms-apply" onClick={onConfirm}>Confirm</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const PROGRESS_TONE = {
+  applied: THEME.ok, ok: THEME.ok,
+  pending: THEME.muted, awaiting_host: THEME.warn,
+  failed: THEME.danger, compensated: THEME.warn, conflict: THEME.warn,
+};
+
+// Per-step apply progress. A host step is a round trip of its own (and may wait
+// on the user for a cost confirmation), so "request in progress…" alone would
+// hide where the operation actually is. Entries come from the envelope's
+// per-profile results plus the live host call it is currently waiting on.
+function ApplyProgress({ progress }) {
+  if (!progress || !progress.entries || !progress.entries.length) return null;
+  return (
+    <div data-testid="apply-progress" role="status" aria-live="polite"
+      style={{
+        border: `1px solid ${THEME.border}`, borderRadius: 4, padding: "6px 8px",
+        margin: "0 0 8px", fontSize: 13,
+      }}>
+      <strong style={{ display: "block", marginBottom: 4 }}>
+        Apply progress{progress.note ? ` — ${progress.note}` : ""}
+      </strong>
+      <ol style={{ margin: 0, paddingLeft: 18 }}>
+        {progress.entries.map((entry) => (
+          <li key={entry.key} data-testid={`apply-step-${entry.key}`}
+            data-step-status={entry.status}
+            style={{ color: PROGRESS_TONE[entry.status] || THEME.fg }}>
+            {entry.label} — {entry.status === "awaiting_host" ? "waiting for you" : entry.status}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+// One line per step, in operation order. `results` is the DTO's per-profile
+// status list (the only per-step truth the backend exposes); the host call in
+// flight is appended as the step that is currently running.
+function progressEntries(operation, hostCall, profileNameOf) {
+  const entries = ((operation && Array.isArray(operation.results)) ? operation.results : [])
+    .map((result) => ({
+      key: `step-${result.profileId}`,
+      label: `${profileNameOf(result.profileId)} (${result.profileId})`,
+      status: result.status,
+    }));
+  if (hostCall) {
+    const profile = (hostCall.query && hostCall.query.profile) || "";
+    const route = String(hostCall.path || "").replace(/^\/api\/model\//, "");
+    entries.push({
+      key: `host-${hostCall.seq}`,
+      label: `host ${route || "write"}${profile ? ` → ${profile}` : ""}`,
+      status: "awaiting_host",
+    });
+  }
+  return entries;
+}
+
 function App() {
   const [state, setState] = useState(null);
   const [loadError, setLoadError] = useState(null);
@@ -1896,12 +2005,81 @@ function App() {
   // section is a sibling of the workspace, so toggling it can never unmount
   // or reset selection/editor/preview state.
   const [catalogOpen, setCatalogOpen] = useState(false);
+  // Host data: Hermes' own model routes (/api/model/options|auxiliary|moa) per
+  // profile. Loaded after the config-only /state paint, never blocking it; a
+  // profile whose route is missing keeps `null` parts plus one notice line.
+  const [host, setHost] = useState({ profiles: {} });
+  const [hostNotice, setHostNotice] = useState("");
+  // Per-step apply progress (host steps included) and the pending host cost
+  // confirmation. `confirmResolve` holds the promise resolver for the loop.
+  const [progress, setProgress] = useState(null);
+  const [confirmAsk, setConfirmAsk] = useState(null);
+  const hostRef = useRef({ profiles: {} });
+  const confirmResolve = useRef(null);
   const reviewSeq = useRef(0);
   const catalogSeq = useRef(0);
   const catalogCache = useRef(new Map());
   const loadSeq = useRef(0);
+  const hostSeq = useRef(0);
 
   const announce = (msg, kind = "info") => setStatus({ text: msg, kind });
+  const profileNameOf = (profileId) => {
+    const found = ((state && state.profiles) || []).find((p) => p.id === profileId);
+    return (found && (found.name || found.id)) || profileId || "profile";
+  };
+  const adoptHost = (bundle) => {
+    hostRef.current = bundle || { profiles: {} };
+    setHost(hostRef.current);
+  };
+  // Host bundle for `profileIds`, refreshed in place. Never throws: an
+  // unreachable route becomes a null part and a fixed-category notice.
+  const refreshHost = async (profileIds, { refresh = false, seq = null } = {}) => {
+    const mine = ++hostSeq.current;
+    const { host: bundle, failures } = await loadHostBundle(profileIds, { refresh });
+    if (mine !== hostSeq.current) return null;
+    adoptHost(bundle);
+    setHostNotice(hostFailureText(failures));
+    if (seq !== null && seq !== loadSeq.current) return null;
+    // Upgrade the config-only paint with the host-derived rows. Best effort:
+    // a backend that predates POST /state keeps the GET DTO.
+    try {
+      const enriched = await api.loadState(bundle);
+      if (!enriched || !Array.isArray(enriched.slots)) return null;
+      if (seq !== null && seq !== loadSeq.current) return null;
+      setState(enriched);
+      setSelection((old) => new Map(enriched.slots.filter((slot) =>
+        old.has(slot.profileId + "/" + slot.slotId)).map((slot) =>
+        [slot.profileId + "/" + slot.slotId, slot])));
+    } catch (e) {
+      // The config-only state stays on screen; no second notice: the host
+      // notice above already says the host half is degraded.
+    }
+    return bundle;
+  };
+  // Host parts for one profile, fetched on demand (catalog / model lists) when
+  // the mount-time load has not reached it yet, or refetched on refresh.
+  const ensureHostFor = async (profileId, { refresh = false } = {}) => {
+    const pid = profileId || "";
+    const current = hostRef.current && hostRef.current.profiles ? hostRef.current.profiles[pid] : null;
+    if (current && !refresh) return current;
+    const { host: bundle, failures } = await loadHostBundle([pid], { refresh });
+    const merged = { profiles: { ...(hostRef.current.profiles || {}), ...bundle.profiles } };
+    adoptHost(merged);
+    setHostNotice(hostFailureText(failures));
+    return merged.profiles[pid];
+  };
+  // Resolve the pending host cost confirmation. `true` = Confirm, `false` =
+  // Cancel; the loop reports `declined` and the backend compensates.
+  const askConfirm = (message) => new Promise((resolve) => {
+    confirmResolve.current = resolve;
+    setConfirmAsk({ message: typeof message === "string" ? message : "" });
+  });
+  const answerConfirm = (accepted) => {
+    const resolve = confirmResolve.current;
+    confirmResolve.current = null;
+    setConfirmAsk(null);
+    if (resolve) resolve(Boolean(accepted));
+  };
   // Keep the preset action mounted for focus return, but consume its preview.
   // Applying or undoing must never leave an old review ready to apply again.
   const refreshSilently = async () => {
@@ -1917,6 +2095,9 @@ function App() {
       setSelection((old) => new Map(s.slots.filter((slot) =>
         old.has(slot.profileId + "/" + slot.slotId)).map((slot) =>
         [slot.profileId + "/" + slot.slotId, slot])));
+      // Host data is refreshed out of band: the paint above is complete on its
+      // own, and a slow or missing host route must never stall a reload.
+      refreshHost((s.profiles || []).map((p) => p.id), { seq });
     } catch (e) {
       if (seq !== loadSeq.current) return;
       setState(null);
@@ -1954,6 +2135,9 @@ function App() {
         old.has(slot.profileId + "/" + slot.slotId)).map((slot) =>
         [slot.profileId + "/" + slot.slotId, slot])));
       if (!silent) announce("Model switcher state loaded");
+      // Non-blocking host half: the tab is already usable with config-only
+      // data while these land.
+      refreshHost((s.profiles || []).map((p) => p.id), { seq });
     } catch (e) {
       if (seq !== loadSeq.current) return;
       setState(null);
@@ -1985,7 +2169,7 @@ function App() {
     setPreviewFor("");
     setBusy(true);
     try {
-      const p = await api.preview(changes);
+      const p = await api.preview(changes, hostRef.current);
       if (seq !== reviewSeq.current) return;
       setPreview(p.preview);
       setPreviewFor(fingerprint);
@@ -2030,7 +2214,13 @@ function App() {
       loading: true,
     }));
     try {
-      const data = await api.getCatalog({ profileId: pid, refresh });
+      // The catalog is a pure transform of the host's options payload, so the
+      // host part for this profile is fetched (or refetched with refresh=1 on
+      // an explicit Refresh) BEFORE the plugin route is asked. A missing host
+      // route leaves `options: null`: the backend then answers its truthful
+      // hostCatalogUnavailable DTO instead of an invented catalog.
+      await ensureHostFor(pid, { refresh });
+      const data = await api.getCatalog({ profileId: pid, refresh, host: hostRef.current });
       if (seq !== catalogSeq.current) return;
       catalogCache.current.set(pid, data);
       setCatalog({ profileId: pid, data, error: null, loading: false });
@@ -2080,17 +2270,72 @@ function App() {
       .reduce((n, p) => n + (Array.isArray(p.models) ? p.models.length : 0), 0)
     : null;
 
+  // One host step of an operation: perform the host route the backend asked
+  // for, honour its cost guard, and report the outcome. `status` is the numeric
+  // HTTP status only — the host's response text is never forwarded anywhere;
+  // the backend turns the number into one of its fixed failure categories.
+  const runHostCall = async (call) => {
+    let res;
+    try {
+      res = await api.hostCall(call);
+    } catch (e) {
+      return { outcome: "error", status: hostStatusOf(e) };
+    }
+    if (res && res.confirm_required === true) {
+      setProgress((prev) => (prev ? { ...prev, note: "waiting for your confirmation" } : prev));
+      const accepted = await askConfirm(res.confirm_message);
+      // Cancel is a real answer, not an error: the backend compensates and
+      // reports its own fixed category for the declined step.
+      if (!accepted) return { outcome: "declined" };
+      try {
+        res = await api.hostCall(call, { confirmExpensiveModel: true });
+      } catch (e) {
+        return { outcome: "error", status: hostStatusOf(e) };
+      }
+    }
+    if (res && res.ok === true) return { outcome: "ok" };
+    // A 2xx that is not ok: the host refused without an error status. Report
+    // the numeric status; the backend still owns the classification.
+    return { outcome: "error", status: 200 };
+  };
+
   const applyPreview = async () => {
     if (!canApply) return;
     setBusy(true);
+    setProgress({ entries: [], note: "requesting" });
     try {
       const payload = reviewedPreset
         ? { presetId: reviewedPreset.id, previewId: activePreview.id, allowUnknownCost: editor.ackUnknownCost }
         : { previewId: activePreview.id, allowUnknownCost: editor.ackUnknownCost };
-      const op = await api.apply(payload);
+      let op = await api.apply({ ...payload, host: hostRef.current });
       setOperation(op.operation);
       setOpAction("apply");
       openDrawer();
+      // Host steps alternate with backend continuations until the operation is
+      // decided (committed / partial / compensated / recovery_required). The
+      // loop is bounded: a backend that keeps asking is a bug, not a reason to
+      // hang the tab.
+      let rounds = 0;
+      while (op && op.hostCall && rounds < 40) {
+        rounds += 1;
+        const call = op.hostCall;
+        setProgress({
+          entries: progressEntries(op.operation, call, profileNameOf),
+          note: "host step in progress",
+        });
+        const result = await runHostCall(call);
+        const opId = call.opId || (op.operation && op.operation.id);
+        op = await api.hostResult(opId, {
+          seq: call.seq, token: call.token, outcome: result.outcome, status: result.status,
+        });
+        if (op && op.operation) setOperation(op.operation);
+      }
+      setOperation(op.operation);
+      setOpAction("apply");
+      setProgress({
+        entries: progressEntries(op.operation, null, profileNameOf),
+        note: op.ok === true ? "finished" : "finished with issues",
+      });
       setUndoGuarded(false);
       await refreshSilently();
       // ok === true only for committed/undone. A non-success apply still carries
@@ -2103,6 +2348,7 @@ function App() {
         (op.operation.failure ? ` (${op.operation.failure})` : "");
       announce(`Operation ${op.operation.id} finished: ${statuses}${outcome}`);
     } catch (e) {
+      setProgress(null);
       announce("Apply failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
     } finally {
       setBusy(false);
@@ -2172,6 +2418,7 @@ function App() {
   };
   const closeDrawer = () => {
     setShowOperation(false);
+    setProgress(null);
     const el = drawerOpener.current;
     drawerOpener.current = null;
     const target = el?.isConnected && !el.disabled ? el : rootRef.current?.querySelector('[data-testid="refresh-state"]');
@@ -2212,6 +2459,11 @@ function App() {
         <strong>Some runtime selectors could not be discovered.</strong>
         <ul>{state.profiles.flatMap(p => (p.inventoryWarnings || []).map((warning, i) => <li key={`${p.id}/${i}`}>{p.name || p.id}: {warning}</li>))}</ul>
       </div>}
+      {/* Host half: Hermes' own model routes. A route that is missing or
+          unreachable is stated once, in fixed words, and never blocks the tab
+          — config-only rows stay usable and the backend degrades truthfully. */}
+      {hostNotice && <p role="status" data-testid="host-notice" className="hms-note"
+        style={{ color: THEME.warn }}>{hostNotice}</p>}
       <PresetsBar presets={state.presets} onReview={reviewPreset} busy={busy} />
       <div className="hms-workspace-tools">
         <button data-testid="refresh-state" disabled={busy} onClick={() => load()}>Refresh state</button>
@@ -2276,9 +2528,11 @@ function App() {
             {status.text}
           </p>
         )}
+        <ApplyProgress progress={progress} />
         <ChangeEditor
           selection={selection} slots={slots}
           editor={editor} setEditor={editEditor}
+          host={host}
           catalog={catalog} catalogProfileId={catalogProfileId}
           onEnsureCatalog={() => loadCatalog()}
           onRefreshCatalog={() => loadCatalog({ refresh: true })}
@@ -2320,6 +2574,7 @@ function App() {
 
       <OperationDrawer open={showOperation} operation={operation} onClose={closeDrawer} onUndo={undo} undoGuarded={undoGuarded}
         setUndoGuarded={setUndoGuarded} busy={busy} action={opAction} />
+      <ConfirmDialog ask={confirmAsk} onConfirm={() => answerConfirm(true)} onCancel={() => answerConfirm(false)} />
     </div>
   );
 }

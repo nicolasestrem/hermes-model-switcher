@@ -76,9 +76,11 @@ test("collapsed by default, opens without resetting the workspace, and fetches o
   if (process.env.HMS_TRACE === "1") console.log(editorBefore);
   const requests = await catalogRequests(page);
   expect(requests).toHaveLength(1);
-  expect(requests[0].method).toBe("GET");
-  expect(requests[0].search).toContain("profileId=default");
-  expect(requests[0].search).not.toContain("refresh");
+  // POST-only: the aggregate catalog is a transform of the host options payload.
+  expect(requests[0].method).toBe("POST");
+  expect(requests[0].body.profile).toBe("default");
+  expect(requests[0].body.refresh).toBeUndefined();
+  expect(requests[0].body.options.providers.length).toBeGreaterThan(0);
 
   await page.getByTestId("catalog-collapse").click();
   await expect(section(page)).toBeHidden();
@@ -95,8 +97,8 @@ test("profile scope change while open fetches exactly once for that profile", as
   await page.getByLabel("Profile Research", { exact: true }).check();
   await expect.poll(async () => (await catalogRequests(page)).length).toBe(2);
   let requests = await catalogRequests(page);
-  expect(requests[1].search).toContain("profileId=research");
-  expect(requests[1].search).not.toContain("refresh");
+  expect(requests[1].body.profile).toBe("research");
+  expect(requests[1].body.refresh).toBeUndefined();
 
   // No N+1 on further renders/reopens for the already-loaded profile.
   await page.waitForTimeout(400);
@@ -104,7 +106,7 @@ test("profile scope change while open fetches exactly once for that profile", as
   await openCatalog(page);
   requests = await catalogRequests(page);
   expect(requests).toHaveLength(2);
-  expect(requests.filter((r) => r.search.includes("profileId=research"))).toHaveLength(1);
+  expect(requests.filter((r) => r.body.profile === "research")).toHaveLength(1);
 });
 
 test("provider groups and row counts mirror the /catalog payload exactly", async ({ page }) => {
@@ -231,9 +233,9 @@ test("Refresh catalog is the only refresh=1 trigger and updates freshness from t
   await page.getByTestId("catalog-view-refresh").click();
   await expect.poll(async () => (await catalogRequests(page)).length).toBe(2);
   const requests = await catalogRequests(page);
-  expect(requests[0].search).not.toContain("refresh");
-  expect(requests[1].search).toContain("refresh=1");
-  expect(requests[1].search).toContain("profileId=default");
+  expect(requests[0].body.refresh).toBeUndefined();
+  expect(requests[1].body.refresh).toBe(true);
+  expect(requests[1].body.profile).toBe("default");
 
   const freshness = page.getByTestId("catalog-freshness-details");
   await freshness.locator("summary").click();
@@ -506,7 +508,12 @@ test("browsing is read-only: no POST/PUT, no preview/apply, acknowledgment untou
   await expect(ack).toBeChecked();
 
   const requests = await page.evaluate(() => window.__mockApi.requests);
-  expect(requests.filter((r) => r.method === "POST" || r.method === "PUT")).toHaveLength(0);
+  // Host reads and `POST /state {host}` are reads, not writes: the only POSTs
+  // allowed are the host bundle hand-off and the catalog transform.
+  const writes = requests.filter((r) => (r.method === "POST" || r.method === "PUT") &&
+    !r.host && !r.path.endsWith("/state") && !r.path.endsWith("/catalog") && !r.path.endsWith("/models"));
+  expect(writes).toHaveLength(0);
+  expect(requests.filter((r) => r.host && (r.method === "POST" || r.method === "PUT"))).toHaveLength(0);
   expect(requests.filter((r) => /\/(preview|operations|presets)$/.test(r.path))).toHaveLength(0);
   expect(requests.filter((r) => r.path.endsWith("/catalog"))).toHaveLength(1);
 });

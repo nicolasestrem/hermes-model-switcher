@@ -109,15 +109,17 @@ test('real API: a late preview response cannot revive an edited review', async (
 });
 
 // With no catalog rows, every provider is entered exactly and its model list
-// comes from GET /models — the fallback path these contract fixtures pin.
-const emptyCatalog = (page) => page.route('**/api/plugins/hermes-model-switcher/catalog?*', route =>
+// comes from POST /models — the fallback path these contract fixtures pin.
+// /catalog and /models are POST-only now (a GET answers 410), so the patterns
+// must not require a query string.
+const emptyCatalog = (page) => page.route('**/api/plugins/hermes-model-switcher/catalog', route =>
   route.fulfill({ json: { ok: true, profileId: 'default', providers: [], cost: { pending: false } } }));
 
 test('picker contract fixture: selection preserves provider-native IDs', async ({ page }) => {
   // Controlled catalog responses test selection spelling; no provider inference is performed.
   await emptyCatalog(page);
-  await page.route('**/api/plugins/hermes-model-switcher/models?*', route => {
-    const provider = new globalThis.URL(route.request().url()).searchParams.get('provider');
+  await page.route('**/api/plugins/hermes-model-switcher/models', route => {
+    const provider = (route.request().postDataJSON() || {}).provider;
     const id = provider === 'nous' ? 'deepseek/deepseek-v4.1-flash' : 'deepseek-v4.1-flash';
     return route.fulfill({ json: { ok: true, provider, models: [{ id, name: id }, { id: 'another-model', name: 'Other' }],
       source: 'contract-fixture', stale: true, fetchedAt: null, error: null } });
@@ -141,7 +143,7 @@ test('picker note: an ok:true catalog carrying a warning still surfaces it', asy
   // reports no models (or carries a warning), so this state is reachable and
   // must render — prove it rather than deleting the branch.
   await emptyCatalog(page);
-  await page.route('**/api/plugins/hermes-model-switcher/models?*', route =>
+  await page.route('**/api/plugins/hermes-model-switcher/models', route =>
     route.fulfill({ json: { ok: true, provider: 'nous', models: [], fetchedAt: null,
       source: 'curated', stale: true, error: "provider 'nous' reported no models" } }));
   await open(page);
