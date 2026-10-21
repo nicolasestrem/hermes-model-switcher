@@ -24,6 +24,11 @@ test = [
     # test imports it directly, but it is required at test runtime.
     "httpx>=0.27",
     "uvicorn>=0.30",
+    # The real-backend tests mount Hermes' own /api/model/* routers from the
+    # reference checkout; Hermes imports these at module load (hermes_cli
+    # config/env loading). The plugin itself never imports them.
+    "ruamel.yaml>=0.18",
+    "python-dotenv>=1",
     "requests>=2",
 ]
 
