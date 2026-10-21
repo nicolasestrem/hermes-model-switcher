@@ -60,6 +60,7 @@ public-seams refactor; they are not carried forward as 0.3.0 acceptance (see
 
 ## Distribution
 
-- **Catalog submission.** Readiness, entry template, and the exact submission procedure
-  live in [catalog-submission.md](catalog-submission.md). The 0.3.0 entry is a draft
-  addressing the earlier catalog review; final-candidate checks remain pending.
+- **Catalog submission.** Readiness, the submitted entry, and the exact submission
+  procedure live in [catalog-submission.md](catalog-submission.md). The entry in
+  [NousResearch/hermes-agent#141744](https://github.com/NousResearch/hermes-agent/pull/141744)
+  is re-pinned to 0.3.2 and awaits maintainer re-review.

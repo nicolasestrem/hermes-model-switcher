@@ -39,8 +39,9 @@ A workflow existing in this repository is not evidence that a GitHub runner pass
 
 - No inference benchmark or live-session model switch is claimed.
 - Linux is the exercised platform; macOS and native Windows remain unverified.
-- Version 0.3.0 uses public Hermes seams only; require a clean private-import gate,
-  real SDK host-step readback/confirmation checks and the new reference pin. Earlier
-  results above are not acceptance evidence for that refactor. See
+- Every release from 0.3.0 onward uses public Hermes seams only; require a clean
+  private-import gate, real SDK host-step readback/confirmation checks and the
+  reference pin. Earlier results above are not acceptance evidence for a later
+  revision. See
   [release readiness](release-readiness.md) and [catalog submission](catalog-submission.md).
 - A ready PR is not a merged release, official endorsement, curated catalog listing or live deployment.

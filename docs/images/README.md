@@ -18,8 +18,9 @@ mutation. The lab holds two synthetic profiles, `default` and `research`.
 - `model-switcher-0.3.2-dashboard.png`: idle workspace in the dark host theme — the
   profile filter, routing matrix and change editor before a target is selected.
 - `model-switcher-0.3.2-preview.png`: a reviewed `default/main` change from
-  `anthropic/claude-sonnet-4-6` to `zhipu/glm-5.3-flash`, with the before → after
-  route and persisted config diff shown before Apply.
+  `anthropic/claude-sonnet-4-6` to `zhipu/glm-5.3-flash`, showing the semantic
+  provider/model intent before Apply; the exact persisted config diff appears
+  only after Apply readback.
 - `model-switcher-0.3.2-operation.png`: the operation drawer after Apply, showing
   `Applied + read back`, the operation reference, the revision transition and the
   guarded Undo control.

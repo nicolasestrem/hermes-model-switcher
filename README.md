@@ -48,8 +48,9 @@ and the change editor before any target is selected.*
 
 ![A reviewed change from anthropic/claude-sonnet-4-6 to zhipu/glm-5.3-flash](docs/images/model-switcher-0.3.2-preview.png)
 
-*Preview before Apply: the exact before → after route for `default/main` plus the
-persisted config diff, with the unknown-cost acknowledgement in place.*
+*Preview before Apply: the semantic `default/main` intent — `model.provider` and
+`model.default` before → after — with the unknown-cost acknowledgement in place;
+the exact persisted config diff appears only after Apply readback.*
 
 ![Operation drawer after Apply showing Applied + read back](docs/images/model-switcher-0.3.2-operation.png)
 
