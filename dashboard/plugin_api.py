@@ -64,7 +64,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import JSONResponse
@@ -186,10 +186,10 @@ def _state_dir_for(home: Path) -> Path:
     if _state_path_refused(candidate):
         raise StateDirRefused(_STATE_REFUSED_REASON)
     candidate.mkdir(parents=True, mode=0o700, exist_ok=True)
-    try:
-        os.chmod(candidate, 0o700)  # private, never group/world readable
-    except OSError:
-        pass
+    os.chmod(candidate, 0o700)  # errors must fail closed, not authorize writes
+    import stat
+    if stat.S_IMODE(candidate.stat().st_mode) != 0o700:
+        raise StateDirRefused(_STATE_REFUSED_REASON)
     return candidate
 
 
@@ -198,10 +198,15 @@ def _state_path_refused(path: Path) -> bool:
     if _is_inside_plugin_tree(path):
         return True
     try:
+        # Check lexical and resolved containment, and every component BEFORE
+        # mkdir/chmod: a symlink must not redirect even preset-only writes.
+        if any(p.is_symlink() for p in (path, *path.parents)):
+            return True
         from model_switcher.journal import is_inside_git_worktree
-        return bool(is_inside_git_worktree(str(path)))
+        return (is_inside_git_worktree(str(path))
+                or is_inside_git_worktree(str(path.resolve())))
     except Exception:
-        return False
+        return True
 
 
 def _is_inside_plugin_tree(path: Path) -> bool:
@@ -237,9 +242,9 @@ def _require_writable_state() -> None:
     """
     try:
         _state_dir()
-    except StateDirRefused as exc:
+    except (StateDirRefused, OSError, ValueError):
         raise HTTPException(status_code=409, detail={
-            "ok": False, "error": f"plugin is read-only: {type(exc).public_reason}"}) from None
+            "ok": False, "error": _STATE_REFUSED_REASON}) from None
 
 
 # ---------------------------------------------------------------------------
@@ -330,13 +335,16 @@ def host_bundle(body: Any) -> HostBundle:
         raise HTTPException(status_code=413, detail={
             "ok": False, "error": "host data bundle is too large"})
     accepted: Dict[str, Dict[str, Any]] = {}
+    known = discover_profiles()
     warnings: List[str] = []
     for name, entry in profiles.items():
         if not isinstance(name, str) or not name:
             warnings.append("host: ignored a profile entry without a name")
             continue
+        if name not in known:
+            continue
         if not isinstance(entry, dict):
-            warnings.append(f"host: ignored a malformed entry for profile {name!r}")
+            warnings.append("host: ignored a malformed profile entry")
             continue
         try:
             size = len(json.dumps(entry, separators=(",", ":"), default=str).encode("utf-8"))
@@ -451,7 +459,7 @@ _LEGACY_MIGRATION_KEYS: Tuple[str, ...] = (
     "provider", "base_url", "context_length", "api_base",
 )
 _LEGACY_MAX_TURNS = "max_turns"
-_LEGACY_MAX_TURNS_TARGET = "agent"
+_LEGACY_MAX_TURNS_TARGET = "agent.max_turns"
 _AUX_READBACK_SUFFIXES = ("provider", "model")
 _AUX_PAYLOAD_KEYS = frozenset({"provider", "model", "base_url"})
 
@@ -503,7 +511,34 @@ def _save_normalization_prefixes(cfg: Dict[str, Any]) -> List[str]:
     decided anything about them — but only when the pre-write document actually
     carried them, so the allowance is computed from THIS document.
     """
-    allowed = [key for key in _LEGACY_MIGRATION_KEYS if cfg.get(key) is not None]
+    # load_config merges DEFAULT_CONFIG's version stamp and save_config's
+    # strip-defaults pass explicitly preserves it (config.py:2510-2513).
+    # This exact scalar is a host whole-save effect, not a foreign edit.
+    allowed = ["_config_version"]
+    allowed.extend(key for key in _LEGACY_MIGRATION_KEYS if cfg.get(key) is not None)
+    # Whole-save canonicalization can also move those legacy values INTO the
+    # model section during an auxiliary-only request. Permit only destinations
+    # whose pre-write document actually needs that normalization, not model.*.
+    model = cfg.get("model")
+    if isinstance(model, dict):
+        for key in ("provider", "base_url", "context_length"):
+            if cfg.get(key) and not model.get(key):
+                allowed.append("model." + key)
+        if (cfg.get("api_base") or model.get("api_base")) and not model.get("base_url"):
+            allowed.append("model.base_url")
+        if model.get("api_base") is not None:
+            allowed.append("model.api_base")
+        aliases = ("model", "name")
+        if any(model.get(key) for key in aliases):
+            allowed.extend("model." + key for key in aliases if key in model)
+            if not model.get("default"):
+                allowed.append("model.default")
+        nested = [key for key in ("default", *aliases)
+                  if isinstance(model.get(key), dict)]
+        allowed.extend("model." + key for key in nested)
+        if (nested and model.get("provider") in (None, "", "auto")) or (
+                model.get("provider") is not None and not isinstance(model["provider"], str)):
+            allowed.append("model.provider")
     if cfg.get(_LEGACY_MAX_TURNS) is not None:
         allowed.append(_LEGACY_MAX_TURNS)
         allowed.append(_LEGACY_MAX_TURNS_TARGET)
@@ -792,6 +827,9 @@ def _persist_presets(store: PresetStore) -> None:
                 # bound to the discovered profile's own config path only
                 "path": t.path, "changes": t.changes,
                 "cost_class": t.cost_class,
+                "executor": t.executor, "host_call": t.host_call,
+                "readback_keys": t.readback_keys,
+                "allowed_prefixes": t.allowed_prefixes,
                 # P1 #2: persist the REAL slot identity of each target —
                 # applying must restore cron/delegation/auxiliary/...
                 # targets onto their own slots, never rebuild them as main.
@@ -852,7 +890,10 @@ def _preset_from_record(rec: Dict[str, Any]) -> ReviewedPreset:
             allow_unknown=rec.get("allow_unknown", False)),
         targets=[RouteTarget(
             profile=t["profile"], store_kind=t["store_kind"], path=t["path"],
-            changes=t["changes"], cost_class=t["cost_class"])
+            changes=t["changes"], cost_class=t["cost_class"],
+            executor=t.get("executor", "backend"), host_call=t.get("host_call"),
+            readback_keys=t.get("readback_keys"),
+            allowed_prefixes=t.get("allowed_prefixes"))
             for t in rec["targets"]],
         reviewed_profile_ids=rec.get("reviewed_profile_ids", []))
 
@@ -990,7 +1031,7 @@ class HostResultIn(BaseModel):
 
     seq: int
     token: str
-    outcome: Optional[str] = None
+    outcome: Literal["ok", "declined", "error"]
     status: Optional[int] = None
 
 
@@ -1008,8 +1049,22 @@ def _slot_alias(slot_id: Any) -> str:
 
 
 # -- helpers ----------------------------------------------------------------
+def _state_writable() -> bool:
+    try:
+        _state_dir()
+        return True
+    except (StateDirRefused, OSError, ValueError):
+        return False
+
+
+def _runtime_reasons() -> List[str]:
+    return list(_ADAPTER.runtime.reasons) + (
+        [] if _state_writable() else [_STATE_REFUSED_REASON])
+
+
 def _runtime_writable() -> bool:
-    return bool(_ADAPTER.runtime.supported) and not _ADAPTER.runtime.read_only
+    return (bool(_ADAPTER.runtime.supported) and not _ADAPTER.runtime.read_only
+            and _state_writable())
 
 
 _MODEL_CATALOG_MODULE: Optional[Any] = None
@@ -1231,7 +1286,7 @@ def _profile_inventory(host: Optional[HostBundle] = None) -> Dict[str, Dict[str,
         # the right profile and read the per-build warnings off the result
         # (no process-global pending sink).
         with _plugin_home_scope(getattr(ident, "path", None)):
-            result = build_inventory(cfg, host_aux=host.auxiliary(name))
+            result = _build_inventory(cfg, host.auxiliary(name))
         for obs in result:
             d = obs.descriptor
             # UI contract: the main route presents as slotId "main"; the raw
@@ -1358,7 +1413,7 @@ def _main_host_target(cfg: Dict[str, Any], to: Dict[str, Any],
     options = (host or _EMPTY_HOST).options(profile)
     warnings: List[str] = []
     row = _host_option_row(options, provider)
-    if row is not None and row.get("authenticated") is False:
+    if _host_provider_authenticated(options, provider) is False:
         raise MainRouteUnauthenticated(MainRouteUnauthenticated.public_reason)
     if isinstance(options, dict):
         if row is None:
@@ -1428,7 +1483,8 @@ def _host_execution_plan(targets: List[RouteTarget]
             t.readback_keys = None
             t.allowed_prefixes = None
         out.extend(group)
-    return out, blocked
+    accepted = {id(t) for t in out}
+    return [t for t in targets if id(t) in accepted], blocked
 
 
 def _assert_removal_identity(desc, observed: Dict[str, Any],
@@ -1644,7 +1700,7 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
                 continue
             except Exception as exc:
                 blocked.append({"profileId": pid, "slotId": c.get("slotId"),
-                                "reason": f"route rejected ({type(exc).__name__})",
+                                "reason": "route rejected",
                                 "kind": "route_refusal"})
                 continue
             stored = main_route["changes"]
@@ -1667,7 +1723,7 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
             continue
         except Exception as exc:
             blocked.append({"profileId": pid, "slotId": c.get("slotId"),
-                            "reason": f"route rejected ({type(exc).__name__})"})
+                            "reason": "route rejected"})
             continue
         if cp.rejected:
             blocked.append({"profileId": pid, "slotId": c.get("slotId"),
@@ -1881,9 +1937,9 @@ def _route_cost_class(profile: str, stored: Dict[str, Any],
 
 
 def _clean_detail(exc: HTTPException) -> str:
-    detail = getattr(exc, "detail", "")
-    text = detail if isinstance(detail, str) else str(detail)
-    return (text or "route rejected")[:200]
+    # Exceptions from a route helper are never public DTOs, even when their
+    # current implementation happens to construct a fixed string.
+    return "route rejected"
 
 
 class RemovalRefused(ValueError):
@@ -2020,6 +2076,7 @@ def _op_dto(op: Dict[str, Any]) -> Dict[str, Any]:
         "id": pub.get("op_id"), "state": pub.get("state"),
         "results": [{
             "profileId": s.get("profile"), "status": s.get("state"),
+            "seq": s.get("seq"),
             "store": s.get("store_kind"),
             # The revision the review was bound to and the revision the write
             # left behind, straight from the journal step (engine.revision_summary
@@ -2050,7 +2107,21 @@ def _op_ok(op: Optional[Dict[str, Any]]) -> bool:
 def _op_envelope(op: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Response envelope for an operation: top-level ``ok`` (outcome-derived)
     plus the sanitized DTO."""
-    return {"ok": _op_ok(op), "operation": _op_dto(op or {})}
+    envelope = {"ok": _op_ok(op), "operation": _op_dto(op or {})}
+    call = (op or {}).get("host_call")
+    if (op or {}).get("state") == OP_AWAITING_HOST and isinstance(call, dict):
+        # Never expose the journal intent wholesale (or a snapshot). The only
+        # plaintext token is the engine's current, ephemeral continuation.
+        body = call.get("body") or {}
+        allowed = ("scope", "provider", "model", "task", "base_url", "reasoning_effort")
+        envelope["hostCall"] = {
+            "opId": call.get("opId"), "seq": call.get("seq"),
+            "token": call.get("token"), "method": call.get("method"),
+            "path": call.get("path"),
+            "query": {"profile": (call.get("query") or {}).get("profile")},
+            "body": {key: body[key] for key in allowed if key in body},
+        }
+    return envelope
 
 
 def _step_revision(step: Dict[str, Any], *keys: str) -> Optional[str]:
@@ -2078,7 +2149,7 @@ def _state_dto(host: Optional[HostBundle] = None) -> Dict[str, Any]:
         if isinstance(entry, dict) and host.supplied():
             entry["credentials"] = _profile_credential_status(name, host)
     with _LOCK:
-        store = _preset_store()
+        store = _preset_store() if _state_writable() else PresetStore()
         presets = []
         for pid, p in getattr(store, "_presets", {}).items():
             # Exact reviewed slot-scope intents: the UI previews a preset
@@ -2114,7 +2185,7 @@ def _state_dto(host: Optional[HostBundle] = None) -> Dict[str, Any]:
                 "assignments": assignment,
                 "billingPolicy": "reviewed",
             })
-        corrupt = bool(_PRESET_CORRUPT)
+        corrupt = bool(_PRESET_CORRUPT) if _state_writable() else False
     return {"ok": True, "profiles": list(profiles.values()),
             "slots": [s for p in profiles.values() for s in p["slots"]],
             "presets": presets,
@@ -2122,7 +2193,7 @@ def _state_dto(host: Optional[HostBundle] = None) -> Dict[str, Any]:
             "host": host.public(),
             "runtime": {"writable": _runtime_writable(),
                         "version": _ADAPTER.runtime.version_label,
-                        "reasons": list(_ADAPTER.runtime.reasons)}}
+                        "reasons": _runtime_reasons()}}
 
 
 def _profile_credential_status(profile: str, host: HostBundle) -> Dict[str, bool]:
@@ -2159,7 +2230,7 @@ def state():
             return _state_dto(_EMPTY_HOST)
     except Exception as exc:  # sanitized error surface
         raise HTTPException(status_code=500, detail={
-            "ok": False, "error": f"state unavailable: {type(exc).__name__}"}) from None
+            "ok": False, "error": "state unavailable"}) from None
 
 
 @router.post("/state")
@@ -2173,7 +2244,7 @@ def state_with_host(body: Dict[str, Any]):
         raise
     except Exception as exc:  # sanitized error surface
         raise HTTPException(status_code=500, detail={
-            "ok": False, "error": f"state unavailable: {type(exc).__name__}"}) from None
+            "ok": False, "error": "state unavailable"}) from None
 
 
 def _host_catalog_required() -> JSONResponse:
@@ -2239,7 +2310,7 @@ def models(body: Dict[str, Any], response: Response):
             _catalog_options(body, host, profile_id), provider,
             profile_id=profile_id, refresh=bool(body.get("refresh")))
     except Exception as exc:
-        return {**failure, "error": f"catalog lookup failed: {type(exc).__name__}"}
+        return {**failure, "error": "catalog lookup failed"}
     if not isinstance(result, dict):
         return {**failure, "error": "catalog returned an unexpected payload"}
     return result
@@ -2283,7 +2354,7 @@ def catalog(body: Dict[str, Any], response: Response):
             _catalog_options(body, host, profile_id), provider,
             profile_id=profile_id, refresh=bool(body.get("refresh")))
     except Exception as exc:
-        return {**failure, "error": f"catalog lookup failed: {type(exc).__name__}"}
+        return {**failure, "error": "catalog lookup failed"}
     if not isinstance(result, dict):
         return {**failure, "error": "catalog returned an unexpected payload"}
     if "profileId" not in result:
@@ -2361,7 +2432,7 @@ def preview(body: Dict[str, Any]):
         # path: _changes_to_targets) — so the diff shown is exactly what Apply
         # writes, chain edits, base_url/api_mode side effects and canonical
         # main preparation included. No writes happen here.
-        out_changes, blocked, prepared = [], [], []
+        out_changes, blocked, prepared, all_targets = [], [], [], []
         known = discover_profiles()
         with _LOCK:
             for c in changes:
@@ -2397,10 +2468,9 @@ def preview(body: Dict[str, Any]):
                         "reason": ("config changed while the preview was "
                                    "prepared; retry the preview")})
                     continue
+                all_targets.extend(targets)
                 for t in targets:
-                    entry = {"profile": t.profile,
-                             "store_kind": t.store_kind,
-                             "path": t.path, "changes": t.changes}
+                    entry = _target_dict(t)
                     key = (t.profile, t.store_kind, t.path)
                     if watched.get(key) is not None:
                         # Pin the revision the mutation was prepared FROM, not
@@ -2412,6 +2482,20 @@ def preview(body: Dict[str, Any]):
                                     "warnings": list(targets[0].warnings),
                                     "sideEffects": side_effects,
                                     "diff": diff})
+        planned, execution_blocks = _host_execution_plan(all_targets)
+        blocked.extend(execution_blocks)
+        refused_profiles = {b["profileId"] for b in execution_blocks}
+        prepared = [t for t in prepared if t["profile"] not in refused_profiles]
+        out_changes = [c for c in out_changes if c["profileId"] not in refused_profiles]
+        # Multi-slot non-main reviews demote compatible aux steps to backend;
+        # keep both the reviewed display and the cached journal plan exact.
+        for entry, target, change in zip(prepared, planned, out_changes):
+            entry.update(_target_dict(target))
+            change["executor"] = target.executor
+            if target.executor != "host":
+                change["sideEffects"] = [
+                    effect for effect in change["sideEffects"]
+                    if effect != "host assignment; exact persisted diff is available after readback"]
         preview_id = "pv-" + uuid.uuid4().hex[:12]
         with _LOCK:
             _PREVIEW_CACHE[preview_id] = _bind_preview(prepared, profiles, blocked)
@@ -2423,7 +2507,7 @@ def preview(body: Dict[str, Any]):
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail={
-            "ok": False, "error": f"preview failed: {type(exc).__name__}"}) from None
+            "ok": False, "error": "preview failed"}) from None
 
 
 # A preview entry is the EXACT prepared mutation an apply will run, bound to
@@ -2456,6 +2540,10 @@ def _diff_for_targets(targets, cfg: Dict[str, Any],
                 "from": _public_diff_value(_observed_value(cfg, dotted), dotted),
                 "to": _public_diff_value(value, dotted),
             })
+        if t.executor == "host":
+            side_effects.append("host assignment; exact persisted diff is available after readback")
+            side_effects.extend(t.warnings or [])
+            continue
         if not removal:
             if any(k in t.changes for k in _MAIN_SIDE_EFFECT_KEYS):
                 side_effects.append("canonical endpoint settings applied")
@@ -2580,8 +2668,10 @@ def _verify_preview_fresh(entry: Dict[str, Any]) -> None:
 def save_preset(body: PresetIn):
     try:
         with _LOCK:
-            profiles = _profile_inventory()
-            targets, _blocked = _changes_to_targets(body.changes, profiles)
+            _require_writable_state()
+            host = host_bundle({"host": body.host})
+            profiles = _profile_inventory(host)
+            targets, _blocked = _changes_to_targets(body.changes, profiles, host=host)
             store = _preset_store()
             pid = "p-" + uuid.uuid4().hex[:8]
             # Discovery-at-review: remember every profile that existed when
@@ -2609,12 +2699,13 @@ def save_preset(body: PresetIn):
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail={
-            "ok": False, "error": f"save failed: {type(exc).__name__}"}) from None
+            "ok": False, "error": "save failed"}) from None
 
 
 # -- F1: ReviewedPreset.preflight runs BEFORE a one-click apply -------------
 def _profile_has_credentials(profile: str, ident,
-                             providers: Optional[List[str]] = None) -> bool:
+                             providers: Optional[List[str]] = None,
+                             host: Optional[HostBundle] = None) -> bool:
     """Provider-scoped credential readiness for a profile.
 
     Empty ``providers`` (a scalar route with no hosted provider, or a removal)
@@ -2631,24 +2722,25 @@ def _profile_has_credentials(profile: str, ident,
         return False
     for provider in needed:
         try:
-            if not _provider_credentials_satisfied(profile, ident, cfg, provider):
+            if not _provider_credentials_satisfied(profile, ident, cfg, provider, host):
                 return False
         except Exception:
             return False
     return True
 
 
-def _live_cost_class(t: RouteTarget) -> str:
+def _live_cost_class(t: RouteTarget, host: Optional[HostBundle] = None) -> str:
     """The live cost class of a review-time route, re-derived PER provider.
     A frozen unclassifiable class (e.g. 'unknown') passes through verbatim so
     the preset's billing policy — never a silent free pass — gates it."""
     if t.cost_class not in ("subscription_included", "metered"):
         return t.cost_class  # e.g. 'unknown': unknown cost is never treated as free
-    return _route_cost_class(t.profile, t.changes)
+    return _route_cost_class(t.profile, t.changes, host=host)
 
 
 def _preset_preflight(preset: ReviewedPreset,
-                      allow_unknown: bool = False) -> List[str]:
+                      allow_unknown: bool = False,
+                      host: Optional[HostBundle] = None) -> List[str]:
     profiles = discover_profiles()
     # Apply cannot broaden a saved policy. Save a newly reviewed preset to
     # approve unknown costs; request acknowledgements are for custom reviews.
@@ -2665,17 +2757,18 @@ def _preset_preflight(preset: ReviewedPreset,
     for name, ident in profiles.items():
         try:
             credentials[name] = _profile_has_credentials(
-                name, ident, providers_by_profile.get(name, []))
+                name, ident, providers_by_profile.get(name, []), host)
         except Exception:
             credentials[name] = False  # fail closed, never fabricate
-    live_cost_classes = {_route_key(t): _live_cost_class(t) for t in preset.targets}
+    live_cost_classes = {_route_key(t): _live_cost_class(t, host) for t in preset.targets}
     return preset.preflight(credentials=credentials,
                             live_cost_classes=live_cost_classes,
                             discovered_profiles=sorted(profiles))
 
 
 def _preset_target_dicts(preset: ReviewedPreset,
-                         profiles: Dict[str, Dict[str, Any]]
+                         profiles: Dict[str, Dict[str, Any]],
+                         host: Optional[HostBundle] = None
                          ) -> List[Dict[str, Any]]:
     """The preset's reviewed changes re-prepared against the CURRENT documents.
 
@@ -2693,7 +2786,7 @@ def _preset_target_dicts(preset: ReviewedPreset,
     if isinstance(ui, list) and ui:
         watched = _watch_stores(ui, known)
         derived, blocked = _changes_to_targets(copy.deepcopy(ui), profiles,
-                                               strict=False)
+                                               strict=False, host=host)
         if blocked:
             raise HTTPException(status_code=409, detail={
                 "ok": False, "blocked": True,
@@ -2712,8 +2805,8 @@ def _preset_target_dicts(preset: ReviewedPreset,
         for t in derived:
             ident = known.get(t.profile)
             path = _config_path_for(t.profile, ident) if ident is not None else t.path
-            target = {"profile": t.profile, "store_kind": t.store_kind,
-                      "path": str(path), "changes": copy.deepcopy(t.changes)}
+            target = _target_dict(t)
+            target["path"] = str(path)
             if ident is not None:
                 target["identity"] = _identity_dict(ident)
             key = (t.profile, t.store_kind, str(path))
@@ -2725,14 +2818,23 @@ def _preset_target_dicts(preset: ReviewedPreset,
     for t in preset.targets:
         ident = known.get(t.profile)
         path = _config_path_for(t.profile, ident) if ident is not None else t.path
-        target = {"profile": t.profile, "store_kind": t.store_kind,
-                  "path": str(path), "changes": copy.deepcopy(t.changes)}
+        target = _target_dict(t)
+        target["path"] = str(path)
         # Bind the discovered identity so the engine plans against exactly the
         # profile the preset was reviewed for (no re-derivation at plan time).
         if ident is not None:
             target["identity"] = _identity_dict(ident)
         out.append(target)
     return out
+
+
+def _target_dict(t: RouteTarget) -> Dict[str, Any]:
+    """Private plan DTO: execution/verification metadata travels with intent."""
+    return {"profile": t.profile, "store_kind": t.store_kind, "path": t.path,
+            "changes": copy.deepcopy(t.changes), "executor": t.executor,
+            "host_call": copy.deepcopy(t.host_call),
+            "readback_keys": copy.deepcopy(t.readback_keys),
+            "allowed_prefixes": copy.deepcopy(t.allowed_prefixes)}
 
 
 def _same_prepared_scope(a: List[Dict[str, Any]],
@@ -2757,13 +2859,19 @@ def _same_prepared_scope(a: List[Dict[str, Any]],
              tuple(sorted(
                  (k, json.dumps(v, sort_keys=True, default=str))
                  for k, v in (t.get("changes") or {}).items()
-                 if k not in _MAIN_SIDE_EFFECT_KEYS)))
+                 if k not in _MAIN_SIDE_EFFECT_KEYS)),
+             json.dumps({"executor": t.get("executor", "backend"),
+                         "host_call": t.get("host_call"),
+                         "readback_keys": t.get("readback_keys"),
+                         "allowed_prefixes": t.get("allowed_prefixes")},
+                        sort_keys=True, default=str))
             for t in ts)
     return norm(a) == norm(b)
 
 
 def _unchanged_provider_hops(profile: str,
-                             changes: Dict[str, Any]) -> List[str]:
+                             changes: Dict[str, Any],
+                             host: Optional[HostBundle] = None) -> List[str]:
     """Providers of scalar route assignments whose companion provider field is
     NOT part of the write map (same-provider model edits).
 
@@ -2782,7 +2890,7 @@ def _unchanged_provider_hops(profile: str,
         if ident is None:
             return []
         with _plugin_home_scope(ident.path):
-            inventory = build_inventory(cfg)
+            inventory = _build_inventory(cfg, (host or _EMPTY_HOST).auxiliary(profile))
     except Exception:
         return []
     out: List[str] = []
@@ -2814,7 +2922,8 @@ def _unchanged_provider_hops(profile: str,
     return out
 
 
-def _ensure_prepared_credentials(prepared: List[Dict[str, Any]]) -> None:
+def _ensure_prepared_credentials(prepared: List[Dict[str, Any]],
+                                 host: Optional[HostBundle] = None) -> None:
     """Provider-scoped credential gate for prepared write targets.
 
     Every provider a target routes through (chain hops and route-dict values
@@ -2830,11 +2939,11 @@ def _ensure_prepared_credentials(prepared: List[Dict[str, Any]]) -> None:
         profile = t.get("profile")
         if not needed and profile:
             # Same-provider model edits omit the unchanged provider field.
-            needed = _unchanged_provider_hops(profile, changes)
+            needed = _unchanged_provider_hops(profile, changes, host)
         if not needed:
             continue
         ident = known.get(profile)
-        if ident is None or not _profile_has_credentials(profile, ident, needed):
+        if ident is None or not _profile_has_credentials(profile, ident, needed, host):
             missing.append(str(profile))
     if missing:
         raise HTTPException(status_code=409, detail={
@@ -2844,7 +2953,8 @@ def _ensure_prepared_credentials(prepared: List[Dict[str, Any]]) -> None:
                         for p in sorted(set(missing))]})
 
 
-def _resolve_apply(body: ApplyIn, profiles: Dict[str, Dict[str, Any]]
+def _resolve_apply(body: ApplyIn, profiles: Dict[str, Dict[str, Any]],
+                   host: Optional[HostBundle] = None
                    ) -> List[Dict[str, Any]]:
     """Resolve the EXACT prepared write targets for an apply.
 
@@ -2883,13 +2993,13 @@ def _resolve_apply(body: ApplyIn, profiles: Dict[str, Dict[str, Any]]
         # drifted/unknown cost classes and newly discovered profiles block
         # before any write, never silently substituted.
         reasons = _preset_preflight(
-            preset, allow_unknown=bool(body.allowUnknownCost))
+            preset, allow_unknown=bool(body.allowUnknownCost), host=host)
         if reasons:
             raise HTTPException(status_code=409, detail={
                 "ok": False, "blocked": True,
                 "error": "apply blocked: preset preflight refused",
                 "reasons": reasons})
-        preset_targets = _preset_target_dicts(preset, profiles)
+        preset_targets = _preset_target_dicts(preset, profiles, host)
         if prepared is not None:
             if not _same_prepared_scope(prepared, preset_targets):
                 raise HTTPException(status_code=409, detail={
@@ -2905,7 +3015,7 @@ def _resolve_apply(body: ApplyIn, profiles: Dict[str, Dict[str, Any]]
         known = discover_profiles()
         watched = _watch_stores(body.changes, known)
         targets, blocked = _changes_to_targets(body.changes, profiles,
-                                               strict=False)
+                                               strict=False, host=host)
         if blocked:
             if all(b.get("kind") == "route_refusal" for b in blocked):
                 # 409 apply contract: the canonical seam refused the route —
@@ -2920,8 +3030,7 @@ def _resolve_apply(body: ApplyIn, profiles: Dict[str, Dict[str, Any]]
             raise HTTPException(status_code=422, detail={
                 "ok": False, "error": "preview blocked for some profiles",
                 "blocked": blocked})
-        prepared = [{"profile": t.profile, "store_kind": t.store_kind,
-                     "path": t.path, "changes": t.changes} for t in targets]
+        prepared = [_target_dict(t) for t in targets]
         # Direct applies are revision-pinned exactly like previews: the
         # prepared mutation (canonical cleanup deletions included) is derived
         # from these documents, so a write landing between preparation and
@@ -2946,7 +3055,7 @@ def _resolve_apply(body: ApplyIn, profiles: Dict[str, Dict[str, Any]]
     # by a client that never held one), so preview-based applies are gated
     # exactly like direct ones. Removals/unset carry no provider and are not
     # gated.
-    _ensure_prepared_credentials(prepared)
+    _ensure_prepared_credentials(prepared, host)
     return prepared
 
 
@@ -2955,16 +3064,18 @@ def apply(body: ApplyIn):
     if not _runtime_writable():
         raise HTTPException(status_code=409, detail={
             "ok": False, "error": "runtime is read-only; writes refused",
-            "reasons": list(_ADAPTER.runtime.reasons)})
+            "reasons": _runtime_reasons()})
     try:
         with _LOCK:
-            profiles = _profile_inventory()
-            prepared = _resolve_apply(body, profiles)
+            _require_writable_state()
+            host = host_bundle({"host": body.host})
+            profiles = _profile_inventory(host)
+            prepared = _resolve_apply(body, profiles, host)
             journal = _journal()
             try:
                 op = plan_operation(journal, prepared)
                 outcome = apply_operation(journal, op["op_id"])
-                return _op_envelope(journal.get(outcome["op_id"]))
+                return _op_envelope(outcome)
             finally:
                 journal.close()
     except HTTPException:
@@ -2977,7 +3088,38 @@ def apply(body: ApplyIn):
             "error": f"apply blocked: {type(exc).public_reason}"}) from None
     except Exception as exc:
         raise HTTPException(status_code=500, detail={
-            "ok": False, "error": f"apply failed: {type(exc).__name__}"}) from None
+            "ok": False, "error": "apply failed"}) from None
+
+
+@router.post("/operations/{op_id}/host-result")
+def host_result(op_id: str, body: HostResultIn):
+    """Accept only fixed observations; actual config readback is authoritative."""
+    try:
+        with _LOCK:
+            _require_writable_state()
+            journal = _journal()
+            try:
+                if journal.get(op_id) is None:
+                    raise HTTPException(status_code=404, detail={
+                        "ok": False, "error": "unknown operation"})
+                outcome = submit_host_result(
+                    journal, op_id, body.seq, body.token, body.outcome,
+                    status=body.status)
+                return _op_envelope(outcome)
+            finally:
+                journal.close()
+    except HTTPException:
+        raise
+    except ApplyHostTokenMismatch:
+        raise HTTPException(status_code=409, detail={
+            "ok": False, "error": "host_token_mismatch",
+            "failure": "host_token_mismatch"}) from None
+    except ApplyBlocked as exc:
+        raise HTTPException(status_code=409, detail={
+            "ok": False, "error": type(exc).public_reason}) from None
+    except Exception:
+        raise HTTPException(status_code=500, detail={
+            "ok": False, "error": "host result failed"}) from None
 
 
 @router.get("/operations/{op_id}")
@@ -3007,7 +3149,7 @@ def get_operation(op_id: str):
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail={
-            "ok": False, "error": f"read failed: {type(exc).__name__}"}) from None
+            "ok": False, "error": "read failed"}) from None
 
 
 @router.post("/operations/{op_id}/recover")
@@ -3032,7 +3174,7 @@ def recover_operation(op_id: str):
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail={
-            "ok": False, "error": f"recover failed: {type(exc).__name__}"}) from None
+            "ok": False, "error": "recover failed"}) from None
 
 
 @router.post("/operations/{op_id}/undo")
@@ -3055,4 +3197,4 @@ def undo(op_id: str):
             "error": f"undo blocked: {type(exc).public_reason}"}) from None
     except Exception as exc:
         raise HTTPException(status_code=500, detail={
-            "ok": False, "error": f"undo failed: {type(exc).__name__}"}) from None
+            "ok": False, "error": "undo failed"}) from None
