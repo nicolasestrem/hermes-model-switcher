@@ -1000,7 +1000,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
           <tr>
             <th scope="col" style={{
               textAlign: "left", borderBottom: `1px solid ${THEME.border}`, padding: 4,
-              position: "sticky", top: 0, left: 0, background: stickyBg, zIndex: 3, width: 32, minWidth: 32,
+              position: "sticky", top: 0, left: 0, background: stickyBg, zIndex: 3, width: 40, minWidth: 40,
             }}>
               <input ref={masterRef} type="checkbox" data-testid="select-all"
                 aria-label="Select all matching writable slots" checked={masterChecked}
@@ -1024,7 +1024,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
               <React.Fragment key={key}>
                 <tr data-row={key} data-selected={checked} data-readonly={!canSelectSlot(s)}
                   style={{ borderBottom: `1px solid ${THEME.border}` }}>
-                  <td data-column="select" style={{ position: "sticky", left: 0, background: checked ? `color-mix(in srgb, ${THEME.accent} 12%, ${stickyBg})` : stickyBg, zIndex: 1, minWidth: 32 }}>
+                  <td data-column="select" style={{ position: "sticky", left: 0, background: checked ? `color-mix(in srgb, ${THEME.accent} 12%, ${stickyBg})` : stickyBg, zIndex: 1, minWidth: 40 }}>
                     <input
                       type="checkbox"
                       aria-label={`Select ${s.profileId} ${s.slotId}`}

@@ -109,6 +109,9 @@ for (const theme of ['light', 'dark']) for (const width of [1440, 768, 375]) {
       return range.getClientRects().length;
     });
     expect(labelLines).toBe(1);
+    const profileHeader = await matrix.locator('thead th').nth(1).boundingBox();
+    const slotHeader = await matrix.locator('thead th').nth(2).boundingBox();
+    expect(profileHeader.x + profileHeader.width).toBeLessThanOrEqual(slotHeader.x);
     await expect(matrix).toHaveCSS('overflow-x', 'scroll');
     // A wide pane may fit all columns; narrow panes must scroll, not wrap IDs.
     if (width < 1440) {
