@@ -205,7 +205,7 @@ test("a partial undo restores the verified profile and flags only the conflict",
 
     // Summary distinguishes the restored profile from the conflicted one: only
     // the conflict needs attention.
-    await expect(page.getByTestId("operation-summary")).toContainText("0 profiles applied · 1 need attention");
+    await expect(page.getByTestId("operation-summary")).toContainText("0 profiles applied · 1 needs attention");
     await expect(page.getByTestId("operation-summary")).toHaveAttribute("data-restored", "1");
     await expect(page.getByTestId("operation-summary")).toHaveAttribute("data-conflict", "1");
   });

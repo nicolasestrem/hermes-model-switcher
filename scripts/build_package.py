@@ -24,8 +24,10 @@ Exit codes: 0 ok, 1 missing inputs.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -45,6 +47,13 @@ STYLES = "dist/style.css"
 DOC_FILES = [
     "usability-polish.md", "technical-reference.md", "privacy-audit.md",
     "release-readiness.md", "verification.md", "backlog.md", "catalog-submission.md", "images/README.md",
+    "images/catalog-captures.json",
+    "images/model-switcher-0.3.0-dashboard.png",
+    "images/model-switcher-0.3.0-preview.png",
+    "images/model-switcher-0.3.0-operation.png",
+    "images/model-switcher-0.3.0-catalog.png",
+    "images/model-switcher-0.3.0-light.png",
+    "images/model-switcher-0.3.0-narrow.png",
     "images/model-switcher-dark-1440.png", "images/model-switcher-light-1440.png",
     "images/model-switcher-dark-375.png",
     "images/model-switcher-catalog-1440.png", "images/model-switcher-catalog-375.png",
@@ -72,10 +81,12 @@ def main() -> None:
     out = requested.parent.resolve() / NAME
     if out == REPO or out in REPO.parents:
         fail("output must not replace the source checkout or its ancestors")
-    recursive_inputs = [REPO / "docs", REPO / "src" / PY_PACKAGE]
-    for source in recursive_inputs:
-        if out == source.resolve() or source.resolve() in out.parents:
-            fail("output must not be inside a recursively copied source tree")
+    # Refuse ANY destination inside the checkout, not just the recursively
+    # copied trees: rmtree/rename must never touch tracked sources. The single
+    # exception is the ignored, disposable default build dir (dist-package/).
+    if REPO in out.parents and (REPO / "dist-package") not in out.parents:
+        fail("output must not be inside the checkout; the only permitted "
+             "in-checkout destination is the ignored dist-package/ build dir")
     if out.exists() and not args.replace:
         fail("output already exists; use --replace to replace it explicitly")
     inputs = [REPO / f for f in COPY_FILES + PY_MODULES + ["scripts/privacy_guard.py"]]
@@ -92,6 +103,7 @@ def main() -> None:
     # copytree/copy2 follow links by default. Reject links in both the
     # recursively copied trees and every input's parent chain before replacing
     # any existing package, so external/private files cannot enter the bundle.
+    recursive_inputs = [REPO / "docs", REPO / "src" / PY_PACKAGE]
     for source in inputs + recursive_inputs:
         for candidate in (source, *source.parents):
             if candidate == REPO.parent:
@@ -111,9 +123,30 @@ def main() -> None:
     if not stylesheet.is_file():
         fail(f"missing {stylesheet} — run `npm run build` first")
 
-    if out.exists():
-        shutil.rmtree(out)
+    # Build into a staging directory NEXT TO the final destination, then swap
+    # with a same-filesystem rename: an existing package is only destroyed
+    # after its replacement is fully assembled, and a mid-build failure
+    # leaves the previous output intact.
+    out.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{NAME}.staging.", dir=str(out.parent)))
+    try:
+        build(staging / NAME, bundle, stylesheet)
+        os.chmod(staging / NAME, 0o755)  # mkdtemp is 0700; keep the old default
+        previous = None
+        if out.exists():
+            previous = Path(tempfile.mkdtemp(prefix=f".{NAME}.replaced.",
+                                             dir=str(out.parent)))
+            out.rename(previous / NAME)
+        (staging / NAME).rename(out)
+        if previous is not None:
+            shutil.rmtree(previous)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    print(f"package assembled at {out}")
 
+
+def build(out: Path, bundle: Path, stylesheet: Path) -> None:
+    """Assemble the package tree at *out* (a fresh empty directory)."""
     dash = out / "dashboard" / "dist"
     dash.mkdir(parents=True)
     for f in COPY_FILES:
@@ -139,7 +172,6 @@ def main() -> None:
         shutil.copy2(REPO / "dashboard" / f, out / "dashboard" / f)
     (dash / "index.js").write_bytes(bundle.read_bytes())
     (dash / "style.css").write_bytes(stylesheet.read_bytes())
-    print(f"package assembled at {out}")
 
 
 if __name__ == "__main__":

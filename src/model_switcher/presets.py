@@ -113,8 +113,16 @@ class ReviewedPreset:
 
 
 def _route_key(t: RouteTarget) -> str:
-    fields = ",".join(f"{k}={v}" for k, v in sorted(t.changes.items()))
-    return f"{t.profile}:{t.store_kind}:{fields}"
+    """Identity of a reviewed route: profile, store kind and slot paths ONLY.
+
+    Change values never enter the key: they can carry inline credentials (an
+    ``api_key`` leaf, a credential-bearing ``base_url``) and the key is
+    embedded verbatim in preflight blocking reasons that public 409 apply
+    DTOs return. Two targets are the same reviewed route iff they touch the
+    same storage paths on the same profile store.
+    """
+    paths = ",".join(sorted(t.changes or {}))
+    return f"{t.profile}:{t.store_kind}:{paths}"
 
 
 class PresetStore:

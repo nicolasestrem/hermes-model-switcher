@@ -229,7 +229,8 @@ class OperationJournal:
         self._conn.execute(
             "INSERT INTO operations (op_id, state, created_at, updated_at, payload)"
             " VALUES (?, ?, ?, ?, ?)",
-            (op_id, OP_PENDING, now, now, json.dumps(payload, sort_keys=True)),
+            (op_id, OP_PENDING, now, now, json.dumps(payload, sort_keys=True,
+                                                     default=str)),
         )
         return self.get(op_id)
 
@@ -247,6 +248,12 @@ class OperationJournal:
         readback keys + allowed prefixes are what the engine later uses to
         decide whether whatever landed is THIS step's write. They are
         persisted so a restart can still verify the call (reconcile).
+
+        Every document is serialized with the SAME contract as
+        ``hermes_adapter._rev`` (``default=str``): a config.yaml scalar such as
+        an unquoted date loads as ``datetime.date`` and must journal (and
+        re-hash) exactly as the revision does, instead of raising TypeError and
+        leaving the operation half-recorded as ``applying``.
         """
         self._conn.execute(
             "INSERT INTO steps (op_id, seq, profile, store_kind, path, state,"
@@ -254,13 +261,18 @@ class OperationJournal:
             " host_readback_keys, host_allowed_prefixes)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (op_id, seq, profile, store_kind, path, STEP_PENDING,
-             json.dumps(changes, sort_keys=True),
-             json.dumps(snapshot, sort_keys=True) if snapshot is not None else None,
-             pre_revision, json.dumps(identity) if identity is not None else None,
+             json.dumps(changes, sort_keys=True, default=str),
+             json.dumps(snapshot, sort_keys=True, default=str)
+             if snapshot is not None else None,
+             pre_revision, json.dumps(identity, default=str)
+             if identity is not None else None,
              executor or CALL_BACKEND,
-             json.dumps(host_call, sort_keys=True) if host_call is not None else None,
-             json.dumps(list(readback_keys)) if readback_keys is not None else None,
-             json.dumps(list(allowed_prefixes)) if allowed_prefixes is not None else None),
+             json.dumps(host_call, sort_keys=True, default=str)
+             if host_call is not None else None,
+             json.dumps(list(readback_keys), default=str)
+             if readback_keys is not None else None,
+             json.dumps(list(allowed_prefixes), default=str)
+             if allowed_prefixes is not None else None),
         )
         self._touch(op_id, OP_APPLYING)
 

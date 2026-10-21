@@ -47,12 +47,45 @@
   ([#142341](https://github.com/NousResearch/hermes-agent/issues/142341)).
 - When a host save normalizes legacy raw config aliases, Undo cannot recreate them
   exactly and stops at `recovery_required` instead of claiming a restore.
+- A config holding a value the JSON journal cannot restore exactly (for example an
+  unquoted YAML date) is refused before anything is written, with a plain reason.
+- A typed main model id that is not in the host catalog may be saved by Hermes
+  under a different spelling. The preview warns about this; if it happens, the
+  operation stops at `recovery_required` and the host's write is left in place.
+
+### Release hardening
+
+- Preset preflight refusals name routes by profile and slot only, never by their
+  values, so inline credentials or credential-bearing endpoints in a stored route
+  cannot reach a 409 response. `presets.json` is written `0600`, and an existing
+  wider file is tightened on load.
+- Auxiliary tasks that Hermes' assignment route does not accept are written through
+  the public backend writer instead of a host call that would be refused.
+- Main assignments journal the host's canonical provider id (aliases and case
+  resolved from the supplied catalog), so a correct host write is not mistaken for
+  a foreign edit; an unresolvable provider is refused with a fixed reason.
+- Recovery resumes a compensation interrupted by a crash when the store still
+  holds our recorded write; one unreadable store fails only its own operation
+  instead of every operation route; a step whose write phase is ambiguous is never
+  reported as a known no-write.
+- The local installer checks every load-bearing package file, no longer creates a
+  misleading in-plugin `state/` directory, and prints the enable step; uninstall
+  reports where state really lives. PyYAML is declared as a runtime dependency,
+  build tools moved to `devDependencies`, and CI assembles the package.
+- UI: dark-theme checkbox styling, route ids that never break mid-token, muted
+  informational notes, correct singular/plural counts, persistent polite live
+  regions, and gate reasons linked to the controls they disable.
 
 ### Verification
 
-Against Hermes `c5a3c0f8`: 743 Python tests and 185 browser tests (mock fixture
-and real backend with Hermes' own `/api/model/*` routers) pass with nothing
-skipped; `hermes plugins validate` passes with no private-core-import warning.
+Against Hermes `c5a3c0f8`, the release commit passes 777 Python tests and 209
+browser tests locally (Python 3.13; mock fixture and real backend with Hermes' own
+`/api/model/*` routers) with nothing skipped; CI repeats them on Python 3.11/3.13
+and Node 22/24. The host `private_import_findings` gate returned `[]` against
+the reference checkout. A locally run `hermes plugins validate` (installed CLI,
+over the repository tree and an assembled package) exited 0 in the pre-release
+packaging audit; that is a locally observed result, not an admission receipt,
+and no CI workflow runs the validator.
 
 ### Model catalog and native dropdowns
 

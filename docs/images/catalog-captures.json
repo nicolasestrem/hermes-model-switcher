@@ -1,0 +1,83 @@
+{
+  "prefix": "model-switcher-0.3.0",
+  "captureBoundary": "Dashboard SDK fixture with the plugin's real backend and Hermes' own /api/model/* routers over an isolated lab home",
+  "surfaceDigest": "16f098459c56d7fb757ffe2c68b104c8970eb4b8f660f1d33af576c67b8d3c33",
+  "sourceFiles": [
+    "ui/src/main.jsx",
+    "ui/src/api.js",
+    "ui/src/styles.css",
+    "dashboard/dist/index.js"
+  ],
+  "captureViewport": "1280x800 (narrow capture 390x844), deviceScaleFactor 1, viewport screenshot (not fullPage)",
+  "fixtures": "tests/fixture-real.html served by tests/real_app.py (real plugin backend + Hermes /api/model/* routers, isolated lab home)",
+  "optIn": "HMS_WRITE_CATALOG_CAPTURES=1",
+  "observedAt": "2026-10-21T10:15:05.855Z",
+  "captures": [
+    {
+      "name": "dashboard",
+      "state": "idle routing matrix and change editor, dark host theme",
+      "file": "docs/images/model-switcher-0.3.0-dashboard.png",
+      "viewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "bytes": 122424,
+      "sha256": "030ef6006972ecb58493bc2bb4b915b1326ea13669d2d31ff0e0fd0c95ad2f75"
+    },
+    {
+      "name": "light",
+      "state": "idle routing matrix and change editor, light host theme",
+      "file": "docs/images/model-switcher-0.3.0-light.png",
+      "viewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "bytes": 105041,
+      "sha256": "d6cd0289de58cd7f102075138ca502e68bb30de052da9cc429d2d58d89c89411"
+    },
+    {
+      "name": "narrow",
+      "state": "narrow 390x844 layout with the routing matrix scrolling inside its own region",
+      "file": "docs/images/model-switcher-0.3.0-narrow.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "bytes": 49168,
+      "sha256": "7a763c58f9b8bbbcc73df355555acf96ec62b80b1b12d8dbf7b7fa2c0402a517"
+    },
+    {
+      "name": "catalog",
+      "state": "provider-grouped model catalog with the host's per-1M-token price columns",
+      "file": "docs/images/model-switcher-0.3.0-catalog.png",
+      "viewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "bytes": 127194,
+      "sha256": "87671e56e666fc8096d04521367d41d4c3a5a4075abce9adb3f9557c129af884"
+    },
+    {
+      "name": "preview",
+      "state": "reviewed default/main change to zhipu/glm-5.3-flash, before apply",
+      "file": "docs/images/model-switcher-0.3.0-preview.png",
+      "viewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "bytes": 115249,
+      "sha256": "03862d1f695a3d8dd98cb848524bf4accb6e6484741946225e47c0998aa9de7e"
+    },
+    {
+      "name": "operation",
+      "state": "operation drawer after Apply with per-profile readback",
+      "file": "docs/images/model-switcher-0.3.0-operation.png",
+      "viewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "bytes": 112721,
+      "sha256": "b01a41d02818127a02be0c7294ae147738c56c5db47113f08c3a73197e11d3ba"
+    }
+  ]
+}

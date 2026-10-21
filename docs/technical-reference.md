@@ -186,6 +186,12 @@ closed. A configured custom endpoint retains its existing credential policy.
 for source scans and tests (default `~/.hermes/hermes-agent`).
 `HERMES_MODEL_SWITCHER_PLUGINS_DIR` exposes coverage gaps, not write access.
 
+One test-only helper, `registry/scanner.py`'s `load_default_config`, loads
+`hermes_cli/config_defaults.py` by file path; it is called only by tests, is
+inert at runtime, and is invisible to the AST-based private-import gate, so
+"public seams only" is a statement about runtime imports, not an absence of
+this test-only file-path coupling.
+
 Persistent state lives **only** at
 `get_hermes_home()/state/hermes-model-switcher/`. There is no alternate state-dir
 setting or fallback. If this location resolves inside plugin source or a Git

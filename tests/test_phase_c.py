@@ -329,7 +329,8 @@ def test_unknown_cost_not_free(lab):
     reasons = store.get("p-fast").preflight(
         credentials={"default": True, "alpha": True},
         live_cost_classes={
-            "default:config:main.model=m/new": COST_UNKNOWN,
+            # route identity: profile + store kind + slot paths (never values)
+            "default:config:main.model": COST_UNKNOWN,
         },
     )
     assert any("unknown cost" in r for r in reasons)
@@ -345,7 +346,8 @@ def test_unapproved_cost_change_blocks(lab):
     reasons = store.get("p-fast").preflight(
         credentials={"default": True, "alpha": True},
         live_cost_classes={
-            "default:config:main.model=m/new": COST_SUBSCRIPTION,
+            # route identity: profile + store kind + slot paths (never values)
+            "default:config:main.model": COST_SUBSCRIPTION,
         },
     )
     assert any("cost changed after review" in r for r in reasons)

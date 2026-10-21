@@ -161,5 +161,11 @@ jobs:
           git diff --exit-code -- dashboard/dist \
             || { echo "::error::dashboard/dist is stale — run npm run build and commit the rebuilt assets"; exit 1; }
 
+      # D9: the release assembly itself must never break silently — run the
+      # real packager against a temp dir (outside the checkout) so a missing
+      # input or a manifest regression fails CI, not a user's install.
+      - name: Assemble the release package
+        run: python scripts/build_package.py --out "${RUNNER_TEMP}/assembled-package"
+
       - name: Privacy gate
         run: python scripts/privacy_guard.py

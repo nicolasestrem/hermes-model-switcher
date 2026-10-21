@@ -176,18 +176,40 @@
   cursor: not-allowed;
 }
 
-/* Checkboxes: natural size/shape, host accent for the checked tick */
+/* Checkboxes: the UA's appearance:auto paints a white square on dark host
+   surfaces, so the box itself is drawn from host tokens — surface fill,
+   border, and the accent ONLY once checked/indeterminate. State is the
+   filled box vs the surface, never colour alone; focus-visible and
+   disabled states come from the shared rules above. */
 .hms-root input[type="checkbox"] {
-  appearance: auto;
+  appearance: none;
   width: 1rem;
   height: 1rem;
   min-height: 0;
   padding: 0;
-  border: initial;
+  border: 1px solid var(--hms-border);
   border-radius: 0.25rem;
-  background: initial;
-  accent-color: var(--hms-accent);
+  background: var(--hms-surface);
   cursor: pointer;
+  box-sizing: border-box;
+  flex: 0 0 auto;
+}
+
+.hms-root input[type="checkbox"]:checked,
+.hms-root input[type="checkbox"]:indeterminate {
+  background-color: var(--hms-accent);
+  border-color: var(--hms-accent);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 0.75rem 0.75rem;
+}
+
+.hms-root input[type="checkbox"]:checked {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.6 6.4 12 13 4.4' fill='none' stroke='%23ffffff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.hms-root input[type="checkbox"]:indeterminate {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8h9' fill='none' stroke='%23ffffff' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E");
 }
 
 /* Checkbox labels flow naturally — no stretching, no forced flex */
@@ -238,7 +260,7 @@
 
 /* Inline explanatory notes (read-only reasons, hidden-selection counts) */
 .hms-root .hms-note {
-  color: var(--text-muted-color, var(--midground, var(--text-color, #9aa1ad)));
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
   font-size: 13px;
 }
 
@@ -373,6 +395,25 @@
   outline-offset: -1px;
 }
 
+/* Narrow panes (DESIGN §4): unpin the select column so the pinned area
+   leaves the route columns their guaranteed width. The header keeps its
+   vertical pin and the profile column pins flush to the left edge.
+   !important overrides the inline sticky positioning of these cells. */
+@media (max-width: 600px) {
+  .hms-root [data-testid="matrix-scroll"] thead th:first-child {
+    left: auto !important;
+  }
+  .hms-root [data-testid="matrix-scroll"] thead th:nth-child(2) {
+    left: 0 !important;
+  }
+  .hms-root [data-testid="matrix-scroll"] tbody td[data-column="select"] {
+    position: static !important;
+  }
+  .hms-root [data-testid="matrix-scroll"] tbody td[data-column="profile"] {
+    left: 0 !important;
+  }
+}
+
 .hms-root [data-testid="action-surface"] {
   border: 1px solid var(--hms-border);
   border-radius: var(--hms-radius);
@@ -485,6 +526,7 @@
 @media (max-width: 480px) {
   .hms-root .hms-page-header { margin-bottom: 16px; }
   .hms-root .hms-workspace-tools .hms-note { flex-basis: 100%; }
+  .hms-root .hms-preset-list li { flex: 1 0 100%; }
   .hms-root .hms-preset { width: 100%; text-align: left; }
   .hms-root [data-testid="action-surface"] { padding: 12px; }
 }
@@ -586,7 +628,7 @@
 
 .hms-root .hms-catalog-summary dd {
   margin: 2px 0 0;
-  font-size: 18px;
+  font-size: 14px;
   font-weight: 600;
   overflow-wrap: anywhere;
 }
@@ -910,6 +952,13 @@
   border-top: 1px solid var(--hms-border);
 }
 
+/* Exact configured/observed route identities never wrap mid-token (DESIGN
+   §4); the id may overflow its line rather than split at a hyphen. */
+.hms-root .hms-route-id {
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
 .hms-root [data-testid="profile-filter"] input[type="text"],
 .hms-root [data-testid="profile-filter"] input:not([type]) { flex: 1 1 160px; }
 
@@ -973,6 +1022,10 @@
 .hms-root .hms-apply-progress [data-step-status="confirm"],
 .hms-root .hms-host-notice:not([data-state="loading"]) { color: var(--warning-color, var(--hms-warning-text, #d29922)); }
 .hms-root .hms-host-notice[data-state="loading"] { color: var(--text-muted-color, #9aa1ad); }
+/* Persistent live regions (DESIGN §8): mounted empty and updated in place so
+   their first message is announced. Idle-empty regions leave no visual gap. */
+.hms-root .hms-apply-progress:empty { border: 0; padding: 0; margin: 0; }
+.hms-root .hms-undo-note:empty { margin: 0; }
 .hms-root button[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
 @media (prefers-reduced-motion: reduce) {
   .hms-root .hms-confirm, .hms-root .hms-confirm-backdrop, .hms-root .hms-apply-progress {
