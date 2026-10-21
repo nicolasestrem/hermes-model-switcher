@@ -7,14 +7,26 @@ extending-the-dashboard.md): a dashboard plugin is
 the Plugin SDK) + optional ``dashboard/plugin_api.py`` FastAPI routes.
 
 Wiring (real, no mocks):
-  GET  /state                      profiles + route inventory + presets
-  GET  /models                     provider-aware model ids (native passthrough)
-  GET  /catalog                    aggregate provider -> models -> cost catalog
+  GET  /state                      profiles + route inventory + presets (config only)
+  POST /state                      same DTO, enriched from the host bundle
+  GET  /models                     legacy: 410 hostCatalogRequired
+  POST /models                     provider-aware model ids (host options payload)
+  GET  /catalog                    legacy: 410 hostCatalogRequired
+  POST /catalog                    aggregate provider -> models -> cost catalog
   POST /preview                    pure change preview (no writes)
   POST /presets                    persist a reviewed preset
   POST /operations                 journalled apply (engine)
+  POST /operations/{op_id}/host-result   report what a HOST step really did
   GET  /operations/{op_id}         operation record (sanitized DTO)
+  POST /operations/{op_id}/recover reconcile a crash/lost-result window
   POST /operations/{op_id}/undo    revision-guarded undo
+
+Public seam (why this module imports no model-selection internals): the
+Dashboard plugin runs as a separate install and may not import ANY private
+``hermes_cli`` module (the admission lint names them). So the main slot is not
+written here at all: the browser performs the PUBLIC host call
+``POST /api/model/set`` and reports the outcome, and the engine verifies the
+store afterwards (see the HOST ROUTE MAPPING table below).
 
 Privacy contract (Phase B review):
   - Public DTOs NEVER carry raw config documents, journal snapshots, or
@@ -50,10 +62,12 @@ from contextlib import contextmanager
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from hermes_adapter import HermesAdapter
@@ -66,13 +80,18 @@ from model_switcher.adapters import _get_dotted
 from model_switcher.adapters import _MISSING as _STORE_MISSING
 from model_switcher.engine import (
     ApplyBlocked,
+    ApplyHostCallUnbound,
+    ApplyHostResultRejected,
+    ApplyHostTokenMismatch,
     apply_operation,
     plan_operation,
     reconcile,
+    submit_host_result,
     undo_operation,
 )
 from model_switcher.journal import (
     OP_APPLYING,
+    OP_AWAITING_HOST,
     OP_COMMITTED,
     OP_PARTIAL,
     OP_PENDING,
@@ -135,36 +154,54 @@ _PREVIEW_MAX = 32
 router = APIRouter()
 
 # -- process-local state ----------------------------------------------------
-# The journal + preset store persist under a PRIVATE Hermes state dir that is
-# resolved at runtime (via Hermes APIs; never a hardcoded user path) and is
-# deliberately OUTSIDE the plugin source tree: the documented install clones
-# this repository into <home>/plugins/, so any state file under the plugin
-# package (or any git worktree) is refused by OperationJournal — place it in
-# the home's own state location instead. ``HERMES_MODEL_SWITCHER_STATE_DIR``
-# is an explicit operator override for exotic layouts.
+# The journal + preset store persist under the profile's OWN private state dir:
+# ``<HERMES_HOME>/state/hermes-model-switcher``. There is exactly ONE location —
+# no environment override and no fallback: if the resolved path would live
+# inside this plugin's source tree (or any git worktree, which
+# OperationJournal refuses by design), the plugin reports itself read-only with
+# a fixed reason instead of silently writing somewhere else. Tests get their
+# isolation from a lab HERMES_HOME (``set_hermes_home_override`` / env), never
+# from a plugin-specific state override.
 _LOCK = threading.RLock()
 _ADAPTER = HermesAdapter()
-_PLUGIN_STATE_ENV = "HERMES_MODEL_SWITCHER_STATE_DIR"
+_STATE_REFUSED_REASON = (
+    "plugin state directory would live inside the plugin source tree; "
+    "the plugin is read-only")
+
+
+class StateDirRefused(RuntimeError):
+    """The only state dir would be inside the plugin tree / a git worktree."""
+
+    public_reason = _STATE_REFUSED_REASON
 
 
 def _state_dir_for(home: Path) -> Path:
     """Private state dir for an explicitly resolved Hermes home.
 
-    Default: <home>/state/hermes-model-switcher/ — inside the Hermes home
-    (profile-local, private) but NEVER inside the plugin checkout even when
-    the plugin is cloned into <home>/plugins/. In unusual layouts where even
-    the resolved home lives inside this plugin package (hosted isolation),
-    fall back to the user's XDG state dir instead of a worktree path.
+    ``<home>/state/hermes-model-switcher/`` — inside the Hermes home
+    (profile-local, private) but NEVER inside the plugin checkout even when the
+    plugin is cloned into ``<home>/plugins/``.
     """
     candidate = Path(home) / "state" / "hermes-model-switcher"
-    if _is_inside_plugin_tree(candidate):
-        candidate = Path.home() / ".local" / "state" / "hermes-model-switcher"
+    if _state_path_refused(candidate):
+        raise StateDirRefused(_STATE_REFUSED_REASON)
     candidate.mkdir(parents=True, mode=0o700, exist_ok=True)
     try:
         os.chmod(candidate, 0o700)  # private, never group/world readable
     except OSError:
         pass
     return candidate
+
+
+def _state_path_refused(path: Path) -> bool:
+    """True when the state dir would live inside the plugin tree or a worktree."""
+    if _is_inside_plugin_tree(path):
+        return True
+    try:
+        from model_switcher.journal import is_inside_git_worktree
+        return bool(is_inside_git_worktree(str(path)))
+    except Exception:
+        return False
 
 
 def _is_inside_plugin_tree(path: Path) -> bool:
@@ -178,15 +215,7 @@ def _is_inside_plugin_tree(path: Path) -> bool:
 
 
 def _state_dir() -> Path:
-    override = os.environ.get(_PLUGIN_STATE_ENV, "").strip()
-    if override:
-        d = Path(override).expanduser()
-        d.mkdir(parents=True, mode=0o700, exist_ok=True)
-        try:
-            os.chmod(d, 0o700)
-        except OSError:
-            pass
-        return d
+    """The ONE state dir: ``<get_hermes_home()>/state/hermes-model-switcher``."""
     from hermes_constants import get_hermes_home
     return _state_dir_for(Path(get_hermes_home()))
 
@@ -199,6 +228,452 @@ def _journal() -> OperationJournal:
         journal.close()
         raise
     return journal
+
+
+def _require_writable_state() -> None:
+    """Refuse a state-writing request when the ONE state dir is unusable.
+
+    The fixed reason is a constant: never a path, never exception text.
+    """
+    try:
+        _state_dir()
+    except StateDirRefused as exc:
+        raise HTTPException(status_code=409, detail={
+            "ok": False, "error": f"plugin is read-only: {type(exc).public_reason}"}) from None
+
+
+# ---------------------------------------------------------------------------
+# Host data bundle
+# ---------------------------------------------------------------------------
+# The browser is the only side that can call Hermes' own PUBLIC host routes
+# (it holds the session token). Those bodies are the evidence this backend is
+# allowed to use for display, credential status, the model catalog and pricing
+# — NEVER as a write-target allowlist: a write still binds to a profile
+# discovered through Hermes' own APIs.
+#
+#   "host": {"profiles": {"<profile>": {"options": <GET /api/model/options>|null,
+#                                       "auxiliary": <GET /api/model/auxiliary>|null,
+#                                       "moa": <GET /api/model/moa>|null}}}
+#
+# Validation is shape-only and fail-soft per part (a malformed part is simply
+# absent evidence), with a hard cap so one request cannot balloon the process.
+_MAX_HOST_BUNDLE_BYTES = 8 * 1024 * 1024
+_MAX_HOST_PROFILE_BYTES = 2 * 1024 * 1024
+_HOST_PART_KEYS = ("options", "auxiliary", "moa")
+
+
+@dataclass(frozen=True)
+class HostBundle:
+    """Validated host evidence, keyed by profile name. Absent = no evidence."""
+
+    profiles: Dict[str, Dict[str, Any]]
+    warnings: Tuple[str, ...] = ()
+
+    def supplied(self) -> bool:
+        return bool(self.profiles)
+
+    def options(self, profile: Any) -> Optional[dict]:
+        entry = self.profiles.get(str(profile or ""))
+        return entry.get("options") if isinstance(entry, dict) else None
+
+    def auxiliary(self, profile: Any) -> Optional[dict]:
+        entry = self.profiles.get(str(profile or ""))
+        return entry.get("auxiliary") if isinstance(entry, dict) else None
+
+    def moa(self, profile: Any) -> Optional[dict]:
+        entry = self.profiles.get(str(profile or ""))
+        return entry.get("moa") if isinstance(entry, dict) else None
+
+    def public(self) -> dict:
+        """Sanitized summary for a public DTO (names + counts, never payloads)."""
+        return {
+            "supplied": self.supplied(),
+            "profiles": sorted(self.profiles),
+            "parts": {p: sorted(k for k, v in entry.items() if v is not None)
+                      for p, entry in sorted(self.profiles.items())},
+            "warnings": list(self.warnings),
+        }
+
+
+_EMPTY_HOST = HostBundle(profiles={})
+
+
+def host_bundle(body: Any) -> HostBundle:
+    """Validate the optional ``host`` key of a request body.
+
+    Returns an empty bundle when no host data was supplied (every consumer then
+    degrades truthfully: no evidence, never a guess). A malformed container is a
+    fixed 422; a malformed PART is dropped with a warning; unknown profile keys
+    are ignored. Size caps are enforced on the serialized bundle and per
+    profile.
+    """
+    if not isinstance(body, dict):
+        return _EMPTY_HOST
+    host = body.get("host")
+    if host is None:
+        return _EMPTY_HOST
+    if not isinstance(host, dict):
+        raise HTTPException(status_code=422, detail={
+            "ok": False, "error": "host data must be an object"})
+    profiles = host.get("profiles")
+    if profiles is None:
+        return _EMPTY_HOST
+    if not isinstance(profiles, dict):
+        raise HTTPException(status_code=422, detail={
+            "ok": False, "error": "host.profiles must be an object"})
+    try:
+        encoded = json.dumps(host, separators=(",", ":"), default=str).encode("utf-8")
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail={
+            "ok": False, "error": "host data is not serializable"}) from None
+    if len(encoded) > _MAX_HOST_BUNDLE_BYTES:
+        raise HTTPException(status_code=413, detail={
+            "ok": False, "error": "host data bundle is too large"})
+    accepted: Dict[str, Dict[str, Any]] = {}
+    warnings: List[str] = []
+    for name, entry in profiles.items():
+        if not isinstance(name, str) or not name:
+            warnings.append("host: ignored a profile entry without a name")
+            continue
+        if not isinstance(entry, dict):
+            warnings.append(f"host: ignored a malformed entry for profile {name!r}")
+            continue
+        try:
+            size = len(json.dumps(entry, separators=(",", ":"), default=str).encode("utf-8"))
+        except (TypeError, ValueError):
+            warnings.append(f"host: ignored a malformed entry for profile {name!r}")
+            continue
+        if size > _MAX_HOST_PROFILE_BYTES:
+            raise HTTPException(status_code=413, detail={
+                "ok": False, "error": "host data bundle is too large"})
+        parts: Dict[str, Any] = {}
+        for key in _HOST_PART_KEYS:
+            value = entry.get(key)
+            if value is None:
+                parts[key] = None
+            elif isinstance(value, dict):
+                parts[key] = value
+            else:
+                parts[key] = None
+                warnings.append(
+                    f"host: ignored malformed {key!r} data for profile {name!r}")
+        if any(v is not None for v in parts.values()):
+            accepted[name] = parts
+    return HostBundle(profiles=accepted, warnings=tuple(warnings))
+
+
+# ---------------------------------------------------------------------------
+# HOST ROUTE MAPPING — the ONE table deciding which changes a host step owns
+# ---------------------------------------------------------------------------
+# Source of truth (pinned audit: public-seams/HOST-ROUTES.md, Hermes c5a3c0f8;
+# code: <HERMES_REF>/hermes_cli/web_routers/models.py ``set_model_assignment``,
+# <HERMES_REF>/hermes_cli/web_server_config.py ``_prepare_main_assignment`` /
+# ``_apply_main_model_assignment`` (513-526) / ``_apply_model_assignment_sync``
+# (889-1000), <HERMES_REF>/hermes_cli/model_switch.py
+# ``model_selection_config_updates`` (1773-1810)).
+#
+# ONE body shape for both scopes:
+#   {"scope": "main"|"auxiliary", "task": "<task>" (aux only),
+#    "provider", "model", "base_url"?, "reasoning_effort"? (aux only)}
+# The root profile is ``?profile=default``. api_key is NEVER sent (the host
+# owns credential resolution); confirm_expensive_model is never sent either —
+# a confirmation reply is HTTP 200 with ok:false/confirm_required, and the
+# browser reports it as a failure so the engine's store check classifies it.
+#
+# MAIN — readback (semantic): ``model.provider`` + ``model.default``
+# (HOST-ROUTES §1, verified against ``model_selection_config_updates``: the
+# final identities are stored exactly there). The assignment also owns
+# ``model.{base_url,api_mode,context_length,api_key,api,key_env,api_key_env}``
+# and canonicalisation may delete the legacy aliases ``model.model``,
+# ``model.name``, ``model.api_base`` — all inside ``model``. Therefore:
+#   allowed prefixes: "model"
+#     + "custom_providers" ONLY when the final provider is bare custom/local,
+#       the effective base_url is nonempty and that endpoint is NOT already
+#       known in the pre-write document (new-endpoint registration,
+#       HOST-ROUTES §1 "Writes OUTSIDE model.*")
+#     + the exact Nous gateway leaves in _NOUS_GATEWAY_LEAVES ONLY when the
+#       final provider is ``nous`` (never a whole ``tools``/``web`` prefix)
+#     + the root LEGACY migration leaves actually present in the pre-write
+#       document (provider/base_url/context_length/api_base/max_turns + the
+#       ``agent`` subtree that max_turns moves into) — a whole-document save
+#       effect of load_config/save_config, not a route decision.
+# Everything else is a FOREIGN diff: the engine keeps the bytes, marks the
+# operation recovery_required with ``external_edit`` and compensates nothing.
+#
+# AUXILIARY — readback: ``auxiliary.<task>.provider`` + ``.model``. The host
+# stores the provider with its CASE PRESERVED and does no alias normalisation
+# (HOST-ROUTES §1 "EXACT auxiliary mutations"). It writes ``.base_url`` only
+# when one is supplied, and with an EMPTY base_url it DELETES base_url + the
+# endpoint credentials/protocol (.api_key/.api/.key_env/.api_key_env/.api_mode)
+# exactly when the lowercased provider changed AND the new provider is not
+# exactly ``custom``. An aux change maps onto the host route only when the
+# typed payload is exactly provider/model(/base_url) and the host's result
+# equals the reviewed result:
+#   - provider and model non-empty (the host 400s without them);
+#   - no api_mode/chain/extra keys (those are backend-only writes);
+#   - a supplied base_url is a clean http(s) URL (no userinfo/query);
+#   - with NO base_url supplied: the provider is unchanged (case-insensitively)
+#     or is exactly ``custom`` — the only two cases where the host preserves
+#     the stored endpoint leaves instead of deleting them.
+# allowed prefix: "auxiliary.<task>" (+ the same root legacy-migration leaves
+# that apply to ANY save).
+# REMOVALS/UNPINS (action remove, clearing a slot, the openrouter fallback
+# scalar, a scalar aux value, resets) NEVER map: the host route assigns, it
+# cannot unset a slot — those stay backend writes.
+#
+# One store, one executor: the engine journals ONE step per (profile, store) —
+# a host call and a backend write cannot share a config in one operation. So a
+# review that puts a main change next to other changes for the SAME profile is
+# refused up front (fixed reason), and aux host steps are demoted to backend
+# when the profile's review carries more than one target. See
+# _host_execution_plan().
+_HOST_ASSIGN_PATH = "/api/model/set"
+_MAIN_READBACK_KEYS = ("model.provider", "model.default")
+_MAIN_ALLOWED_PREFIXES: Tuple[str, ...] = ("model",)
+# Leaves the NOUS gateway default seeding can move on a nous main assignment
+# (HOST-ROUTES §1 "Nous managed tool defaults",
+# hermes_cli/web_server_config.py:649-661 + hermes_cli/nous_subscription.py).
+_NOUS_GATEWAY_LEAVES: Tuple[str, ...] = (
+    "web.backend", "web.use_gateway",
+    "tts.provider", "tts.use_gateway",
+    "stt.provider", "stt.use_gateway",
+    "browser.cloud_provider", "browser.use_gateway",
+    "image_gen.provider", "image_gen.model", "image_gen.use_gateway",
+    "video_gen.provider", "video_gen.use_gateway",
+)
+# Root-level LEGACY keys that ``load_config``/``save_config`` canonicalize INTO
+# ``model`` on ANY save (main or auxiliary): they are moved, so the document
+# differs at both ends even though neither the host route nor this backend
+# chose to touch them (HOST-ROUTES §1 "Whole-document save effects",
+# hermes_cli/config.py:1734-1822). Allowed only when the pre-write document
+# actually carries the legacy key.
+_LEGACY_MIGRATION_KEYS: Tuple[str, ...] = (
+    "provider", "base_url", "context_length", "api_base",
+)
+_LEGACY_MAX_TURNS = "max_turns"
+_LEGACY_MAX_TURNS_TARGET = "agent"
+_AUX_READBACK_SUFFIXES = ("provider", "model")
+_AUX_PAYLOAD_KEYS = frozenset({"provider", "model", "base_url"})
+
+
+def _host_profile_name(profile: Optional[str]) -> str:
+    """The ``?profile=`` value the host routes expect.
+
+    Hermes' root profile is addressed as ``"default"`` (``is_current_profile``
+    also accepts ``""``/``"current"``, but only for the process's own home — a
+    dashboard request must name the profile explicitly, and
+    ``profiles.get_profile_dir('default')`` is the one alias that resolves to
+    the root home everywhere).
+    """
+    name = str(profile or "").strip()
+    return name or "default"
+
+
+def main_host_call(profile: Optional[str], provider: str, model: str) -> dict:
+    """The public host call for a main-slot assignment (never carries a key)."""
+    return {
+        "method": "POST",
+        "path": _HOST_ASSIGN_PATH,
+        "query": {"profile": _host_profile_name(profile)},
+        "body": {"scope": "main", "provider": provider, "model": model},
+    }
+
+
+def aux_host_call(profile: Optional[str], task: str, provider: str, model: str,
+                  base_url: Optional[str] = None) -> dict:
+    """The public host call for one auxiliary task route."""
+    body = {"scope": "auxiliary", "task": task, "provider": provider, "model": model}
+    if base_url:
+        body["base_url"] = base_url
+    return {
+        "method": "POST",
+        "path": _HOST_ASSIGN_PATH,
+        "query": {"profile": _host_profile_name(profile)},
+        "body": body,
+    }
+
+
+def _save_normalization_prefixes(cfg: Dict[str, Any]) -> List[str]:
+    """Root LEGACY leaves that ANY save (host or backend) migrates into model.
+
+    ``load_config``/``save_config`` canonicalize root ``provider``/``base_url``/
+    ``context_length``/``api_base`` into the ``model`` block and ``max_turns``
+    into ``agent.max_turns`` (HOST-ROUTES §1 "Whole-document save effects").
+    Those leaves may therefore differ after a successful assignment that never
+    decided anything about them — but only when the pre-write document actually
+    carried them, so the allowance is computed from THIS document.
+    """
+    allowed = [key for key in _LEGACY_MIGRATION_KEYS if cfg.get(key) is not None]
+    if cfg.get(_LEGACY_MAX_TURNS) is not None:
+        allowed.append(_LEGACY_MAX_TURNS)
+        allowed.append(_LEGACY_MAX_TURNS_TARGET)
+    return allowed
+
+
+def _known_endpoint_base_urls(cfg: Dict[str, Any]) -> List[str]:
+    """Normalized base_urls the document already declares for custom endpoints."""
+    from urllib.parse import urlsplit
+    known: List[str] = []
+
+    def _norm(value: Any) -> str:
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return ""
+        try:
+            parts = urlsplit(raw)
+        except ValueError:
+            return raw
+        path = (parts.path or "").rstrip("/")
+        return f"{parts.scheme}://{parts.netloc}{path}"
+
+    rows = cfg.get("custom_providers")
+    if isinstance(rows, list):
+        for row in rows:
+            if isinstance(row, dict):
+                known.append(_norm(row.get("base_url")))
+    providers = cfg.get("providers")
+    if isinstance(providers, dict):
+        for row in providers.values():
+            if isinstance(row, dict):
+                known.append(_norm(row.get("base_url")))
+    model_block = cfg.get("model")
+    if isinstance(model_block, dict):
+        known.append(_norm(model_block.get("base_url")))
+    return [k for k in known if k]
+
+
+def main_allowed_prefixes(cfg: Dict[str, Any], provider: str,
+                          options: Any = None) -> List[str]:
+    """Dotted prefixes a main assignment may provably move for *provider*.
+
+    See the HOST ROUTE MAPPING table: ``model`` always; ``custom_providers``
+    only for a new bare custom/local endpoint; the exact Nous gateway leaves
+    only for a nous target; plus the legacy root-migration leaves this document
+    actually carries.
+    """
+    prefixes = list(_MAIN_ALLOWED_PREFIXES)
+    prefixes.extend(_save_normalization_prefixes(cfg))
+    slug = str(provider or "").strip()
+    lowered = slug.lower()
+    if lowered in ("custom", "local"):
+        row = _host_option_row(options, slug) or {}
+        endpoint = (str(row.get("base_url") or "").strip()
+                    or str(((cfg.get("providers") or {}).get(slug) or {}).get("base_url") or "").strip())
+        if endpoint:
+            from urllib.parse import urlsplit
+            try:
+                parts = urlsplit(endpoint.lower())
+            except ValueError:
+                parts = None
+            norm = (f"{parts.scheme}://{parts.netloc}{(parts.path or '').rstrip('/')}"
+                    if parts else endpoint.lower())
+            if norm not in _known_endpoint_base_urls(cfg):
+                prefixes.append("custom_providers")
+    elif lowered == "nous":
+        prefixes.extend(_NOUS_GATEWAY_LEAVES)
+    return prefixes
+
+
+def aux_allowed_prefixes(cfg: Dict[str, Any], storage_path: str) -> List[str]:
+    """Dotted prefixes an aux assignment may provably move for one task."""
+    return [storage_path, *_save_normalization_prefixes(cfg)]
+
+
+def _clean_endpoint_url(value: Any) -> Optional[str]:
+    """A base_url safe to hand to the host: http(s), no userinfo/query/fragment."""
+    from urllib.parse import urlsplit
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return None
+    if parts.username or parts.password or parts.query or parts.fragment:
+        return None
+    return raw
+
+
+def aux_host_route(desc: Any, payload: Any, current: Any) -> Optional[dict]:
+    """The host call an aux change maps exactly onto, or None (stay backend).
+
+    "Exactly" is the whole rule: the host's own result must EQUAL the reviewed
+    result (HOST-ROUTES §1 "EXACT auxiliary mutations"). Removals, extra keys,
+    an endpoint that needs a protocol/api_mode the route will not write, and a
+    provider change whose cleanup would delete leaves the review keeps all stay
+    BACKEND.
+    """
+    if desc is None or getattr(desc, "family", None) is not SlotFamily.AUXILIARY:
+        return None
+    path = str(getattr(desc, "storage_path", "") or "")
+    if not path.startswith("auxiliary."):
+        return None
+    if getattr(desc, "protected", False) or not getattr(desc, "writable", True):
+        return None
+    task = path[len("auxiliary."):]
+    if not task or "." in task or task == "openrouter_model":
+        return None  # the cross-cutting fallback override is a bare model id
+    if not isinstance(payload, dict):
+        return None
+    if not set(payload).issubset(_AUX_PAYLOAD_KEYS):
+        return None  # api_mode/chain/anything else the host route cannot carry
+    provider = str(payload.get("provider") or "").strip()
+    model = str(payload.get("model") or "").strip()
+    if not provider or not model:
+        return None
+    stored = current if isinstance(current, dict) else {}
+    stored_provider = str(stored.get("provider") or "").strip()
+    base_url = payload.get("base_url")
+    clean_base = None
+    if base_url not in (None, ""):
+        clean_base = _clean_endpoint_url(base_url)
+        if clean_base is None:
+            return None  # credentials-looking or malformed endpoint: backend
+    elif "base_url" in payload:
+        return None  # an explicit empty base_url is a CLEAR, not an assign
+    if clean_base is None:
+        # No endpoint supplied: the host preserves the stored endpoint leaves
+        # only when the lowercased provider is unchanged, or the new provider is
+        # exactly ``custom``. Anything else makes it delete base_url + the
+        # credential/protocol leaves, which the reviewed diff does not intend.
+        if provider.lower() != stored_provider.lower() and provider != "custom":
+            return None
+    return {"task": task, "provider": provider, "model": model,
+            "base_url": clean_base}
+
+
+def _host_option_rows(options: Any) -> List[dict]:
+    rows = options.get("providers") if isinstance(options, dict) else None
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+
+def _host_option_row(options: Any, provider: str) -> Optional[dict]:
+    """The host options row for *provider* (slug/provider_id, case-insensitive)."""
+    want = str(provider or "").strip().lower()
+    if not want:
+        return None
+    for row in _host_option_rows(options):
+        for key in ("slug", "provider_id", "id"):
+            if str(row.get(key) or "").strip().lower() == want:
+                return row
+    return None
+
+
+def _host_option_model_ids(options: Any, provider: str) -> Optional[List[str]]:
+    """Model ids the host catalog lists for *provider* (None = no evidence)."""
+    row = _host_option_row(options, provider)
+    if row is None:
+        return None
+    ids: List[str] = []
+    for key in ("model_ids", "models"):
+        value = row.get(key)
+        if isinstance(value, list):
+            ids.extend(str(m) for m in value if isinstance(m, str))
+        elif isinstance(value, dict):
+            ids.extend(str(m) for m in value if isinstance(m, str))
+    return [m for m in ids if m]
 
 
 # Crash-recovery restart path (P1 #6): a crash between a config write and the
@@ -489,6 +964,9 @@ class PresetIn(BaseModel):
     changes: List[Dict[str, Any]]
     billingPolicy: str = "reviewed"
     allowUnknownCost: bool = False
+    # The browser's host evidence bundle (validated by host_bundle(); it is
+    # display/credential/catalog evidence, never a write-target allowlist).
+    host: Optional[Dict[str, Any]] = None
 
 
 class ApplyIn(BaseModel):
@@ -498,6 +976,22 @@ class ApplyIn(BaseModel):
     # Explicit acknowledgement that unknown-cost routes are never treated as
     # free; without it an unknown-cost route blocks the one-click apply.
     allowUnknownCost: bool = False
+    # The browser's host evidence bundle (see PresetIn.host).
+    host: Optional[Dict[str, Any]] = None
+
+
+class HostResultIn(BaseModel):
+    """What the browser's public host call actually did.
+
+    ``outcome`` is the browser's OBSERVATION; the engine decides the verdict
+    from the store. ``status`` is the host HTTP status when known (used only
+    when ``outcome`` is absent).
+    """
+
+    seq: int
+    token: str
+    outcome: Optional[str] = None
+    status: Optional[int] = None
 
 
 # slot aliases: a UI slotId may use the family shorthand; resolve it to the
@@ -672,9 +1166,58 @@ def _plugin_home_scope(home: Any):
         reset_hermes_home_override(token)
 
 
-def _profile_inventory() -> Dict[str, Dict[str, Any]]:
+# ---------------------------------------------------------------------------
+# route_inventory seam probe
+# ---------------------------------------------------------------------------
+# The host-evidence keywords (host_aux / host_moa) are a public seam of
+# route_inventory. A plugin can be installed beside an older build, so the
+# presence of each keyword is probed ONCE at import. It only decides whether
+# host evidence can reach the inventory — never whether a write is allowed: a
+# missing seam degrades to "no plugin rows / no host preset names", which is
+# the pre-seam behaviour and is reported by route_inventory itself.
+def _accepts_kwarg(fn, name: str) -> bool:
+    import inspect
+    try:
+        return name in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+_HOST_AUX_KWARG = _accepts_kwarg(build_inventory, "host_aux")
+_HOST_MOA_KWARG = _accepts_kwarg(preview_changes, "host_moa")
+
+
+def _build_inventory(cfg: Dict[str, Any], host_aux: Optional[dict]) -> Any:
+    if _HOST_AUX_KWARG:
+        return build_inventory(cfg, host_aux=host_aux)
+    return build_inventory(cfg)
+
+
+def _preview_changes(cfg: Dict[str, Any], edits: List[RouteEdit],
+                     host_aux: Optional[dict],
+                     host_moa: Optional[dict]) -> Any:
+    if _HOST_AUX_KWARG or _HOST_MOA_KWARG:
+        kwargs: Dict[str, Any] = {}
+        if _HOST_AUX_KWARG:
+            kwargs["host_aux"] = host_aux
+        if _HOST_MOA_KWARG:
+            kwargs["host_moa"] = host_moa
+        return preview_changes(cfg, edits, **kwargs)
+    return preview_changes(cfg, edits)
+
+
+def _profile_inventory(host: Optional[HostBundle] = None) -> Dict[str, Dict[str, Any]]:
     """Per discovered profile: sanitized route inventory. Never returns raw
-    config documents."""
+    config documents.
+
+    ``host`` supplies the browser-side evidence this backend cannot read for
+    itself: plugin-registered auxiliary rows come from the host's
+    ``/api/model/auxiliary`` payload for THAT profile (the host owns plugin
+    discovery and profile scoping). With no host data the inventory degrades
+    truthfully — route_inventory records a warning instead of pretending no
+    plugins are registered.
+    """
+    host = host or _EMPTY_HOST
     profiles: Dict[str, Dict[str, Any]] = {}
     for name, ident in discover_profiles().items():
         try:
@@ -684,11 +1227,11 @@ def _profile_inventory() -> Dict[str, Dict[str, Any]]:
                               "error": "config unreadable", "slots": []}
             continue
         slots = []
-        # Scope THIS profile's home so plugin-aux discovery keys on the right
-        # registry (Claude 2) and read the per-build warnings off the result
+        # Scope THIS profile's home so registry/inventory resolution keys on
+        # the right profile and read the per-build warnings off the result
         # (no process-global pending sink).
         with _plugin_home_scope(getattr(ident, "path", None)):
-            result = build_inventory(cfg)
+            result = build_inventory(cfg, host_aux=host.auxiliary(name))
         for obs in result:
             d = obs.descriptor
             # UI contract: the main route presents as slotId "main"; the raw
@@ -758,42 +1301,134 @@ def _profile_inventory() -> Dict[str, Dict[str, Any]]:
     return profiles
 
 
-def _canonical_main_changes(cfg: Dict[str, Any], to: Dict[str, Any]) -> Dict[str, Any]:
-    """P1 #4: a main-route switch is prepared by Hermes' canonical assignment
-    seam (HermesAdapter.prepare_main_assignment) BEFORE any write — the same
-    validation the /preview promises (provider alias canonicalization, custom
-    endpoints via providers rows, model.base_url / api_mode side effects).
-    Returns the typed ``model.*`` storage changes to apply. Raises on an
-    invalid route: callers must block, never silently substitute.
+class MainRouteRefused(ValueError):
+    """A main-slot intent that cannot become a host call, with a FIXED reason."""
 
-    Canonical stale-key cleanup is represented by the engine's verified
-    deletion contract. Never retain stale settings because a scratch probe
-    failed; deletion correctness is tested alongside the shipped adapter.
+    public_reason = "main route rejected"
+
+
+class MainRouteIncomplete(MainRouteRefused):
+    public_reason = "provider and model are required for the main slot"
+
+
+class MainRouteNoOp(MainRouteRefused):
+    public_reason = "change is a no-op for this slot"
+
+
+class MainRouteUnauthenticated(MainRouteRefused):
+    public_reason = "provider is not authenticated for this profile"
+
+
+def _stored_main_route(cfg: Dict[str, Any]) -> Tuple[str, str]:
+    """The stored ``model.provider`` / ``model.default`` as plain strings."""
+    provider = _get_dotted(cfg, "model.provider")
+    model = _get_dotted(cfg, "model.default")
+    if isinstance(model, dict):  # legacy dict-form model: block
+        model = model.get("default") or model.get("name")
+    return ("" if provider is _STORE_MISSING or provider is None else str(provider).strip(),
+            "" if model is _STORE_MISSING or model is None else str(model).strip())
+
+
+def _main_host_target(cfg: Dict[str, Any], to: Dict[str, Any],
+                      profile: str, host: Optional[HostBundle]) -> Dict[str, Any]:
+    """The host call a main-slot assignment becomes, plus its verification keys.
+
+    Read from the host's OWN write path
+    (<HERMES_REF>/hermes_cli/web_server_config.py `_apply_main_model_assignment`
+    + <HERMES_REF>/hermes_cli/model_switch.py `model_selection_config_updates`):
+    the assignment stores ``model.default`` (the model id) and
+    ``model.provider`` (the provider) — those two are the semantic readback.
+    Everything else the route writes (base_url, api_mode, context_length and
+    the credential pointer keys) stays inside ``model`` and is the host's
+    decision, which is why the diff is these two keys and the allowed prefixes
+    are ``model`` (+ the route's own side-effect namespaces).
+
+    Validation here is deliberately narrow: the host owns canonicalization and
+    model validation. A provider row the host catalog reports as
+    UNAUTHENTICATED refuses the preview; a provider/model the catalog does not
+    know is only a WARNING (the host validates at write time).
     """
-    provider = str(to.get("provider") or "").strip()
-    model = str(to.get("model") or "").strip()
+    provider = str((to or {}).get("provider") or "").strip()
+    model = str((to or {}).get("model") or "").strip()
     if not provider or not model:
-        raise ValueError("provider and model required for main")
-    prepared = _ADAPTER.prepare_main_assignment(
-        cfg, provider, model, base_url="", api_key="")
-    result = prepared["result"]
-    if not getattr(result, "success", True):
-        raise ValueError(getattr(result, "error_message", "") or "rejected route")
-    from hermes_cli.model_switch import apply_model_selection
-    old_block = dict(cfg.get("model") or {})
-    new_block = apply_model_selection(old_block, result)
-    changes: Dict[str, Any] = {}
-    for key in sorted(set(old_block) | set(new_block)):
-        new_val = new_block.get(key)
-        if key not in new_block or new_val is None:
-            if key in old_block:
-                changes[f"model.{key}"] = None  # stale-key cleanup
+        raise MainRouteIncomplete(MainRouteIncomplete.public_reason)
+    stored_provider, stored_model = _stored_main_route(cfg)
+    if stored_provider == provider and stored_model == model:
+        raise MainRouteNoOp(MainRouteNoOp.public_reason)
+    options = (host or _EMPTY_HOST).options(profile)
+    warnings: List[str] = []
+    row = _host_option_row(options, provider)
+    if row is not None and row.get("authenticated") is False:
+        raise MainRouteUnauthenticated(MainRouteUnauthenticated.public_reason)
+    if isinstance(options, dict):
+        if row is None:
+            warnings.append(
+                "provider is not in this profile's host catalog; the host "
+                "validates the assignment at write time")
+        else:
+            ids = _host_option_model_ids(options, provider)
+            if ids is not None and model not in ids:
+                warnings.append(
+                    "model is not in this profile's host catalog; the host "
+                    "validates the assignment at write time")
+    return {
+        "changes": {"model.provider": provider, "model.default": model},
+        "host_call": main_host_call(profile, provider, model),
+        "readback_keys": list(_MAIN_READBACK_KEYS),
+        "allowed_prefixes": main_allowed_prefixes(cfg, provider, options),
+        "warnings": warnings,
+    }
+
+
+def _host_execution_plan(targets: List[RouteTarget]
+                         ) -> Tuple[List[RouteTarget], List[Dict[str, Any]]]:
+    """Enforce the engine's ONE-executor-per-store rule, truthfully.
+
+    The engine journals one step per (profile, store) so that a single
+    pre-revision guard covers every key that store moves. A host call and a
+    backend write therefore cannot share one profile's config in one
+    operation:
+
+    - a review whose profile carries exactly one target keeps its executor;
+    - a profile carrying a main assignment plus anything else is REFUSED with a
+      fixed reason (the main slot cannot be written from this process at all);
+    - a profile carrying several non-main targets is written BACKEND (those
+      writes are expressible both ways, so the single-step guarantee wins).
+
+    Nothing is ever dropped or silently re-executed.
+    """
+    grouped: Dict[str, List[RouteTarget]] = {}
+    order: List[str] = []
+    for t in targets:
+        if t.profile not in grouped:
+            grouped[t.profile] = []
+            order.append(t.profile)
+        grouped[t.profile].append(t)
+    out: List[RouteTarget] = []
+    blocked: List[Dict[str, Any]] = []
+    for profile in order:
+        group = grouped[profile]
+        host_targets = [t for t in group if t.executor == "host"]
+        if not host_targets or len(group) == 1:
+            out.extend(group)
             continue
-        if old_block.get(key) != new_val:
-            changes[f"model.{key}"] = new_val
-    if not changes:
-        raise ValueError("change is a no-op for this slot")
-    return changes
+        if any(((t.host_call or {}).get("body") or {}).get("scope") == "main"
+               for t in host_targets):
+            blocked.append({
+                "profileId": profile, "slotId": "main", "kind": "host_scope",
+                "reason": (
+                    "the main assignment must be applied on its own for this "
+                    "profile: a host assignment and another config change "
+                    "cannot share one atomic step — apply them separately"),
+            })
+            continue
+        for t in group:
+            t.executor = "backend"
+            t.host_call = None
+            t.readback_keys = None
+            t.allowed_prefixes = None
+        out.extend(group)
+    return out, blocked
 
 
 def _assert_removal_identity(desc, observed: Dict[str, Any],
@@ -909,11 +1544,20 @@ def _duplicate_slot_changes(changes: List[Dict[str, Any]]
 
 def _changes_to_targets(changes: List[Dict[str, Any]],
                         profiles: Dict[str, Dict[str, Any]],
-                        strict: bool = True):
+                        strict: bool = True,
+                        host: Optional[HostBundle] = None):
     """Validate + bind changes to explicit discovered-profile config paths.
+
     Returns (targets, blocked). A change for an unknown or non-writable
     profile, or a slot not present in that profile's inventory, is blocked —
-    never silently substituted."""
+    never silently substituted.
+
+    Each target names its EXECUTOR (HOST ROUTE MAPPING above): the main slot
+    and an auxiliary task route that maps exactly onto ``POST /api/model/set``
+    are handed to the browser as one public host call the engine verifies
+    afterwards; everything else is written here through the canonical save.
+    """
+    host = host or _EMPTY_HOST
     targets, blocked = [], []
     duplicates = _duplicate_slot_changes(changes)
     if duplicates:
@@ -957,7 +1601,7 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
             blocked.append({"profileId": pid, "reason": "config unreadable"})
             continue
         with _plugin_home_scope(ident.path):
-            desc = next((o.descriptor for o in build_inventory(cfg)
+            desc = next((o.descriptor for o in _build_inventory(cfg, host.auxiliary(pid))
                          if o.descriptor.slot_id == slot_raw), None)
         if desc is None:
             blocked.append({"profileId": pid,
@@ -966,6 +1610,8 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
         removal = str(c.get("action") or "").lower() == "remove"
         if removal:
             # P1 #3: to:null is a REMOVAL intent, not a route assignment.
+            # Removals NEVER become host steps: the host route assigns, it
+            # cannot unset a slot.
             try:
                 stored = _removal_changes_for(desc, cfg, c.get("from"))
             except RemovalRefused as exc:
@@ -980,19 +1626,20 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
             targets.append(RouteTarget(
                 profile=str(pid), store_kind="canonical_config", path=str(cfg_path),
                 changes=stored,
-                cost_class=_route_cost_class(str(pid), stored, ident)))
+                cost_class=_route_cost_class(str(pid), stored, ident, host)))
             continue
         if desc.slot_id == "main.default":
-            # P1 #4: canonical preparation instead of a blind
-            # model.default/model.provider overwrite. A seam refusal is an
-            # intent-level block (409 apply contract), not a request-binding
-            # error — flagged with kind="route_refusal" so the apply endpoint
-            # distinguishes it from unknown-slot/protected binding errors.
+            # The main slot is NEVER written here: it is the host's own
+            # canonical assignment (endpoint resolution, credential wiring and
+            # context-pin cleanup all live behind POST /api/model/set). This
+            # backend only names the semantic keys and hands the call out. A
+            # refusal is an intent-level block (flagged kind="route_refusal"
+            # so apply can tell it from a binding error).
             try:
-                stored = _canonical_main_changes(cfg, to or {})
-            except HTTPException as exc:
+                main_route = _main_host_target(cfg, to or {}, pid, host)
+            except MainRouteRefused as exc:
                 blocked.append({"profileId": pid, "slotId": c.get("slotId"),
-                                "reason": _clean_detail(exc),
+                                "reason": type(exc).public_reason,
                                 "kind": "route_refusal"})
                 continue
             except Exception as exc:
@@ -1000,39 +1647,74 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
                                 "reason": f"route rejected ({type(exc).__name__})",
                                 "kind": "route_refusal"})
                 continue
-        else:
-            try:
-                with _plugin_home_scope(ident.path):
-                    cp = preview_changes(cfg, [RouteEdit(slot_raw, _typed_payload(to or {}))])
-            except HTTPException as exc:
-                blocked.append({"profileId": pid, "slotId": c.get("slotId"),
-                                "reason": _clean_detail(exc)})
-                continue
-            except Exception as exc:
-                blocked.append({"profileId": pid, "slotId": c.get("slotId"),
-                                "reason": f"route rejected ({type(exc).__name__})"})
-                continue
-            if cp.rejected:
-                blocked.append({"profileId": pid, "slotId": c.get("slotId"),
-                                "reason": "; ".join(cp.rejected)})
-                continue
-            stored: Dict[str, Any] = {}
-            for ch in cp.changes:
-                value = ch.after
-                # Hermes stores the MAIN route as plain strings: model.default is
-                # the model id, model.provider the provider (never a route dict).
-                if (ch.storage_path == "model.default"
-                        and isinstance(value, dict) and "model" in value):
-                    value = value["model"]
-                stored[ch.storage_path] = value
-            if not stored:
-                blocked.append({"profileId": pid, "slotId": c.get("slotId"),
-                                "reason": "change is a no-op for this slot"})
-                continue
+            stored = main_route["changes"]
+            targets.append(RouteTarget(
+                profile=str(pid), store_kind="canonical_config", path=str(cfg_path),
+                changes=stored, cost_class=_route_cost_class(str(pid), stored, ident, host),
+                executor="host", host_call=main_route["host_call"],
+                readback_keys=main_route["readback_keys"],
+                allowed_prefixes=main_route["allowed_prefixes"],
+                warnings=list(main_route["warnings"])))
+            continue
+        payload = _typed_payload(to or {})
+        try:
+            with _plugin_home_scope(ident.path):
+                cp = _preview_changes(cfg, [RouteEdit(slot_raw, payload)],
+                                      host.auxiliary(pid), host.moa(pid))
+        except HTTPException as exc:
+            blocked.append({"profileId": pid, "slotId": c.get("slotId"),
+                            "reason": _clean_detail(exc)})
+            continue
+        except Exception as exc:
+            blocked.append({"profileId": pid, "slotId": c.get("slotId"),
+                            "reason": f"route rejected ({type(exc).__name__})"})
+            continue
+        if cp.rejected:
+            blocked.append({"profileId": pid, "slotId": c.get("slotId"),
+                            "reason": "; ".join(cp.rejected)})
+            continue
+        if not cp.changes:
+            blocked.append({"profileId": pid, "slotId": c.get("slotId"),
+                            "reason": "change is a no-op for this slot"})
+            continue
+        route = aux_host_route(desc, payload, _get_dotted(cfg, desc.storage_path))
+        if route is not None:
+            # An auxiliary task route the host route expresses EXACTLY: the
+            # host writes provider/model(/base_url) inside auxiliary.<task>,
+            # and the engine verifies exactly those keys afterwards.
+            stored = {f"{desc.storage_path}.provider": route["provider"],
+                      f"{desc.storage_path}.model": route["model"]}
+            if route["base_url"]:
+                stored[f"{desc.storage_path}.base_url"] = route["base_url"]
+            targets.append(RouteTarget(
+                profile=str(pid), store_kind="canonical_config", path=str(cfg_path),
+                changes=stored, cost_class=_route_cost_class(str(pid), stored, ident, host),
+                executor="host",
+                host_call=aux_host_call(pid, route["task"], route["provider"],
+                                        route["model"], route["base_url"]),
+                readback_keys=[f"{desc.storage_path}.{key}"
+                               for key in _AUX_READBACK_SUFFIXES],
+                allowed_prefixes=aux_allowed_prefixes(cfg, desc.storage_path)))
+            continue
+        stored = {}
+        for ch in cp.changes:
+            value = ch.after
+            # Hermes stores the MAIN route as plain strings: model.default is
+            # the model id, model.provider the provider (never a route dict).
+            if (ch.storage_path == "model.default"
+                    and isinstance(value, dict) and "model" in value):
+                value = value["model"]
+            stored[ch.storage_path] = value
+        if not stored:
+            blocked.append({"profileId": pid, "slotId": c.get("slotId"),
+                            "reason": "change is a no-op for this slot"})
+            continue
         targets.append(RouteTarget(
             profile=str(pid), store_kind="canonical_config", path=str(cfg_path),
             changes=stored,
-            cost_class=_route_cost_class(str(pid), stored, ident)))
+            cost_class=_route_cost_class(str(pid), stored, ident, host)))
+    targets, plan_blocked = _host_execution_plan(targets)
+    blocked.extend(plan_blocked)
     if strict and blocked:
         raise HTTPException(status_code=422, detail={
             "ok": False, "error": "preview blocked for some profiles",
@@ -1107,61 +1789,27 @@ def _provider_is_custom_endpoint(cfg: Dict[str, Any], provider: str) -> bool:
     return isinstance(prov, dict) and bool(str(prov.get("base_url") or "").strip())
 
 
-def _profile_env_entries(profile: str, ident) -> Dict[str, str]:
-    """Non-empty, non-comment KEY=VALUE entries from the profile's .env.
+def _host_provider_authenticated(options_payload: Any, provider: str) -> Optional[bool]:
+    """Provider-scoped authentication from the HOST options payload (C).
 
-    Read only to decide credential PRESENCE; values are never returned to a
-    client. Fail-soft on unreadable state (an empty mapping)."""
-    env_file = Path(ident.path) / ".env"
-    try:
-        if not env_file.is_file():
-            return {}
-        text = env_file.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return {}
-    out: Dict[str, str] = {}
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        for sep in ("=", ":"):
-            if sep in stripped:
-                key, _, value = stripped.partition(sep)
-                key = key.strip()
-                if key and value.strip():
-                    out[key] = value.strip()
-                break
-    return out
-
-
-def _runtime_provider_authenticated(profile: str, provider: str) -> Optional[bool]:
-    """Provider-scoped runtime authentication via the installed picker catalog.
-
-    Returns True when the picker reports the provider row authenticated, False
-    when it explicitly reports it unauthenticated, and None when the provider is
-    unknown to the catalog or the seam is unavailable. None is never treated as
-    authenticated — the caller decides the unknown case explicitly.
+    True / False / None (no evidence). ``None`` is never treated as
+    authenticated — the caller decides the unknown case explicitly. The host
+    payload can carry duplicate rows for one slug: an explicit True wins over an
+    explicit False, so an unauthenticated alias can never shadow a real one.
     """
     provider = str(provider or "").strip().lower()
-    if not provider:
+    if not provider or not isinstance(options_payload, dict):
         return None
     try:
-        module = _model_catalog_module()
-        with _ADAPTER.scoped(profile):
-            payload = module._load_picker_payload(False)
+        result = _model_catalog_module().provider_authenticated(options_payload, provider)
     except Exception:
         return None
-    rows = payload.get("providers") if isinstance(payload, dict) else None
-    if not isinstance(rows, list):
-        return None
-    # Scan ALL matching rows before concluding: the picker payload can carry
-    # duplicate rows for one slug (aliases/canonical entries), and returning
-    # the FIRST match's flag would let an unauthenticated duplicate shadow a
-    # genuinely authenticated row — refusing a valid connection.
+    if result is True or result is False:
+        return result
+    # Fall back to the payload's own rows when the transform is unavailable:
+    # the evidence is the same, and None stays None.
     explicit_false = False
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
+    for row in _host_option_rows(options_payload):
         ids = {str(row.get("slug") or "").strip().lower(),
                str(row.get("provider_id") or "").strip().lower()}
         if provider not in ids:
@@ -1175,13 +1823,17 @@ def _runtime_provider_authenticated(profile: str, provider: str) -> Optional[boo
 
 
 def _provider_credentials_satisfied(profile: str, ident, cfg: Dict[str, Any],
-                                    provider: str) -> bool:
+                                    provider: str, host: Optional[HostBundle] = None) -> bool:
     """Whether ``profile`` can authenticate routing to ``provider``.
 
-    A user-declared custom endpoint needs no hosted credential. Otherwise the
-    provider-scoped runtime authentication seam decides; when it cannot classify
-    the provider, absence of scoped evidence blocks it. An unrelated env entry
-    is never credential evidence for a different provider."""
+    Evidence, in order: a user-declared custom endpoint needs no hosted
+    credential; a ``providers:`` row's ``key_env``/``api_key_env`` is read
+    through the scoped secret seam (never the process env, never a sibling
+    profile's .env); an inline ``api_key`` on that row is config evidence; then
+    the HOST options payload, through ``provider_authenticated``. When nothing
+    can classify the provider, absence of evidence blocks it — an unrelated env
+    entry is never credential evidence for a different provider.
+    """
     if not str(provider or "").strip():
         return True
     row = (cfg.get("providers") or {}).get(provider, {})
@@ -1195,22 +1847,20 @@ def _provider_credentials_satisfied(profile: str, ident, cfg: Dict[str, Any],
             return True
     if _provider_is_custom_endpoint(cfg, provider):
         return True
-    authed = _runtime_provider_authenticated(profile, provider)
-    if authed is True:
-        return True
-    if authed is False:
-        return False
-    return False  # unrelated env entries cannot authenticate an unknown provider
+    authed = _host_provider_authenticated(
+        (host or _EMPTY_HOST).options(profile), provider)
+    return True if authed is True else False
 
 
 def _route_cost_class(profile: str, stored: Dict[str, Any],
-                      ident=None) -> str:
+                      ident=None, host: Optional[HostBundle] = None) -> str:
     """Live cost class for a prepared route, classified PER provider.
 
     Never infers a free/subscription tier from a provider slug. A custom
     endpoint is metered; a credentialed hosted provider is metered; a provider
-    that cannot be classified at all (no custom endpoint, no runtime auth, no
-    credential evidence) is "unknown" — unknown cost is never treated as free.
+    that cannot be classified at all (no custom endpoint, no host
+    authentication evidence) is "unknown" — unknown cost is never treated as
+    free.
     """
     if ident is None:
         ident = discover_profiles().get(profile)
@@ -1223,7 +1873,7 @@ def _route_cost_class(profile: str, stored: Dict[str, Any],
         return "unknown"
     for provider in providers:
         try:
-            if not _provider_credentials_satisfied(profile, ident, cfg, provider):
+            if not _provider_credentials_satisfied(profile, ident, cfg, provider, host):
                 return "unknown"
         except Exception:
             return "unknown"
@@ -1419,133 +2069,225 @@ def _step_revision(step: Dict[str, Any], *keys: str) -> Optional[str]:
 # Hermes' lock, and — on refresh — live provider probes). A sync handler runs
 # in FastAPI's threadpool, so a slow provider or lock never blocks the
 # dashboard's event loop for every other request.
+def _state_dto(host: Optional[HostBundle] = None) -> Dict[str, Any]:
+    """The /state DTO. ``host`` only ENRICHES it (plugin aux rows, credential
+    status); everything config-derived is identical without it."""
+    host = host or _EMPTY_HOST
+    profiles = _profile_inventory(host)
+    for name, entry in profiles.items():
+        if isinstance(entry, dict) and host.supplied():
+            entry["credentials"] = _profile_credential_status(name, host)
+    with _LOCK:
+        store = _preset_store()
+        presets = []
+        for pid, p in getattr(store, "_presets", {}).items():
+            # Exact reviewed slot-scope intents: the UI previews a preset
+            # from ``preset.changes`` (the typed change list) when present,
+            # so the DTO must carry the REAL nested intents
+            # ({profileId, slotId, action, to}) — never just a main route.
+            changes = _ui_changes_for_preset(p)
+            families: List[str] = []
+            for c in changes:
+                fam = _ui_family_for_slot(c.get("slotId"))
+                if fam and fam not in families:
+                    families.append(fam)
+            if not families:
+                families = sorted({_ui_family_for_slot(
+                    _slot_id_for_target(p, t)) for t in p.targets})
+            # Legacy family-scoped fallback: only a genuine MAIN target may
+            # contribute a main assignment; a non-main preset must not
+            # masquerade as one.
+            assignment = {}
+            for t in p.targets:
+                if _slot_id_for_target(p, t) in ("main", "main.default"):
+                    assignment = {"main": {
+                        "provider": t.changes.get("model.provider"),
+                        "model": t.changes.get("model.default"),
+                    }}
+                    break
+            presets.append({
+                "id": pid,
+                "name": p.name,
+                "profileIds": sorted({t.profile for t in p.targets}),
+                "families": families,
+                "changes": [_sanitize_change(c) for c in changes],
+                "assignments": assignment,
+                "billingPolicy": "reviewed",
+            })
+        corrupt = bool(_PRESET_CORRUPT)
+    return {"ok": True, "profiles": list(profiles.values()),
+            "slots": [s for p in profiles.values() for s in p["slots"]],
+            "presets": presets,
+            "presetsCorrupt": corrupt,
+            "host": host.public(),
+            "runtime": {"writable": _runtime_writable(),
+                        "version": _ADAPTER.runtime.version_label,
+                        "reasons": list(_ADAPTER.runtime.reasons)}}
+
+
+def _profile_credential_status(profile: str, host: HostBundle) -> Dict[str, bool]:
+    """provider -> host-authenticated? for the providers this profile uses.
+
+    Evidence is the host options payload only (this backend never probes a
+    provider). A provider the payload does not classify is absent, never
+    guessed to be authenticated.
+    """
+    status: Dict[str, bool] = {}
+    options = host.options(profile)
+    if not isinstance(options, dict):
+        return status
+    try:
+        cfg = _ADAPTER.load_raw_config(profile)
+    except Exception:
+        cfg = {}
+    for provider in _referenced_providers(cfg.get("model") or {}) or []:
+        value = _host_provider_authenticated(options, provider)
+        if value is not None:
+            status[provider] = bool(value)
+    for row in _host_option_rows(options):
+        slug = str(row.get("slug") or row.get("provider_id") or "").strip().lower()
+        if slug and slug not in status and isinstance(row.get("authenticated"), bool):
+            status[slug] = row["authenticated"]
+    return status
+
+
 @router.get("/state")
 def state():
+    """Config-only state: host-dependent parts degrade truthfully."""
     try:
         with _LOCK:
-            profiles = _profile_inventory()
-            store = _preset_store()
-            presets = []
-            for pid, p in getattr(store, "_presets", {}).items():
-                # Exact reviewed slot-scope intents: the UI previews a preset
-                # from ``preset.changes`` (the typed change list) when present,
-                # so the DTO must carry the REAL nested intents
-                # ({profileId, slotId, action, to}) — never just a main route.
-                changes = _ui_changes_for_preset(p)
-                families: List[str] = []
-                for c in changes:
-                    fam = _ui_family_for_slot(c.get("slotId"))
-                    if fam and fam not in families:
-                        families.append(fam)
-                if not families:
-                    families = sorted({_ui_family_for_slot(
-                        _slot_id_for_target(p, t)) for t in p.targets})
-                # Legacy family-scoped fallback: only a genuine MAIN target may
-                # contribute a main assignment; a non-main preset must not
-                # masquerade as one.
-                assignment = {}
-                for t in p.targets:
-                    if _slot_id_for_target(p, t) in ("main", "main.default"):
-                        assignment = {"main": {
-                            "provider": t.changes.get("model.provider"),
-                            "model": t.changes.get("model.default"),
-                        }}
-                        break
-                presets.append({
-                    "id": pid,
-                    "name": p.name,
-                    "profileIds": sorted({t.profile for t in p.targets}),
-                    "families": families,
-                    "changes": [_sanitize_change(c) for c in changes],
-                    "assignments": assignment,
-                    "billingPolicy": "reviewed",
-                })
-        return {"ok": True, "profiles": list(profiles.values()),
-                "slots": [s for p in profiles.values() for s in p["slots"]],
-                "presets": presets,
-                "presetsCorrupt": bool(_PRESET_CORRUPT),
-                "runtime": {"writable": _runtime_writable(),
-                            "version": _ADAPTER.runtime.version_label,
-                            "reasons": list(_ADAPTER.runtime.reasons)}}
+            return _state_dto(_EMPTY_HOST)
     except Exception as exc:  # sanitized error surface
         raise HTTPException(status_code=500, detail={
             "ok": False, "error": f"state unavailable: {type(exc).__name__}"}) from None
 
 
+@router.post("/state")
+def state_with_host(body: Dict[str, Any]):
+    """Same DTO, enriched with the browser's host evidence."""
+    try:
+        host = host_bundle(body)
+        with _LOCK:
+            return _state_dto(host)
+    except HTTPException:
+        raise
+    except Exception as exc:  # sanitized error surface
+        raise HTTPException(status_code=500, detail={
+            "ok": False, "error": f"state unavailable: {type(exc).__name__}"}) from None
+
+
+def _host_catalog_required() -> JSONResponse:
+    """The legacy GET catalog routes: the HOST owns the catalog now."""
+    return JSONResponse(
+        status_code=410,
+        content={"ok": False, "reason": "hostCatalogRequired"},
+        headers={"Cache-Control": "no-store"})
+
+
+def _catalog_request(body: Dict[str, Any], host: HostBundle) -> Tuple[Optional[str], str]:
+    """(profileId, provider) from a catalog request body (§C payload shape)."""
+    profile_id = body.get("profile") or body.get("profileId")
+    profile_id = profile_id if isinstance(profile_id, str) and profile_id else None
+    provider = str(body.get("provider") or "")
+    return profile_id, provider
+
+
+def _catalog_options(body: Dict[str, Any], host: HostBundle,
+                     profile_id: Optional[str]) -> Optional[dict]:
+    """The host ``/api/model/options`` payload for this request.
+
+    ``body.options`` wins (the UI can post it directly); otherwise the profile's
+    bundled host data is used. ``None`` is passed through as "no evidence": the
+    catalog transform reports ``hostCatalogUnavailable`` rather than inventing
+    an empty catalog.
+    """
+    options = body.get("options")
+    if isinstance(options, dict):
+        return options
+    return host.options(profile_id) if profile_id else None
+
+
 @router.get("/models")
-def models(response: Response, provider: str = "",
-          profileId: Optional[str] = None, refresh: bool = False):
-    """Provider-aware model catalog — a thin, truthful passthrough.
+def models_legacy():
+    """Legacy GET: the model catalog requires the host's options payload."""
+    return _host_catalog_required()
+
+
+@router.post("/models")
+def models(body: Dict[str, Any], response: Response):
+    """Provider-aware model ids — the catalog module's own DTO, verbatim.
 
     Shape: ``{ok, provider, models:[{id,name}], fetchedAt, source, stale,
-    error}``. The result is the catalog module's own dict, returned verbatim;
+    error, providers}``. The host ``options`` payload is required evidence;
     ``ok=False`` (with an explanatory ``error``) is a visible failure, never a
-    silently empty success. The response is never cached.
+    silently empty success. The response is never cached, and no
+    journal/preset/state path is touched.
     """
     response.headers["Cache-Control"] = "no-store"
-    provider = str(provider or "")
+    host = host_bundle(body)
+    profile_id, provider = _catalog_request(body, host)
+    failure = {"ok": False, "provider": provider, "models": [],
+               "fetchedAt": None, "source": "unknown", "stale": True}
     try:
-        catalog = _model_catalog_module()
+        module = _model_catalog_module()
     except Exception:
-        return {"ok": False, "provider": provider, "models": [],
-                "fetchedAt": None, "source": "unavailable", "stale": True,
-                "error": "model catalog module unavailable"}
-    # Explicit profile-discovery validation: an unknown profile is a truthful
-    # visible error, never a silent empty success.
-    if profileId and profileId not in discover_profiles():
-        return {"ok": False, "provider": provider, "models": [],
-                "fetchedAt": None, "source": "unknown", "stale": True,
-                "error": f"unknown profile {profileId!r}"}
+        return {**failure, "error": "model catalog module unavailable"}
+    if profile_id and profile_id not in discover_profiles():
+        return {**failure, "error": f"unknown profile {profile_id!r}"}
     try:
-        result = catalog.get_model_catalog(
-            _ADAPTER, profileId, provider, refresh=bool(refresh))
+        result = module.models_response(
+            _catalog_options(body, host, profile_id), provider,
+            profile_id=profile_id, refresh=bool(body.get("refresh")))
     except Exception as exc:
-        return {"ok": False, "provider": provider, "models": [],
-                "fetchedAt": None, "source": "unknown", "stale": True,
-                "error": f"catalog lookup failed: {type(exc).__name__}"}
+        return {**failure, "error": f"catalog lookup failed: {type(exc).__name__}"}
     if not isinstance(result, dict):
-        result = {"ok": False, "provider": provider, "models": [],
-                  "fetchedAt": None, "source": "unknown", "stale": True,
-                  "error": "catalog returned an unexpected payload"}
+        return {**failure, "error": "catalog returned an unexpected payload"}
     return result
 
 
 @router.get("/catalog")
-def catalog(response: Response, provider: str = "",
-            profileId: Optional[str] = None, refresh: bool = False):
+def catalog_legacy():
+    """Legacy GET: the aggregate catalog requires the host's options payload."""
+    return _host_catalog_required()
+
+
+@router.post("/catalog")
+def catalog(body: Dict[str, Any], response: Response):
     """Aggregate provider -> models -> cost catalog — read-only, truthful.
 
     Shape: ``{ok, profileId, providers:[{id, label, authenticated, configured,
     isCurrent, modelCount, fetchedAt, stale, warning, models:[{id, label,
     pricingStatus, cost}]}], cost:{pending, unavailableProviders}, error}``.
-    Unknown profile / module failure / zero provider rows are ``ok=false`` with
-    a sanitized ``error`` (HTTP 200), never an empty success. Deliberately NOT
+    No host options -> ``ok=false`` with ``hostCatalogUnavailable``; unknown
+    profile / module failure / zero provider rows are ``ok=false`` with a
+    sanitized ``error`` (HTTP 200), never an empty success. Deliberately NOT
     gated on ``_runtime_writable()``: reading a catalog is safe on a read-only
     runtime. The response is never cached and this path performs no
     journal/preset/state writes.
     """
     response.headers["Cache-Control"] = "no-store"
-    provider = str(provider or "")
+    host = host_bundle(body)
+    profile_id, provider = _catalog_request(body, host)
     failure = {"ok": False,
-               "profileId": profileId if profileId else None,
+               "profileId": profile_id,
                "providers": [],
                "cost": {"pending": False, "unavailableProviders": []}}
     try:
-        catalog_module = _model_catalog_module()
+        module = _model_catalog_module()
     except Exception:
         return {**failure, "error": "model catalog module unavailable"}
-    # Explicit profile-discovery validation: an unknown profile is a truthful
-    # visible error, never a silent empty success.
-    if profileId and profileId not in discover_profiles():
-        return {**failure, "error": f"unknown profile {profileId!r}"}
+    if profile_id and profile_id not in discover_profiles():
+        return {**failure, "error": f"unknown profile {profile_id!r}"}
     try:
-        result = catalog_module.get_model_catalog_all(
-            _ADAPTER, profileId, provider, refresh=bool(refresh))
+        result = module.catalog_response(
+            _catalog_options(body, host, profile_id), provider,
+            profile_id=profile_id, refresh=bool(body.get("refresh")))
     except Exception as exc:
-        return {**failure,
-                "error": f"catalog lookup failed: {type(exc).__name__}"}
+        return {**failure, "error": f"catalog lookup failed: {type(exc).__name__}"}
     if not isinstance(result, dict):
         return {**failure, "error": "catalog returned an unexpected payload"}
+    if "profileId" not in result:
+        result["profileId"] = profile_id
     return result
 
 
@@ -1600,7 +2342,8 @@ def _revision_drift(watched: Dict[Tuple[str, str, str], Optional[str]]
 @router.post("/preview")
 def preview(body: Dict[str, Any]):
     try:
-        profiles = _profile_inventory()
+        host = host_bundle(body)
+        profiles = _profile_inventory(host)
         changes = body.get("changes") or []
         duplicates = _duplicate_slot_changes(changes)
         if duplicates:
@@ -1628,7 +2371,7 @@ def preview(body: Dict[str, Any]):
                 # read and the bind must abort the preview — never be adopted
                 # as the mutation's expected revision.
                 watched = _watch_stores([c], known)
-                targets, blk = _changes_to_targets([c], profiles, strict=False)
+                targets, blk = _changes_to_targets([c], profiles, strict=False, host=host)
                 if blk:
                     blocked.extend(blk)
                     continue
@@ -1665,6 +2408,8 @@ def preview(body: Dict[str, Any]):
                         entry["expected_revision"] = watched[key]
                     prepared.append(entry)
                 out_changes.append({**_sanitize_change(c),
+                                    "executor": targets[0].executor,
+                                    "warnings": list(targets[0].warnings),
                                     "sideEffects": side_effects,
                                     "diff": diff})
         preview_id = "pv-" + uuid.uuid4().hex[:12]

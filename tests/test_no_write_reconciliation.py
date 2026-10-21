@@ -169,7 +169,7 @@ def test_known_no_write_is_durable_across_fresh_journal_read(lab):
 class _RacingWriteAdapter(JsonConfigStoreAdapter):
     """A concurrent writer replaces the file immediately AFTER our save but
     BEFORE any revision capture -> the write may have landed, ownership is
-    undecidable."""
+    undecidable (the adapter seam raises StoreWriteAmbiguous)."""
 
     def write(self, data, expected_revision=None):
         super().write(data)
@@ -180,6 +180,14 @@ class _RacingWriteAdapter(JsonConfigStoreAdapter):
 
 
 def test_ambiguous_write_still_requires_recovery(lab, monkeypatch):
+    """An ambiguous save is decided at APPLY time, not left for reconcile.
+
+    ``StoreWriteAmbiguous`` (the strict readback is not the document we
+    intended) carries no post_revision and must never be adopted as ours: the
+    step is durably recorded as a conflict, the operation goes straight to
+    ``recovery_required`` with the fixed ``external_edit`` category, nothing is
+    compensated, and a retry does nothing.
+    """
     import model_switcher.engine as engine
 
     journal = OperationJournal(str(lab / "journal.db"))
@@ -190,12 +198,24 @@ def test_ambiguous_write_still_requires_recovery(lab, monkeypatch):
         targets = _targets(lab, ["default"])
         op = plan_operation(journal, targets)
         res = apply_operation(journal, op["op_id"])
-        assert res["state"] != "committed"
+        assert res["state"] == OP_RECOVERY_REQUIRED, res
+        assert res["failure_category"] == "external_edit"
         step = res["steps"][0]
-        assert step["state"] == "failed"
+        assert step["state"] == "conflict"
         assert step["post_revision"] is None
         # genuinely ambiguous -- NOT classified as known-no-write
         assert step["write_phase"] == WRITE_PHASE_AMBIGUOUS
+        # Nothing was compensated or restored: the store keeps exactly what the
+        # racing save left behind (our bytes PLUS the interloper's edit), and
+        # the engine never claims that document as its own.
+        store = lab / "profiles" / "default" / "config.json"
+        left_behind = json.loads(store.read_text())
+        assert left_behind["main"]["model"] == "m/new"
+        assert left_behind["external"] == {"edit": True}
+        frozen = store.read_bytes()
+        # a retry is refused (same record, no write)
+        assert apply_operation(journal, op["op_id"])["state"] == OP_RECOVERY_REQUIRED
+        assert store.read_bytes() == frozen
         rec = reconcile(journal, op["op_id"])
         assert rec["state"] == OP_RECOVERY_REQUIRED, rec
         assert rec["steps"][0]["state"] == "conflict"
