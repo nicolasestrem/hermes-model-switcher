@@ -1,10 +1,10 @@
 # Catalog submission readiness
 
-Status: **0.3.0 entry draft; final-candidate checks pending.** This refactor addresses
-the review of plugin commit `02703e37` in
-[NousResearch/hermes-agent#141744](https://github.com/NousResearch/hermes-agent/pull/141744).
-This page is not evidence that an updated entry has been submitted, approved or
-listed.
+Status: **0.3.1 entry draft; the 0.3.0 entry is under review in
+[NousResearch/hermes-agent#141744](https://github.com/NousResearch/hermes-agent/pull/141744).**
+That submission addressed the review of plugin commit `02703e37`. This page tracks
+the 0.3.1 candidate; it is not evidence that an updated entry has been submitted,
+approved or listed.
 
 ## Procedure (authoritative)
 
@@ -21,7 +21,7 @@ Local pre-check, against the exact plugin commit to be pinned:
 hermes plugins validate /path/to/hermes-model-switcher --install-deps
 ```
 
-## 0.3.0 readiness and disclosures
+## 0.3.1 readiness and disclosures
 
 - Runtime integration uses public modules and SDK-authenticated host routes only.
   Require a clean private-import acceptance check on the shipped code, as documented
@@ -29,8 +29,8 @@ hermes plugins validate /path/to/hermes-model-switcher --install-deps
   is not evidence that the refactored candidate passed.
 - Compatibility is capability-based, not a version comparison. Do **not** add a
   `requires_hermes` floor unless the plugin code declares and enforces one. The tested
-  reference is **v0.22.2+canary.20261020T065957Z**, commit
-  `c5a3c0f8767a72203363d249add14142dbcf3cc7`; this is a reproducibility pin, not a
+  reference is **v0.22.3**, commit
+  `5b147ab036d6d19131bff8d20701b5001eab844a`; this is a reproducibility pin, not a
   minimum release.
 - The plugin needs the public `/api/model/options`, `/api/model/auxiliary`,
   `/api/model/moa` and `/api/model/set` routes. Missing required capabilities leave
@@ -57,11 +57,11 @@ repo: https://github.com/nicolasestrem/hermes-model-switcher
 sha: <40-hex commit pinned at submission>   # fill at submission time
 description: Choose models across Hermes profiles, preview changes, and reuse your
   setup with presets — one reviewed surface for every supported model-selection slot.
-maintainer: nicolasestrem
+maintainer: Nico Estrem
 tier: community
 category: models
 docs_url: https://github.com/nicolasestrem/hermes-model-switcher#readme
-version: "0.3.0"
+version: "0.3.1"
 screenshots:
   - https://raw.githubusercontent.com/nicolasestrem/hermes-model-switcher/<sha>/docs/images/model-switcher-dark-1440.png
 capabilities:
@@ -73,7 +73,8 @@ capabilities:
 
 Update `sha` and every `<sha>`-pinned image URL together. Keep `version` aligned
 with the pinned manifests, rerun validation and disclose the storage/compatibility
-limits above in the PR. Historical screenshots do not verify the final 0.3.0 tree.
+limits above in the PR. Historical screenshots do not verify the final 0.3.1 tree;
+the 0.3.0 captures remain current because the UI is unchanged in 0.3.1.
 
 ## Why `.hermes-catalog.json` is NOT in this repository
 

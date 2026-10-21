@@ -55,16 +55,16 @@ export HERMES_MODEL_SWITCHER_HERMES_REPO=/path/to/hermes-agent
 Both `conftest.py` and `real_app.py` honour this variable (default
 `~/.hermes/hermes-agent`).
 
-The verified revision is Hermes **v0.22.2+canary.20261020T065957Z**, commit
-`c5a3c0f8767a72203363d249add14142dbcf3cc7`. Reproduce it from the public repository:
+The verified revision is Hermes **v0.22.3**, commit
+`5b147ab036d6d19131bff8d20701b5001eab844a`. Reproduce it from the public repository:
 
 ```sh
-# Pin the exact commit: it is immutable (the canary tag is annotated onto it).
+# Pin the exact commit: it is immutable (the v0.22.3 tag is annotated onto it).
 git init /tmp/hermes-agent
 git -C /tmp/hermes-agent remote add origin https://github.com/NousResearch/hermes-agent.git
-git -C /tmp/hermes-agent fetch --depth 1 origin c5a3c0f8767a72203363d249add14142dbcf3cc7
+git -C /tmp/hermes-agent fetch --depth 1 origin 5b147ab036d6d19131bff8d20701b5001eab844a
 git -C /tmp/hermes-agent checkout -q FETCH_HEAD
-git -C /tmp/hermes-agent rev-parse HEAD   # c5a3c0f8767a72203363d249add14142dbcf3cc7
+git -C /tmp/hermes-agent rev-parse HEAD   # 5b147ab036d6d19131bff8d20701b5001eab844a
 ```
 
 A bare clone is enough: **there is no runtime bootstrap and no install stamp to

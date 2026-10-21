@@ -123,8 +123,8 @@ python -m unittest discover -s tests -p 'test_privacy*standalone.py' -v
 python scripts/privacy_guard.py
 ```
 
-Use the tested Hermes reference **v0.22.2+canary.20261020T065957Z**, commit
-`c5a3c0f8767a72203363d249add14142dbcf3cc7`, for host integration. Capability probes,
+Use the tested Hermes reference **v0.22.3**, commit
+`5b147ab036d6d19131bff8d20701b5001eab844a`, for host integration. Capability probes,
 not that version label or an install stamp, gate writability.
 
 Final acceptance must include Linux mode checks, unsafe-state refusal without

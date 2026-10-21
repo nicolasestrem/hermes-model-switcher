@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Hermes Web Dashboard plugin: reviewed application of provider/model presets across Hermes profiles, covering every supported model-selection slot (main, delegation, auxiliary, judge, fallback, MoA, cron, plugin, specialist). Current release: 0.3.0. There is **no inference-probe endpoint** — the plugin never performs inference and never fabricates usage rows.
+A Hermes Web Dashboard plugin: reviewed application of provider/model presets across Hermes profiles, covering every supported model-selection slot (main, delegation, auxiliary, judge, fallback, MoA, cron, plugin, specialist). Current release: 0.3.1. There is **no inference-probe endpoint** — the plugin never performs inference and never fabricates usage rows.
 
 ## Commands
 
@@ -22,7 +22,7 @@ bash scripts/install_hooks.sh                  # optional pre-commit/pre-push pr
 
 CI lives in `.github/workflows/ci.yml` (on `push`/`pull_request`, `contents: read`): `backend`, `browser`, and `package` jobs. The package job checks the declared Python floor and committed bundle freshness. Local suites and the privacy gate remain the fast path.
 
-**Both test suites need a real Hermes checkout on `sys.path`.** Set `HERMES_MODEL_SWITCHER_HERMES_REPO` (default `~/.hermes/hermes-agent`); without it pytest errors at setup and the real browser backend cannot start. CI clones tested commit `c5a3c0f8767a72203363d249add14142dbcf3cc7` (**v0.22.2+canary.20261020T065957Z**); see CONTRIBUTING.md. A bare checkout is enough: no runtime bootstrap or install stamp is required. `probe_runtime()` checks callable public capabilities; package version is informational, not a write gate.
+**Both test suites need a real Hermes checkout on `sys.path`.** Set `HERMES_MODEL_SWITCHER_HERMES_REPO` (default `~/.hermes/hermes-agent`); without it pytest errors at setup and the real browser backend cannot start. CI clones tested commit `5b147ab036d6d19131bff8d20701b5001eab844a` (**v0.22.3**); see CONTRIBUTING.md. A bare checkout is enough: no runtime bootstrap or install stamp is required. `probe_runtime()` checks callable public capabilities; package version is informational, not a write gate.
 
 Playwright starts a mock fixture (`server.mjs`, :8931) and a real FastAPI backend over a throwaway lab home (`real-server.mjs`, :8932). The latter mounts the real Hermes `/api/model/*` routers and seeds `tests/real-home.json` (git-ignored). `tests/visual-evidence.spec.mjs` writes under `TMPDIR`.
 

@@ -170,9 +170,9 @@ informational only; neither a version string nor an install stamp gates writes.
 Missing capabilities degrade to read-only. Hosted isolation remains read-only;
 the host gates plugin requests, not a duplicate plugin-side backend gate.
 
-The tested reference is Hermes **v0.22.2+canary.20261020T065957Z**, commit
-`c5a3c0f8767a72203363d249add14142dbcf3cc7`. This is a reproducibility pin, not a
-minimum or exclusive supported version. Final 0.3.0 verification is recorded
+The tested reference is Hermes **v0.22.3**, commit
+`5b147ab036d6d19131bff8d20701b5001eab844a`. This is a reproducibility pin, not a
+minimum or exclusive supported version. Final 0.3.1 verification is recorded
 separately in [release readiness](release-readiness.md).
 
 Profiles use public `hermes_constants` identity/home helpers. Config and secret

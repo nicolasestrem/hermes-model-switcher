@@ -4,16 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-model-switcher"
-version = "0.3.0"
+version = "0.3.1"
 description = "Choose models across Hermes profiles, preview changes, and reuse your setup with presets."
 license = { text = "MIT" }
 requires-python = ">=3.10"
 # Runtime dependency (not test-only): src/model_switcher/adapters.py and
 # src/model_switcher/registry/scanner.py import yaml at runtime to parse
 # profile configs. The pinned Hermes itself depends on ruamel.yaml, not
-# PyYAML, so this dependency must be declared here by the plugin.
+# PyYAML, so this dependency must be declared here by the plugin. The
+# plugin-catalog dependency rule asks for a bounded range, not a bare floor.
 dependencies = [
-    "PyYAML>=6",
+    "PyYAML>=6.0,<7",
 ]
 
 [project.optional-dependencies]
