@@ -6,12 +6,10 @@ name: CI
 # and the browser suite cannot start its real backend — that is a hard failure,
 # not a skip. Both jobs below clone the pinned tested revision for this.
 #
-# The clone must also carry a real source identity: hermes_cli.__version__ reads
-# install-stamp.json (installer-generated, git-ignored), and a bare clone reports
-# 0.0.0, which trips the adapter's supported-baseline guard and fails the
-# integration tests. scripts/bootstrap_ci_runtime.py writes the stamp with
-# Hermes' own scripts/write_install_stamp.py, deriving the base version from the
-# verified release tag. See CONTRIBUTING.md.
+# A bare clone is all that is needed: the adapter's runtime probe is
+# CAPABILITY-based (every required public seam must import and be callable), so
+# there is no install-stamp.json to write and no version string to compare. See
+# CONTRIBUTING.md.
 
 on:
   push:
@@ -27,11 +25,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  HERMES_TESTED_TAG: v0.22.0+canary.20261014T070054Z
-  HERMES_TESTED_SHA: 0e427d788d253630d38a3a51cd76849e73cd6925
-  # Enable the end-to-end bootstrap test: the CI checkout is a throwaway clone,
-  # so writing its install-stamp.json is safe here (and only here).
-  HMS_CI_BOOTSTRAP_E2E: "1"
+  HERMES_TESTED_TAG: v0.22.2+canary.20261020T065957Z
+  HERMES_TESTED_SHA: c5a3c0f8767a72203363d249add14142dbcf3cc7
 
 jobs:
   backend:
@@ -68,17 +63,7 @@ jobs:
           git -C "$HERMES_MODEL_SWITCHER_HERMES_REPO" checkout -q FETCH_HEAD
           test "$(git -C "$HERMES_MODEL_SWITCHER_HERMES_REPO" rev-parse HEAD)" = "$HERMES_TESTED_SHA"
 
-      # A bare clone has no install-stamp.json (installer-generated, git-ignored),
-      # so hermes_cli.__version__ reports the pre-stamp placeholder 0.0.0 and the
-      # adapter guard refuses writes. Write the stamp Hermes' own way, with the
-      # base version derived from the verified tag -- never a hand-typed value.
-      - name: Initialize Hermes source identity (install stamp)
-        run: >-
-          python scripts/bootstrap_ci_runtime.py
-          --checkout "$HERMES_MODEL_SWITCHER_HERMES_REPO"
-          --sha "$HERMES_TESTED_SHA"
-          --tag "$HERMES_TESTED_TAG"
-
+      # A bare clone needs no install stamp: gating is capability-based.
       - name: Run the backend suite
         run: python -m pytest tests/ -q
 
@@ -121,17 +106,6 @@ jobs:
           git -C "$HERMES_MODEL_SWITCHER_HERMES_REPO" fetch --depth 1 origin "$HERMES_TESTED_SHA"
           git -C "$HERMES_MODEL_SWITCHER_HERMES_REPO" checkout -q FETCH_HEAD
           test "$(git -C "$HERMES_MODEL_SWITCHER_HERMES_REPO" rev-parse HEAD)" = "$HERMES_TESTED_SHA"
-
-      # A bare clone has no install-stamp.json (installer-generated, git-ignored),
-      # so hermes_cli.__version__ reports the pre-stamp placeholder 0.0.0 and the
-      # adapter guard refuses writes. Write the stamp Hermes' own way, with the
-      # base version derived from the verified tag -- never a hand-typed value.
-      - name: Initialize Hermes source identity (install stamp)
-        run: >-
-          python scripts/bootstrap_ci_runtime.py
-          --checkout "$HERMES_MODEL_SWITCHER_HERMES_REPO"
-          --sha "$HERMES_TESTED_SHA"
-          --tag "$HERMES_TESTED_TAG"
 
       - name: Install Node dependencies
         run: npm ci

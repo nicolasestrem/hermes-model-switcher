@@ -10,9 +10,10 @@ hermes_adapter.py — see the module docstrings for the contract):
      a literal null must be distinguished, and readback must match apply.
   B  the canonical save's stale-write guard (`expected_revision`) was dead on
      the adapter path: CanonicalConfigStoreAdapter.write never passed it, so
-     the revision check happened BEFORE Hermes' `_CONFIG_LOCK` and a
+     the revision check happened BEFORE the adapter's write lock and a
      concurrent writer could slip between the engine's recheck and the save.
-     The expected revision must be carried into the canonical lock guard.
+     The expected revision must be carried into the adapter's save-lock guard
+     (public seams only: no Hermes `_CONFIG_LOCK`, no private config helper).
   C  the profile discovered identity was asserted only before entering the
      lock; it must be re-asserted inside the guard, and the adapter must
      accept an explicit identity.
