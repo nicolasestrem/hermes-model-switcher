@@ -26,6 +26,12 @@ async function openCatalogUnderHostCss(page, { idLabels = true } = {}) {
   }, idLabels);
   await page.getByTestId("catalog-toggle").click();
   await expect(page.getByTestId("catalog-table")).toBeVisible();
+  // The mock's portal provider is authenticated:false and only carries a model
+  // under catalogPortalModels; its row lives in the collapsed "Not set up"
+  // section, so expand it before measuring rendered line counts.
+  if (await page.getByTestId("catalog-unsetup-summary").count()) {
+    await page.getByTestId("catalog-unsetup-summary").click();
+  }
   await expect(page.locator("[data-model-row]").first()).toBeVisible();
 }
 
