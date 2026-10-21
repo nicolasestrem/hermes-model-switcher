@@ -4,6 +4,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "shims/react.js";
 import { createRoot } from "shims/react-dom-client.js";
 import { api, ApiError, catalogErrorText, hostFailureText, hostStatusOf, HOST_RESTART_REQUIRED, loadHostBundle, validateHostCall } from "./api.js";
+import { isMultiLab, labCounts, labLabel, labOf, modelLeaf } from "./labs.js";
 import { resolveOpaqueSurface } from "./theme.js";
 
 const t = (v, fb) => `var(--${v}, ${fb})`;
@@ -88,6 +89,18 @@ function priceHint(catalogModel) {
     }
   }
   return unknown;
+}
+
+// Price suffix for one model option. Only a real catalog price, "free" and
+// "included in subscription" are stated per row: an unknown price is the same
+// sentence on every row of a 62-model provider, so it is dropped here and said
+// once under the Model select ("No list prices published for this provider.").
+// The row never renders "$0.00" or free for unknown data — the suffix is empty.
+function priceSuffix(catalogModel) {
+  const hint = priceHint(catalogModel);
+  if (hint.kind === "unknown") return "";
+  if (hint.kind === "priced") return ` — ${hint.text.replace(/^→\s*/, "").replace(/ (in|out)$/, "/1M $1")}`;
+  return ` — ${hint.text}`;
 }
 
 function freshnessText(value) {
@@ -1259,12 +1272,102 @@ function ChangeEditor({
   });
   const showModelOther = modelOther || (Boolean(editor.model) && !modelInList && !modelLoading && Boolean(modelProvider));
 
+  // ---- Lab + filter for the Model list -----------------------------------
+  // An aggregator's ids carry their vendor namespace (`anthropic/claude-…`,
+  // `z-ai/glm-…`), so openrouter's 62 models and nous's 67 open on the same two
+  // labs and bury everything else. When the list spans two or more labs every
+  // id is namespaced (labs.js::isMultiLab), so a Lab select can narrow it
+  // honestly; a long flat list (>20) keeps its full ids and only gains the
+  // filter. Both are native controls: the browser owns keyboard and
+  // screen-reader behaviour and nothing pops outside the plugin root.
+  const multiLab = useMemo(() => isMultiLab(modelRows.map((m) => m.id)), [modelRows]);
+  const showModelFilter = multiLab || modelRows.length > 20;
+  const labOptions = useMemo(
+    () => labCounts(modelRows.map((m) => ({ providerId: modelProvider, modelId: m.id }))),
+    [modelRows, modelProvider],
+  );
+  // Lab and filter belong to the provider they were chosen for: a provider
+  // change must show that provider's whole list again. The reset is part of the
+  // render (a stale key reads as "no lab, no filter"), so no frame ever shows
+  // one provider's rows narrowed by another provider's lab.
+  const [pick, setPick] = useState({ key: null, lab: "", text: "" });
+  const [pickProvider, setPickProvider] = useState(modelProvider);
+  if (pickProvider !== modelProvider) {
+    // Adjusting state during render (the React-documented prop-change pattern):
+    // the list is drawn once, already un-narrowed, and a later switch back to
+    // the previous provider cannot resurrect the old lab/filter.
+    setPickProvider(modelProvider);
+    setPick({ key: modelProvider, lab: "", text: "" });
+  }
+  const activePick = pick.key === modelProvider ? pick : null;
+  const labPick = multiLab && activePick ? activePick.lab : "";
+  const filterText = showModelFilter && activePick ? activePick.text : "";
+  const needle = filterText.trim().toLowerCase();
+  const narrowed = Boolean(labPick) || Boolean(needle);
+  const visibleRows = useMemo(() => {
+    if (!multiLab && !needle) return modelRows;
+    return modelRows.filter((m) => {
+      if (labPick && labOf(modelProvider, m.id) !== labPick) return false;
+      if (!needle) return true;
+      return m.id.toLowerCase().includes(needle) || String(m.name || "").toLowerCase().includes(needle);
+    });
+  }, [modelRows, multiLab, needle, labPick, modelProvider]);
+  // Grouped only while several labs are on screen: one optgroup per lab for
+  // "All labs". Once a lab is chosen its name is already in the Lab select, so
+  // the rows are a flat leaf-named list. Counts are the rows on screen.
+  const visibleGroups = useMemo(() => {
+    if (!multiLab) return [];
+    const groups = new Map();
+    for (const m of visibleRows) {
+      const lab = labOf(modelProvider, m.id);
+      if (!groups.has(lab)) groups.set(lab, { lab, label: labLabel(lab), rows: [] });
+      groups.get(lab).rows.push(m);
+    }
+    return [...groups.values()].sort((a, b) => a.label.localeCompare(b.label) || a.lab.localeCompare(b.lab));
+  }, [multiLab, visibleRows, modelProvider]);
+  // The chosen model never vanishes from its own <select>: a filtered-out
+  // selection stays selectable (with its lab named) so the editor cannot lose
+  // the value behind the user's back. Options are excluded from the groups, so
+  // no id is ever listed twice.
+  const selectedRow = editor.model ? modelRows.find((m) => m.id === editor.model) || null : null;
+  const pinnedRow = selectedRow && !visibleRows.some((m) => m.id === selectedRow.id) ? selectedRow : null;
+  // Every model of this provider without a published price: state it once
+  // instead of ending every row with the same sentence.
+  const allPricesUnknown = modelRows.length > 0 && modelRows.every(
+    (m) => priceHint(catalogModelMap.get(`${modelProvider}\u0000${m.id}`)).kind === "unknown",
+  );
+  const showNoMatch = modelRows.length > 0 && visibleRows.length === 0;
+
+  const modelPlaceholder = !modelProvider && !scalarPinned ? "Choose a provider first"
+    : providerTyping ? "Finish the provider slug to list its models"
+      : modelLoading ? "Loading models…"
+        : !modelRows.length ? "No listed models — choose Other"
+          : narrowed ? `Choose a model (${visibleRows.length} of ${modelRows.length})…`
+            : `Choose a model (${modelRows.length})…`;
+
+  const catalogModelOf = (m) => catalogModelMap.get(`${modelProvider}\u0000${m.id}`);
+  // Under a lab the leaf is unambiguous; a bare id is already the whole model
+  // name. The full id always rides in the option's title and in the Route line.
   const modelOptionText = (m) => {
-    const hint = priceHint(catalogModelMap.get(`${modelProvider}\u0000${m.id}`));
-    const price = hint.kind === "unknown" ? "price not published"
-      : hint.kind === "priced" ? hint.text.replace(/^→\s*/, "").replace(/ (in|out)$/, "/1M $1") : hint.text;
+    const price = priceSuffix(catalogModelOf(m));
+    if (multiLab) return routeOptionText(`${modelLeaf(m.id)}${price}`, 72);
     const name = m.name && m.name !== m.id ? ` (${m.name})` : "";
-    return routeOptionText(`${m.id}${name} — ${price}`, 90);
+    return routeOptionText(`${m.id}${name}${price}`, 90);
+  };
+  const pinnedOptionText = (m) => {
+    const price = priceSuffix(catalogModelOf(m));
+    if (!multiLab) return modelOptionText(m);
+    return routeOptionText(`${labLabel(labOf(modelProvider, m.id))} · ${modelLeaf(m.id)}${price}`, 72);
+  };
+
+  const chooseLab = (value) => {
+    setPick({ key: modelProvider, lab: value, text: filterText });
+    if (!value) {
+      announce?.(`All labs — ${modelRows.length} models`);
+      return;
+    }
+    const lab = labOptions.find((l) => l.lab === value);
+    announce?.(`Lab set to ${lab ? lab.label : value} — ${lab ? lab.count : 0} of ${modelRows.length} models`);
   };
 
   const chooseProvider = (value) => {
@@ -1396,6 +1499,36 @@ function ChangeEditor({
               </div>
             )}
 
+            {(multiLab || showModelFilter) && (
+              <div className="hms-picker-narrow" data-testid="picker-filters">
+                {multiLab && (
+                  <label className="hms-route-field">Lab
+                    <select aria-label="Lab" data-testid="lab-select" value={labPick}
+                      onChange={(e) => chooseLab(e.target.value)}>
+                      <option value="">All labs ({modelRows.length})</option>
+                      {labOptions.map((l) => (
+                        <option key={l.lab} value={l.lab} data-testid={`lab-option-${l.lab}`}>
+                          {`${l.label} (${l.count})`}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                {showModelFilter && (
+                  <label className="hms-route-field">Filter models
+                    <input type="search" aria-label="Filter models" data-testid="model-filter"
+                      value={filterText} placeholder="Match a model id or name"
+                      onChange={(e) => setPick({ key: modelProvider, lab: labPick, text: e.target.value })} />
+                  </label>
+                )}
+                {narrowed && (
+                  <span className="hms-note hms-picker-match" data-testid="picker-match-count" aria-live="polite">
+                    {visibleRows.length} of {modelRows.length} models
+                  </span>
+                )}
+              </div>
+            )}
+
             <label className="hms-route-field">Model
               <select aria-label="New model" data-testid="model-select"
                 value={showModelOther ? OTHER_VALUE : editor.model}
@@ -1403,18 +1536,34 @@ function ChangeEditor({
                 onFocus={() => onEnsureCatalog?.()}
                 onPointerEnter={() => onEnsureCatalog?.()}
                 onChange={(e) => chooseModel(e.target.value)}>
-                <option value="">
-                  {!modelProvider && !scalarOnly ? "Choose a provider first"
-                    : providerTyping ? "Finish the provider slug to list its models"
-                    : modelLoading ? "Loading models…"
-                    : modelRows.length ? `Choose a model (${modelRows.length})…` : "No listed models — choose Other"}
-                </option>
-                {modelRows.map((m) => (
-                  <option key={m.id} value={m.id} data-testid={`model-option-${m.id}`}>{modelOptionText(m)}</option>
-                ))}
+                <option value="">{modelPlaceholder}</option>
+                {showNoMatch && <option value="__no_match__" disabled>No models match</option>}
+                {pinnedRow && (
+                  <option value={pinnedRow.id} data-testid={`model-option-${pinnedRow.id}`}
+                    data-pinned="true" title={pinnedRow.id}>{pinnedOptionText(pinnedRow)}</option>
+                )}
+                {multiLab && !labPick
+                  ? visibleGroups.map((g) => (
+                    <optgroup key={g.lab} label={`${g.label} · ${g.rows.length}`}
+                      data-testid={`model-group-${g.lab}`}>
+                      {g.rows.map((m) => (
+                        <option key={m.id} value={m.id} data-testid={`model-option-${m.id}`}
+                          title={m.id}>{modelOptionText(m)}</option>
+                      ))}
+                    </optgroup>
+                  ))
+                  : visibleRows.map((m) => (
+                    <option key={m.id} value={m.id} data-testid={`model-option-${m.id}`}
+                      title={m.id}>{modelOptionText(m)}</option>
+                  ))}
                 <option value={OTHER_VALUE}>Other — type an exact model id…</option>
               </select>
             </label>
+            {allPricesUnknown && (
+              <p className="hms-note hms-picker-price-note" data-testid="model-price-note">
+                No list prices published for this provider.
+              </p>
+            )}
             {showModelOther && (
               <label className="hms-route-field hms-route-exact">Exact model id
                 <input data-testid="model-exact" value={editor.model}
