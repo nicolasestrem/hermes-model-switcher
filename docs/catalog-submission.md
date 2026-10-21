@@ -1,9 +1,9 @@
 # Catalog submission readiness
 
-Status: **0.3.1 entry draft; the 0.3.0 entry is under review in
+Status: **0.3.2 entry draft; the 0.3.0 entry is under review in
 [NousResearch/hermes-agent#141744](https://github.com/NousResearch/hermes-agent/pull/141744).**
 That submission addressed the review of plugin commit `02703e37`. This page tracks
-the 0.3.1 candidate; it is not evidence that an updated entry has been submitted,
+the 0.3.2 candidate; it is not evidence that an updated entry has been submitted,
 approved or listed.
 
 ## Procedure (authoritative)
@@ -21,7 +21,7 @@ Local pre-check, against the exact plugin commit to be pinned:
 hermes plugins validate /path/to/hermes-model-switcher --install-deps
 ```
 
-## 0.3.1 readiness and disclosures
+## 0.3.2 readiness and disclosures
 
 - Runtime integration uses public modules and SDK-authenticated host routes only.
   Require a clean private-import acceptance check on the shipped code, as documented
@@ -61,7 +61,7 @@ maintainer: Nico Estrem
 tier: community
 category: models
 docs_url: https://github.com/nicolasestrem/hermes-model-switcher#readme
-version: "0.3.1"
+version: "0.3.2"
 screenshots:
   - https://raw.githubusercontent.com/nicolasestrem/hermes-model-switcher/<sha>/docs/images/model-switcher-dark-1440.png
 capabilities:
@@ -73,8 +73,9 @@ capabilities:
 
 Update `sha` and every `<sha>`-pinned image URL together. Keep `version` aligned
 with the pinned manifests, rerun validation and disclose the storage/compatibility
-limits above in the PR. Historical screenshots do not verify the final 0.3.1 tree;
-the 0.3.0 captures remain current because the UI is unchanged in 0.3.1.
+limits above in the PR. Historical screenshots do not verify the final 0.3.2 tree;
+the `model-switcher-0.3.2-*` captures were re-taken after the catalog-row fix
+(the 0.3.0 catalog capture showed each model id twice).
 
 ## Why `.hermes-catalog.json` is NOT in this repository
 

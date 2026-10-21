@@ -1,4 +1,4 @@
-// Publication captures for the 0.3.0 Hermes plugin-catalog listing.
+// Publication captures for the 0.3.2 Hermes plugin-catalog listing.
 //
 // OPT-IN ONLY. The normal suite must never rewrite tracked images, so every
 // test here skips unless HMS_WRITE_CATALOG_CAPTURES=1. When it does run it
@@ -17,7 +17,7 @@ import crypto from "node:crypto";
 
 const ENABLED = process.env.HMS_WRITE_CATALOG_CAPTURES === "1";
 const OUT = path.join(process.cwd(), "docs", "images");
-const PREFIX = "model-switcher-0.3.0";
+const PREFIX = "model-switcher-0.3.2";
 const MANIFEST = path.join(OUT, "catalog-captures.json");
 const FIXTURE = "http://localhost:8932/fixture-real.html";
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Hermes Web Dashboard plugin: reviewed application of provider/model presets across Hermes profiles, covering every supported model-selection slot (main, delegation, auxiliary, judge, fallback, MoA, cron, plugin, specialist). Current release: 0.3.1. There is **no inference-probe endpoint** — the plugin never performs inference and never fabricates usage rows.
+A Hermes Web Dashboard plugin: reviewed application of provider/model presets across Hermes profiles, covering every supported model-selection slot (main, delegation, auxiliary, judge, fallback, MoA, cron, plugin, specialist). Current release: 0.3.2. There is **no inference-probe endpoint** — the plugin never performs inference and never fabricates usage rows.
 
 ## Commands
 

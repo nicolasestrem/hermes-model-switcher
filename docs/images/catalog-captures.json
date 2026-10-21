@@ -1,7 +1,7 @@
 {
-  "prefix": "model-switcher-0.3.0",
+  "prefix": "model-switcher-0.3.2",
   "captureBoundary": "Dashboard SDK fixture with the plugin's real backend and Hermes' own /api/model/* routers over an isolated lab home",
-  "surfaceDigest": "16f098459c56d7fb757ffe2c68b104c8970eb4b8f660f1d33af576c67b8d3c33",
+  "surfaceDigest": "f8f4030f7fe59df54556bd7bca31228d8f2364d2998c463f59cb3d52dff45851",
   "sourceFiles": [
     "ui/src/main.jsx",
     "ui/src/api.js",
@@ -11,73 +11,73 @@
   "captureViewport": "1280x800 (narrow capture 390x844), deviceScaleFactor 1, viewport screenshot (not fullPage)",
   "fixtures": "tests/fixture-real.html served by tests/real_app.py (real plugin backend + Hermes /api/model/* routers, isolated lab home)",
   "optIn": "HMS_WRITE_CATALOG_CAPTURES=1",
-  "observedAt": "2026-10-21T10:15:05.855Z",
+  "observedAt": "2026-10-21T20:50:28.753Z",
   "captures": [
     {
       "name": "dashboard",
       "state": "idle routing matrix and change editor, dark host theme",
-      "file": "docs/images/model-switcher-0.3.0-dashboard.png",
+      "file": "docs/images/model-switcher-0.3.2-dashboard.png",
       "viewport": {
         "width": 1280,
         "height": 800
       },
-      "bytes": 122424,
-      "sha256": "030ef6006972ecb58493bc2bb4b915b1326ea13669d2d31ff0e0fd0c95ad2f75"
+      "bytes": 120342,
+      "sha256": "5cba2c61dd46f9d1e7ab30c32ce1bc4a74d20f035b4a9dd9cf116301a10ba590"
     },
     {
       "name": "light",
       "state": "idle routing matrix and change editor, light host theme",
-      "file": "docs/images/model-switcher-0.3.0-light.png",
+      "file": "docs/images/model-switcher-0.3.2-light.png",
       "viewport": {
         "width": 1280,
         "height": 800
       },
-      "bytes": 105041,
-      "sha256": "d6cd0289de58cd7f102075138ca502e68bb30de052da9cc429d2d58d89c89411"
+      "bytes": 114353,
+      "sha256": "c3615698918ae1b92085a3a65c88d8282c47a5674324dad50e3ffbddc186e7d6"
     },
     {
       "name": "narrow",
       "state": "narrow 390x844 layout with the routing matrix scrolling inside its own region",
-      "file": "docs/images/model-switcher-0.3.0-narrow.png",
+      "file": "docs/images/model-switcher-0.3.2-narrow.png",
       "viewport": {
         "width": 390,
         "height": 844
       },
-      "bytes": 49168,
-      "sha256": "7a763c58f9b8bbbcc73df355555acf96ec62b80b1b12d8dbf7b7fa2c0402a517"
+      "bytes": 48867,
+      "sha256": "83483c12c775eab63e2fe66daf707e32df7921bbe67dafbf6fe680dfe3553e61"
     },
     {
       "name": "catalog",
       "state": "provider-grouped model catalog with the host's per-1M-token price columns",
-      "file": "docs/images/model-switcher-0.3.0-catalog.png",
+      "file": "docs/images/model-switcher-0.3.2-catalog.png",
       "viewport": {
         "width": 1280,
         "height": 800
       },
-      "bytes": 127194,
-      "sha256": "87671e56e666fc8096d04521367d41d4c3a5a4075abce9adb3f9557c129af884"
+      "bytes": 112088,
+      "sha256": "f7288df8c37d404bfe210d10e97a19241a6448b00bcd3bf5d9b72a1c51fb6092"
     },
     {
       "name": "preview",
       "state": "reviewed default/main change to zhipu/glm-5.3-flash, before apply",
-      "file": "docs/images/model-switcher-0.3.0-preview.png",
+      "file": "docs/images/model-switcher-0.3.2-preview.png",
       "viewport": {
         "width": 1280,
         "height": 800
       },
-      "bytes": 115249,
-      "sha256": "03862d1f695a3d8dd98cb848524bf4accb6e6484741946225e47c0998aa9de7e"
+      "bytes": 122476,
+      "sha256": "3ad961ae74eac00230a152bbb512fe90cbd3c0f8de4abf6da5c24a8edf0c70d7"
     },
     {
       "name": "operation",
       "state": "operation drawer after Apply with per-profile readback",
-      "file": "docs/images/model-switcher-0.3.0-operation.png",
+      "file": "docs/images/model-switcher-0.3.2-operation.png",
       "viewport": {
         "width": 1280,
         "height": 800
       },
-      "bytes": 112721,
-      "sha256": "b01a41d02818127a02be0c7294ae147738c56c5db47113f08c3a73197e11d3ba"
+      "bytes": 117054,
+      "sha256": "d94d4515dac4c598c7c091060fa897d98bea8bc4936f03f0f7e3d518a0b0bfe9"
     }
   ]
 }

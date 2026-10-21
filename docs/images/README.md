@@ -1,8 +1,8 @@
 # Product screenshots
 
-## Current: 0.3.0 catalog captures
+## Current: 0.3.2 catalog captures
 
-The six `model-switcher-0.3.0-*.png` images are the current captures of the 0.3.0
+The six `model-switcher-0.3.2-*.png` images are the current captures of the 0.3.2
 interface, taken on **2026-10-21** at a **1280x800** viewport (the last one at
 **390x844**), device scale factor 1, as viewport screenshots rather than full-page
 captures.
@@ -15,21 +15,21 @@ home under `/tmp`. Hermes' own `/api/model/*` routers serve the host evidence. T
 is **not** a live Dashboard deployment, not provider execution and not a production
 mutation. The lab holds two synthetic profiles, `default` and `research`.
 
-- `model-switcher-0.3.0-dashboard.png`: idle workspace in the dark host theme — the
+- `model-switcher-0.3.2-dashboard.png`: idle workspace in the dark host theme — the
   profile filter, routing matrix and change editor before a target is selected.
-- `model-switcher-0.3.0-preview.png`: a reviewed `default/main` change from
+- `model-switcher-0.3.2-preview.png`: a reviewed `default/main` change from
   `anthropic/claude-sonnet-4-6` to `zhipu/glm-5.3-flash`, with the before → after
   route and persisted config diff shown before Apply.
-- `model-switcher-0.3.0-operation.png`: the operation drawer after Apply, showing
+- `model-switcher-0.3.2-operation.png`: the operation drawer after Apply, showing
   `Applied + read back`, the operation reference, the revision transition and the
   guarded Undo control.
-- `model-switcher-0.3.0-catalog.png`: the provider-grouped model catalog with the
+- `model-switcher-0.3.2-catalog.png`: the provider-grouped model catalog with the
   input/output price columns and a per-row status. The pinned offline lab host
   publishes no pricing fields, so every row reads "price not published" — unknown
   is never treated as free. A host that supplies pricing fills the same columns.
-- `model-switcher-0.3.0-light.png`: the same idle workspace under the light host
+- `model-switcher-0.3.2-light.png`: the same idle workspace under the light host
   tokens.
-- `model-switcher-0.3.0-narrow.png`: 390x844, where the editor stacks above the
+- `model-switcher-0.3.2-narrow.png`: 390x844, where the editor stacks above the
   matrix and the matrix scrolls horizontally inside its own region.
 
 `catalog-captures.json` records the capture boundary, the viewport, and a SHA-256 per
