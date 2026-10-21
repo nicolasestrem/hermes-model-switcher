@@ -9,7 +9,7 @@
     "build": "node ui/build.mjs",
     "test": "playwright test --config=tests/playwright.config.mjs"
   },
-  "dependencies": {
+  "devDependencies": {
     "@playwright/test": "^1.64.0",
     "esbuild": "^0.28.2",
     "react": "^18.3.1",

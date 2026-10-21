@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import secrets
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -108,6 +109,32 @@ class ApplyStoreUnreadable(ApplyBlocked):
     public_reason = "a target store could not be read"
 
 
+class ApplySnapshotNotRestorable(ApplyBlocked):
+    """The pre-change document holds values the journal cannot round-trip.
+
+    The journal stores snapshots as JSON (``default=str``, the ``_rev``
+    contract). A YAML scalar such as an unquoted date loads as
+    ``datetime.date`` and would come back as a string, so compensation or
+    Undo would silently change its type on disk, and host readback would see
+    the stringified snapshot as a foreign diff. Refusing before any write keeps
+    the snapshot-restore promise honest.
+    """
+
+    public_reason = ("a target config holds values the recovery snapshot "
+                     "cannot restore exactly (for example an unquoted date); "
+                     "quote them, then retry")
+
+
+def _snapshot_round_trips(snapshot: Any) -> bool:
+    if snapshot is None:
+        return True
+    try:
+        encoded = json.dumps(snapshot, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return False
+    return json.loads(encoded) == snapshot
+
+
 class ApplySnapshotRace(ApplyBlocked):
     public_reason = "a target store changed while the recovery snapshot was captured"
 
@@ -165,6 +192,10 @@ class ApplyHostResultRejected(ApplyBlocked):
 class StepFailure(RuntimeError):
     """A write step failed after it started; triggers compensation."""
     post_revision: Optional[str] = None  # set when the write already landed
+    # Optional classification carried by a specific failure path (see
+    # _apply_step's unreadable-readback case). Absent means "unclassified".
+    write_phase: Optional[str] = None
+    category: Optional[str] = None
 
 
 class _PreWriteConflict(StoreConflict):
@@ -316,6 +347,9 @@ def plan_operation(journal: OperationJournal,
         except StoreUnreadable as exc:
             # an unreadable raw file is a preflight failure, not empty state
             raise ApplyStoreUnreadable(str(exc)) from exc
+        if not _snapshot_round_trips(snap):
+            raise ApplySnapshotNotRestorable(
+                "snapshot does not round-trip through the journal encoding")
         group_index[key] = len(prepared)
         revision = adapter.revision()
         if revision != snapshot_revision:
@@ -378,7 +412,20 @@ def _apply_step(adapter: StoreAdapter, changes: Dict[str, Any],
             raise _PreWriteUnreadable(str(exc)) from exc
     outcome = adapter.apply_changes_guarded(
         changes, expected_revision=pre_revision)
-    if not adapter.readback(changes):
+    try:
+        verified = adapter.readback(changes)
+    except (StoreUnreadable, OSError) as exc:
+        # The write landed (its revision is already computed) but the store can
+        # no longer be read, so the readback is undecidable. Keep the computed
+        # post-revision for the record and tag the step AMBIGUOUS: dropping the
+        # revision here would let the operation be reported as a known no-write
+        # while the new bytes sit on disk.
+        unreadable = StepFailure("readback unreadable after write")
+        unreadable.post_revision = outcome.post_revision
+        unreadable.write_phase = WRITE_PHASE_AMBIGUOUS
+        unreadable.category = "store_unreadable"
+        raise unreadable from exc
+    if not verified:
         # The write already landed on disk but could not be verified.
         # Carry the post-write revision so the caller records the step as
         # written-but-failed and compensates it back to the snapshot —
@@ -568,13 +615,37 @@ def _failure_result(journal: OperationJournal, op_id: str, category: str,
 
 def _finish_failure(journal: OperationJournal, op_id: str,
                     category: str) -> Dict[str, Any]:
-    """Compensate the written steps in reverse order and record the category."""
+    """Compensate the written steps in reverse order and record the category.
+
+    Only ``WRITE_PHASE_PRE`` is a KNOWN no-write (journal contract). A step
+    whose write phase is undecided -- ``WRITE_PHASE_AMBIGUOUS``, or an
+    unclassified failure -- may have landed, so it is never reported as
+    "nothing wrote; retryable" (``OP_PENDING``): the operation fails closed to
+    ``recovery_required`` and NOTHING is compensated blind (not that step and
+    not the clean ones before it).
+    """
     fresh = _require_op(journal, op_id)
+    undecided = [s for s in fresh["steps"]
+                 if s["state"] == STEP_FAILED
+                 and s.get("write_phase") not in (WRITE_PHASE_PRE,
+                                                  WRITE_PHASE_POST)]
+    if undecided:
+        for step in undecided:
+            journal.set_step_state(op_id, step["seq"], STEP_CONFLICT)
+        journal.set_failure_category(op_id, category)
+        journal.finish(op_id, OP_RECOVERY_REQUIRED)
+        return _failure_result(journal, op_id, category, OP_RECOVERY_REQUIRED)
     applied_now = [s for s in fresh["steps"]
                    if s["state"] == STEP_APPLIED
                    or (s["state"] == STEP_FAILED and s.get("post_revision"))]
+    # Retryable ONLY when nothing wrote at all, i.e. every failed step is a
+    # provable pre-write failure. "No post_revision recorded" is NOT that
+    # proof: an ambiguous step records none either.
+    all_failed = (not applied_now) and all(
+        s.get("write_phase") == WRITE_PHASE_PRE
+        for s in fresh["steps"] if s["state"] == STEP_FAILED)
     final_state = _compensate_applied(journal, op_id, applied_now,
-                                      all_failed=(len(applied_now) == 0))
+                                      all_failed=all_failed)
     journal.set_failure_category(op_id, category)
     return _failure_result(journal, op_id, category, final_state)
 
@@ -876,9 +947,15 @@ def reconcile(journal: OperationJournal, op_id: str) -> Dict[str, Any]:
         commit; the step is ambiguous -> recovery_required.
     For pending steps: verify no write happened (revision unchanged from
     pre_revision); if it changed, ambiguous -> recovery_required.
+    For a failed step whose recorded post-revision still matches the store the
+    write is PROVEN ours: the compensation that a crash interrupted is resumed
+    (anything else is a later external edit -> recovery_required).
     For ``awaiting_host`` steps (a host call with no recorded result: restart
     or a lost response) the store decides, exactly as for a host ERROR -- see
     the branch below. Never a blind compensation.
+    A store that cannot be fingerprinted at all (deleted profile, corrupted
+    config.yaml) fails closed for THIS operation instead of aborting recovery
+    for every other one.
     """
     op = journal.get(op_id)
     if op is None:
@@ -888,39 +965,68 @@ def reconcile(journal: OperationJournal, op_id: str) -> Dict[str, Any]:
         return op
 
     ambiguous = False
-    # Host steps resolved in THIS call whose write landed but whose result was
-    # lost: written-but-unconfirmed, so they join reverse-order compensation
-    # exactly like applied steps.
-    landed_host: List[Dict[str, Any]] = []
     for step in op["steps"]:
-        adapter = _adapter_for_step(step)
-        current = adapter.revision()
+        if step["state"] == STEP_COMPENSATED or (
+                step["state"] == STEP_FAILED
+                and step.get("write_phase") == WRITE_PHASE_PRE):
+            # Already rolled back, or provably never written: nothing here
+            # needs the store fingerprinted.
+            continue
+        try:
+            adapter = _adapter_for_step(step)
+            current = adapter.revision()
+        except (StoreUnreadable, OSError):
+            # The store cannot be fingerprinted at all. Fail closed for THIS
+            # operation -- an escaping exception would abort reconciliation of
+            # every other operation and leave this one undecidable forever.
+            ambiguous = True
+            if step["state"] == STEP_AWAITING_HOST:
+                # Decided now: retire the token so no late result can revive it.
+                journal.clear_host_token(op_id, step["seq"])
+            journal.set_step_phase(op_id, step["seq"], WRITE_PHASE_AMBIGUOUS)
+            journal.set_step_state(op_id, step["seq"], STEP_CONFLICT)
+            journal.set_failure_category(op_id, "store_unreadable")
+            continue
         if step["state"] == STEP_CONFLICT:
             # Already ambiguous (a foreign diff, an unverifiable host write, or
             # a StoreWriteAmbiguous save). reconcile NEVER downgrades it to
             # pending/compensated: a human decides.
             ambiguous = True
         elif step["state"] == STEP_APPLIED:
-            if current != step["post_revision"] or \
-                    not adapter.readback(step["changes"]):
+            try:
+                readback_ok = adapter.readback(step["changes"])
+            except (StoreUnreadable, OSError):
+                # The revision matched but the document cannot be read: the
+                # commit is unverifiable, never silently adopted.
+                readback_ok = False
+                journal.set_failure_category(op_id, "store_unreadable")
+            if current != step["post_revision"] or not readback_ok:
                 ambiguous = True
                 journal.set_step_state(op_id, step["seq"], STEP_CONFLICT)
         elif step["state"] == STEP_FAILED:
-            # A step that failed BEFORE any write (WRITE_PHASE_PRE) provably
-            # never touched the store: a changed revision here is an external
-            # edit, NOT evidence of our write, so it is a known no-write step
-            # and must NOT be escalated to recovery_required.
-            if step.get("write_phase") == WRITE_PHASE_PRE:
+            phase = step.get("write_phase")
+            if phase == WRITE_PHASE_PRE:
+                # A step that failed BEFORE any write provably never touched
+                # the store: a changed revision here is an external edit, NOT
+                # evidence of our write, so it is a known no-write step and
+                # must NOT be escalated to recovery_required.
                 continue
-            # Otherwise the write may have landed ambiguously (a concurrent
-            # write detected after our save, or an exception after disk
-            # replacement) with NO post revision, so it is skipped by ordinary
-            # compensation. If the store no longer matches the pre-write
-            # revision we cannot tell our write from an interloper's -> fail
-            # closed to recovery_required, never a false success.
-            if current != step["pre_revision"]:
-                ambiguous = True
-                journal.set_step_state(op_id, step["seq"], STEP_CONFLICT)
+            post_rev = step.get("post_revision")
+            if phase == WRITE_PHASE_POST and post_rev:
+                # The write is PROVEN ours (a recorded post-revision). If the
+                # store still matches it this is a compensation a crash
+                # interrupted mid-rollback: it is RESUMED below. If the store
+                # moved, a later external edit owns it -> never compensate over.
+                if current != post_rev:
+                    ambiguous = True
+                    journal.set_step_state(op_id, step["seq"], STEP_CONFLICT)
+                continue
+            # Ownership is undecidable (a concurrent write detected after our
+            # save, an exception after disk replacement, or an unclassified
+            # failure) with NO post revision, so ordinary compensation skips it.
+            # Never a false success: fail closed, whatever the revision is now.
+            ambiguous = True
+            journal.set_step_state(op_id, step["seq"], STEP_CONFLICT)
         elif step["state"] == STEP_AWAITING_HOST:
             # A host call was handed out and no result was ever recorded
             # (restart, crash, lost response). Decided exactly like a host
@@ -948,8 +1054,6 @@ def reconcile(journal: OperationJournal, op_id: str) -> Dict[str, Any]:
                     op_id, step["seq"],
                     WRITE_PHASE_POST if post_rev else WRITE_PHASE_PRE)
                 journal.set_failure_category(op_id, category)
-                if post_rev is not None:
-                    landed_host.append(step)
         elif step["state"] == "pending":
             if current != step["pre_revision"]:
                 # The file changed since our recheck. Determine whether the
@@ -975,11 +1079,13 @@ def reconcile(journal: OperationJournal, op_id: str) -> Dict[str, Any]:
             journal.finish(op_id, OP_COMMITTED)
         else:
             applied = [s for s in fresh["steps"] if s["state"] == STEP_APPLIED]
-            landed_seqs = {s["seq"] for s in landed_host}
+            # A step recorded failed WITH a post_revision is a write the engine
+            # PROVED is ours (verification failed after the write landed, or a
+            # rollback was interrupted). Its revision was re-checked above, so
+            # it joins reverse-order compensation exactly like an applied step.
             applied.extend(s for s in fresh["steps"]
                            if s["state"] == STEP_FAILED
-                           and s.get("post_revision")
-                           and s["seq"] in landed_seqs)
+                           and s.get("post_revision"))
             applied.sort(key=lambda s: s["seq"])
             state = _compensate_applied(journal, op_id, applied,
                                         all_failed=len(applied) == 0)

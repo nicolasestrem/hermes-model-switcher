@@ -101,15 +101,21 @@ python scripts/privacy_guard.py
 ```
 
 It scans staged and tracked files and fails closed on credentials, configs, snapshots,
-and related private data. Optional local Git hooks: `bash scripts/install_hooks.sh`.
+and related private data. Optional local Git hooks: `bash scripts/install_hooks.sh`
+(a repository-only helper; the packaged distribution ships no hook installer).
 
 ## Packaging
+
+In the source repository:
 
 ```sh
 python scripts/build_package.py
 ```
 
-Only files named in the explicit `DOC_FILES` manifest are packaged; a local or ignored
+An assembled package ships only `scripts/privacy_guard.py` under `scripts/`;
+`scripts/build_package.py` and the `.github/workflows/ci.yml` described below are
+repository-only and are not present in a packaged distribution. Only files named
+in the explicit `DOC_FILES` manifest are packaged; a local or ignored
 file under `docs/` does not become publishable just by existing. `scripts/build_package.py`
 refuses an existing destination unless you pass `--replace`.
 

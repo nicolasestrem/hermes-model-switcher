@@ -9,6 +9,12 @@ import pytest
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="GNU/Linux lab shell helpers")
 ROOT = Path(__file__).resolve().parents[1]
 
+# Every file the installer's preflight demands of an assembled package: the
+# backend imports python/, loads dashboard/model_catalog.py by file path, and
+# the manifest references dist/index.js + dist/style.css. A package missing
+# any of these installs "successfully" and then breaks at load time.
+from test_install_scripts import PACKAGE_FILES  # noqa: E402
+
 
 def invoke(script, target, user_home, *args):
     env = {**os.environ, "HOME": str(user_home)}
@@ -49,7 +55,7 @@ def test_existing_install_requires_replace_and_preserves_backup(tmp_path, flag_p
     old.mkdir(parents=True)
     (old / "journal.sqlite").write_bytes(b"private recovery data")
     package = tmp_path / "package"
-    for rel in ["dashboard/manifest.json", "dashboard/dist/index.js", "dashboard/plugin_api.py", "__init__.py"]:
+    for rel in PACKAGE_FILES:
         path = package / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("test package input")
@@ -83,7 +89,7 @@ def test_replace_with_default_package(tmp_path):
     script.parent.mkdir(parents=True)
     script.write_bytes((ROOT / "scripts" / "install-local.sh").read_bytes())
     package = repo / "dist-package" / "hermes-model-switcher"
-    for rel in ["dashboard/manifest.json", "dashboard/dist/index.js", "dashboard/plugin_api.py", "__init__.py"]:
+    for rel in PACKAGE_FILES:
         path = package / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("test package input")

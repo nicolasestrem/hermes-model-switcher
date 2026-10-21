@@ -16,7 +16,7 @@ const THEME = {
   bg: "var(--background, var(--surface-color, #16181d))",
   fg: "var(--midground, var(--text-color, #e6e8ee))",
   muted: t("text-muted-color", "#9aa1ad"),
-  border: "var(--color-border, var(--border-color, #2c3038))",
+  border: "var(--color-border, var(--border-color, #3a3f48))",
   danger: "var(--danger-color, var(--hms-danger-text, #e5534b))",
   ok: "var(--success-color, var(--hms-success-text, #3fb950))",
   warn: "var(--warning-color, var(--hms-warning-text, #d29922))",
@@ -797,24 +797,25 @@ function PresetsBar({ presets, onReview, busy }) {
           Select slots, preview your changes, then save a preset to reuse this setup.
         </p>
       )}
-      <div role="list" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+      <ul className="hms-preset-list" style={{ display: "flex", flexWrap: "wrap", gap: 8, listStyle: "none", margin: 0, padding: 0 }}>
         {presets.map((p) => (
-          <button
-            key={p.id}
-            className="hms-preset"
-            data-preset={p.id}
-            disabled={busy}
-            onClick={() => onReview(p)}
-            title={`Billing policy: ${p.billingPolicy}`}
-          >
-            <span className="hms-note">Load preset · </span>
-            <strong>{p.name}</strong>
-            <span style={{ color: THEME.muted, marginLeft: 8, fontSize: 13 }}>
-              {scopeSummary(p)}
-            </span>
-          </button>
+          <li key={p.id}>
+            <button
+              className="hms-preset"
+              data-preset={p.id}
+              disabled={busy}
+              onClick={() => onReview(p)}
+              title={`Billing policy: ${p.billingPolicy}`}
+            >
+              <span className="hms-note">Load preset · </span>
+              <strong>{p.name}</strong>
+              <span style={{ color: THEME.muted, marginLeft: 8, fontSize: 13 }}>
+                {scopeSummary(p)}
+              </span>
+            </button>
+          </li>
         ))}
-      </div>
+      </ul>
     </section>
   );
 }
@@ -985,7 +986,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
         </select></label>
         <button type="button" onClick={() => setFilter({ profileIds: [], family: "all", subfamily: "all", provider: "", model: "", state: "all" })}>Reset filters</button>
       </div>
-      <p style={{ color: THEME.muted, fontSize: 13, margin: "4px 0" }}>{filtered.length} matching slots · {filtered.filter(s => !canSelectSlot(s)).length} read-only. Scroll horizontally to inspect routes.</p>
+      <p id="hms-matrix-count" style={{ color: THEME.muted, fontSize: 13, margin: "4px 0" }}>{filtered.length} matching slots · {filtered.filter(s => !canSelectSlot(s)).length} read-only. Scroll horizontally to inspect routes.</p>
       <div data-testid="matrix-scroll" role="region" aria-label="Scrollable model slots" tabIndex={0} style={{ maxHeight: "70vh", overflowY: "auto" }}>
       <table style={{ borderCollapse: "collapse", width: "100%" }}>
         {/* Screen-reader-only caption. The hidden styles are INLINE: the host
@@ -1005,6 +1006,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
               <input ref={masterRef} type="checkbox" data-testid="select-all"
                 aria-label="Select all matching writable slots" checked={masterChecked}
                 disabled={!writableInView.length}
+                aria-describedby="hms-matrix-count"
                 onChange={onMasterChange} />
             </th>
             {MATRIX_COLUMNS.map((h) => (
@@ -1028,6 +1030,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
                     <input
                       type="checkbox"
                       aria-label={`Select ${s.profileId} ${s.slotId}`}
+                      aria-describedby={!canSelectSlot(s) ? `hms-readonly-${key}` : undefined}
                       checked={checked}
                       disabled={!canSelectSlot(s)}
                       onChange={() => onToggle(key, s)}
@@ -1039,7 +1042,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
                       <span className="hms-note" data-testid="backend-switch-note"> Current backend has no model field; choose a model-bearing backend to switch.</span>
                     )}
                     {!canSelectSlot(s) && (
-                      <span className="hms-note hms-readonly" data-testid="readonly-reason">
+                      <span className="hms-note hms-readonly" data-testid="readonly-reason" id={`hms-readonly-${key}`}>
                         <strong>Read-only</strong>
                         {" — "}{s.note ? s.note : "Routing cannot be changed on this profile."}
                       </span>
@@ -1504,35 +1507,48 @@ function ChangeEditor({
           </button>
           <button className="hms-apply" data-testid="apply-custom"
             aria-disabled={!preview || previewInvalid || busy || !editor.ackUnknownCost}
+            aria-describedby={["hms-apply-gate",
+              preview && !editor.ackUnknownCost ? "hms-apply-cost-note" : null]
+              .filter(Boolean).join(" ")}
             onClick={onApply}
             title={preview ? undefined : "Preview is required before apply"}>
             Apply
           </button>
-          <span style={{ color: THEME.muted, alignSelf: "center" }}>
+          <span id="hms-apply-gate" role="status" aria-live="polite"
+            style={{ color: THEME.muted, alignSelf: "center" }}>
             {busy ? "Request in progress…" : preview
               ? previewInvalid ? "Preview stale — preview your changes again" : `${preview.changes.length} ${preview.changes.length === 1 ? "change" : "changes"} reviewed`
               : !hasSelection ? "" : incompatibleChain || mixedScalar || assignmentMismatch ? "Resolve the selection mismatch first" : "Preview required"}
           </span>
-          {preview && !editor.ackUnknownCost && <span className="hms-note">Acknowledge the cost policy before applying.</span>}
+          {preview && !editor.ackUnknownCost && <span id="hms-apply-cost-note" className="hms-note">Acknowledge the cost policy before applying.</span>}
         </div>
       </div>
     </section>
   );
 }
 
+// Route identities never wrap mid-token (DESIGN §4): every exact id in the
+// headline renders inside a .hms-route-id span so hyphens, slashes and dots
+// are never a line-break opportunity on narrow panes.
+function routeId(text) {
+  return <span className="hms-route-id">{text}</span>;
+}
+
 function changeHeadline(c) {
   const from = c.from ? `${c.from.provider || "default"}/${c.from.model || "automatic"}` : "unset";
-  if (c.action === "remove") return `remove ${from}`;
+  const fromId = routeId(from);
+  if (c.action === "remove") return <>remove {fromId}</>;
   const to = c.to;
-  if (to === null) return `reset to default / inherited routing — was ${from}`;
-  if (Array.isArray(to)) return `turn off fallback — was ${from}`;
+  if (to === null) return <>reset to default / inherited routing — was {fromId}</>;
+  if (Array.isArray(to)) return <>turn off fallback — was {fromId}</>;
   if (to && Array.isArray(to.chain)) {
     if (!to.chain.length) return "disable chain (explicit empty list)";
-    const chain = to.chain.map((e) => `${e.provider}/${e.model}`).join(" → ");
-    return `set chain [${chain}]`;
+    const chain = to.chain.map((e) => routeId(`${e.provider}/${e.model}`));
+    return <>set chain [{chain.map((part, i) => (i > 0 ? [" → ", part] : part))}]</>;
   }
   if (to && Object.hasOwn(to, "chain") && to.chain === null) return "unset chain (inherit)";
-  return `${from} → ${to ? `${to.provider || (c.slotId === "auxiliary.openrouter_model" ? "openrouter" : "default")}/${to.model || "automatic"}` : "?"}`;
+  const toText = to ? `${to.provider || (c.slotId === "auxiliary.openrouter_model" ? "openrouter" : "default")}/${to.model || "automatic"}` : "?";
+  return <>{fromId} → {routeId(toText)}</>;
 }
 
 // Stable React key for a preview row. Index keys re-mount every list item on
@@ -1553,9 +1569,9 @@ function PreviewPanel({ preview }) {
       <ul>
         {preview.changes.map((c, i) => (
           <li key={changeKey(c, i)}>
-            <strong>{c.profileId}</strong> / {c.slotId}: {changeHeadline(c)}
+            <strong className="hms-route-id">{c.profileId}</strong> / <span className="hms-route-id">{c.slotId}</span>: {changeHeadline(c)}
             {c.sideEffects && c.sideEffects.length > 0 && (
-              <span style={{ color: THEME.warn }}> · side effects: {c.sideEffects.join(", ")}</span>
+              <span style={{ color: THEME.muted }}> · also applies: {c.sideEffects.join(", ")}</span>
             )}
             {/* The engine's per-change typed storage diff (relative config paths
                 only). Shown verbatim: the user reviews the ACTUAL writes, not a
@@ -1717,8 +1733,13 @@ function scalarText(v) {
 
 function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUndoGuarded, busy, action }) {
   const ref = useRef(null);
+  const closeRef = useRef(null);
   React.useEffect(() => {
-    if (open && ref.current) ref.current.focus();
+    if (!open) return;
+    // Focus entry lands on the visible Close control (it carries the focus
+    // ring), never on the outline:none container itself.
+    if (closeRef.current) closeRef.current.focus();
+    else if (ref.current) ref.current.focus();
   }, [open]);
   // Focus trap (dialog pattern): document-level CAPTURE listener so the trap
   // holds even if focus escaped the drawer (e.g. browser-default Tab wrap).
@@ -1812,10 +1833,10 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
       <p data-testid="operation-summary" data-attention={attentionCount > 0 ? "true" : "false"}
         data-restored={restoredCount} data-conflict={conflictCount}
         style={{ color: attentionCount > 0 ? THEME.warn : THEME.muted }}>
-        {appliedCount} profiles applied · {attentionCount} need attention
+        {appliedCount} {appliedCount === 1 ? "profile" : "profiles"} applied · {attentionCount} {attentionCount === 1 ? "needs" : "need"} attention
       </p>
       <p className="hms-note">Reference: {operation.id}</p>
-      <button type="button" onClick={onClose} aria-label="Close operation drawer">Close</button>
+      <button ref={closeRef} type="button" onClick={onClose} aria-label="Close operation drawer">Close</button>
       <p style={{ color: THEME.muted }}>Configured ≠ live: existing sessions may keep their old route.</p>
       {failure && (
         <p data-testid="operation-failure" role="alert" data-failure-category={failure}
@@ -1865,14 +1886,14 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
         </label>
         <button className="hms-undo" data-testid="undo-button" disabled={!undoGuarded || busy || operation.undoable === false}
           onClick={onUndo}>Undo operation</button>
-        {undoNote && (
-          <p className="hms-note hms-undo-note" data-testid="undo-unavailable"
-            data-reason={undoNote.key}
-            data-tone={finalState === "recovery_required" ? "danger" : "warning"}
-            aria-live="polite">
-            {undoNote.text}
-          </p>
-        )}
+        {/* Persistent live region: mounted empty and updated in place so the
+            reason is announced when it appears (never a remount). */}
+        <p className="hms-note hms-undo-note" data-testid="undo-unavailable"
+          data-reason={undoNote ? undoNote.key : undefined}
+          data-tone={undoNote && finalState === "recovery_required" ? "danger" : undoNote ? "warning" : undefined}
+          aria-live="polite">
+          {undoNote ? undoNote.text : ""}
+        </p>
       </div>
     </aside>
   );
@@ -2010,21 +2031,28 @@ const PROGRESS_LABEL = {
 // hide where the operation actually is. Entries come from the envelope's
 // per-profile results plus the live host call it is currently waiting on.
 function ApplyProgress({ progress }) {
-  if (!progress || !progress.entries || !progress.entries.length) return null;
+  // Persistent live region: mounted empty from the start and updated in place,
+  // so the first progress message is announced instead of appearing with the
+  // region (DESIGN §8). Idle-empty chrome is suppressed in styles.css.
+  const entries = progress && Array.isArray(progress.entries) ? progress.entries : [];
   return (
     <div data-testid="apply-progress" role="status" aria-live="polite"
       className="hms-apply-progress">
-      <strong style={{ display: "block", marginBottom: 4 }}>
-        Apply progress{progress.note ? ` — ${progress.note}` : ""}
-      </strong>
-      <ol style={{ margin: 0, paddingLeft: 18 }}>
-        {progress.entries.map((entry) => (
-          <li key={entry.key} data-testid={`apply-step-${entry.key}`}
-            data-step-status={entry.status}>
-            {entry.label} — {PROGRESS_LABEL[entry.status] || "pending"}
-          </li>
-        ))}
-      </ol>
+      {entries.length > 0 && (
+        <>
+          <strong style={{ display: "block", marginBottom: 4 }}>
+            Apply progress{progress.note ? ` — ${progress.note}` : ""}
+          </strong>
+          <ol style={{ margin: 0, paddingLeft: 18 }}>
+            {entries.map((entry) => (
+              <li key={entry.key} data-testid={`apply-step-${entry.key}`}
+                data-step-status={entry.status}>
+                {entry.label} — {PROGRESS_LABEL[entry.status] || "pending"}
+              </li>
+            ))}
+          </ol>
+        </>
+      )}
     </div>
   );
 }
@@ -2094,7 +2122,10 @@ function App() {
   // profile. Loaded after the config-only /state paint, never blocking it; a
   // profile whose route is missing keeps `null` parts plus one notice line.
   const [host, setHost] = useState({ profiles: {} });
-  const [hostNotice, setHostNotice] = useState({ text: "Loading host model data…", kind: "loading" });
+  // Persistent live region (DESIGN §8): mounts EMPTY and is updated in place
+  // by refreshHost — a notice that ships with the first paint is never
+  // announced, because the region and its content appear together.
+  const [hostNotice, setHostNotice] = useState({ text: "", kind: "loading" });
   const mutationLock = useRef(false);
   const [recoveryNeeded, setRecoveryNeeded] = useState(false);
   const applyOpener = useRef(null);
@@ -2564,6 +2595,10 @@ function App() {
   // Drawer focus management: remember who opened it so Escape/Close can hand
   // focus back (dialog pattern), and reuse the same entry point for undo.
   const drawerOpener = useRef(null);
+  // An opener that UNMOUNTS while the drawer is open (the toolbar's Show last
+  // operation button) cannot be refocused synchronously; remember its
+  // testid and revive the same control after the drawer unmounts.
+  const [drawerRevive, setDrawerRevive] = useState(null);
   const openDrawer = (opener = document.activeElement) => {
     drawerOpener.current = opener;
     setShowOperation(true);
@@ -2573,9 +2608,24 @@ function App() {
     setProgress(null);
     const el = drawerOpener.current;
     drawerOpener.current = null;
-    const target = el?.isConnected && !el.disabled ? el : rootRef.current?.querySelector('[data-testid="refresh-state"]');
-    target?.focus();
+    if (el && el.isConnected && !el.disabled) {
+      el.focus();
+      setDrawerRevive(null);
+      return;
+    }
+    // Disconnected (or newly disabled) opener: revive after render, else fall
+    // back to Refresh state so focus never lands on <body>.
+    setDrawerRevive(el && !el.disabled ? el.getAttribute("data-testid") : "");
   };
+  React.useEffect(() => {
+    if (showOperation || drawerRevive === null) return;
+    const revived = drawerRevive
+      ? rootRef.current?.querySelector(`[data-testid="${drawerRevive}"]`) : null;
+    setDrawerRevive(null);
+    const target = revived && !revived.disabled ? revived
+      : rootRef.current?.querySelector('[data-testid="refresh-state"]');
+    target?.focus();
+  }, [showOperation, drawerRevive]);
 
   if (loadError) {
     return (
@@ -2607,19 +2657,21 @@ function App() {
       {state.presetsCorrupt && <p role="alert" style={{ color: THEME.warn }}>
         A damaged preset store was saved aside for recovery. Its presets are not loaded; recover them before replacing saved presets.
       </p>}
-      {state.profiles.some(p => p.inventoryWarnings?.length) && <div role="alert" data-testid="inventory-warnings" className="hms-note">
+      {state.profiles.some(p => p.inventoryWarnings?.length) && <div role="status" aria-live="polite" data-testid="inventory-warnings" className="hms-note">
         <strong>Some runtime selectors could not be discovered.</strong>
         <ul>{state.profiles.flatMap(p => (p.inventoryWarnings || []).map((warning, i) => <li key={`${p.id}/${i}`}>{p.name || p.id}: {warning}</li>))}</ul>
       </div>}
       {/* Host half: Hermes' own model routes. A route that is missing or
           unreachable is stated once, in fixed words, and never blocks the tab
-          — config-only rows stay usable and the backend degrades truthfully. */}
-      {hostNotice.text && <p role="status" aria-live="polite" data-testid="host-notice"
-        data-state={hostNotice.kind} className="hms-note hms-host-notice">{hostNotice.text}</p>}
+          — config-only rows stay usable and the backend degrades truthfully.
+          The region itself is PERSISTENT: empty while idle so the first
+          message lands in an existing live region (DESIGN §8). */}
+      <p role="status" aria-live="polite" data-testid="host-notice"
+        data-state={hostNotice.kind} className="hms-note hms-host-notice">{hostNotice.text}</p>
       <PresetsBar presets={state.presets} onReview={reviewPreset} busy={busy} />
       <div className="hms-workspace-tools">
         <button data-testid="refresh-state" disabled={busy} onClick={() => load()}>Refresh state</button>
-        {operation && !showOperation && <button onClick={() => openDrawer()}>Show last operation</button>}
+        {operation && !showOperation && <button data-testid="show-last-operation" onClick={() => openDrawer()}>Show last operation</button>}
         <button type="button" data-testid="catalog-toggle" aria-expanded={catalogOpen}
           aria-controls="hms-model-catalog" onClick={toggleCatalog}>
           {catalogTriggerCount === null

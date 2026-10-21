@@ -33,32 +33,39 @@ Built for the Hermes Dashboard, using its themes and authenticated transport. MI
 
 *The compiled plugin in a Dashboard SDK fixture with synthetic lab profiles. This
 screenshot demonstrates the interface; it is not evidence of live Dashboard
-deployment or provider inference.*
+deployment or provider inference. Captured at commit `02703e3` (pre-0.3.0),
+carried unchanged; current-UI captures are pending.*
 
 ![The same interface following the host's light theme](docs/images/model-switcher-light-1440.png)
 
-*The plugin follows the host Dashboard's theme; the light theme is shown here.*
+*The plugin follows the host Dashboard's theme; the light theme is shown here.
+Captured at commit `02703e3` (pre-0.3.0), carried unchanged; current-UI captures
+are pending.*
 
 ![Model catalog with list prices per 1M tokens](docs/images/model-switcher-catalog-1440.png)
 
 *The provider-grouped catalog in the Dashboard SDK fixture with synthetic lab profiles.
-This is a pre-0.3.0 capture; current catalog prices come from the public host options
-payload, not direct plugin cache reads, inference or recorded spend.*
+Captured at commit `02703e3` (pre-0.3.0), carried unchanged; current-UI captures
+are pending. Current catalog prices come from the public host options payload, not
+direct plugin cache reads, inference or recorded spend.*
 
 ![Model catalog on a narrow screen](docs/images/model-switcher-catalog-375.png)
 
 *The same catalog on a narrow screen; a fixture render of the compiled plugin, not a
-live Dashboard deployment or provider execution.*
+live Dashboard deployment or provider execution. Captured at commit `02703e3`
+(pre-0.3.0), carried unchanged; current-UI captures are pending.*
 
 ![The routing matrix on a narrow screen](docs/images/model-switcher-dark-375.png)
 
-*On a narrow screen the matrix scrolls horizontally inside its own region.*
+*On a narrow screen the matrix scrolls horizontally inside its own region. Captured
+at commit `02703e3` (pre-0.3.0), carried unchanged; current-UI captures are pending.*
 
 ### In the real Hermes Dashboard
 
-These pre-0.3.0 captures show an isolated lab with two synthetic profiles (default
-and research) and synthetic routes. They are historical evidence, not verification
-of the refactored host-step protocol:
+Captured at commit `02703e3` (pre-0.3.0), carried unchanged; current-UI captures
+are pending. These captures show an isolated lab with two synthetic profiles
+(default and research) and synthetic routes. They are historical evidence, not
+verification of the refactored host-step protocol:
 
 ![Routing matrix in the real Hermes Dashboard](docs/images/model-switcher-real-dashboard.png)
 
@@ -117,8 +124,7 @@ Hermes plugin commands; the plugin does not ship a self-updater.
 **Pinned installs do not move with `update`.** Hermes refuses that command rather
 than silently replacing your chosen revision. To move a pin, rerun `hermes plugins
 install` with the same repository, `--force`, and `--ref` followed by the new commit's
-full 40-character SHA. The guarded lab check verified that same-source reinstalls
-preserve untracked local state.
+full 40-character SHA.
 
 The Dashboard bundle is already built and committed. If the installer reports that
 build-time Node dependencies were skipped, you do not need to install them to use
@@ -127,7 +133,7 @@ these shipped assets; Node.js is needed when rebuilding the UI from source.
 ### From the built package
 
 ```sh
-python scripts/build_package.py        # assembles dist-package/ (needs a built UI)
+python scripts/build_package.py        # in the source repository; assembles dist-package/ (needs a built UI)
 ```
 
 `dist-package/` contains the backend, the prebuilt Dashboard assets, and the
@@ -217,8 +223,9 @@ and exact-model removal; see [advanced routing](docs/technical-reference.md).
 - **Prerequisite: connected credentials.** A missing connection blocks the change.
 - **Prices are informational.** Catalog list prices can be stale or absent; they are
   not spend estimates, not cost approvals, and unknown cost is never treated as free.
-- **Scale.** Large profile sets increase first-request (cold discovery) time; 50
-  synthetic profiles took about seven seconds in the lab. See
+- **Scale.** Large profile sets increase first-request (cold discovery) time. No
+  performance measurement from the pre-refactor candidate is carried forward as
+  0.3.0 acceptance. See
   [release readiness](docs/release-readiness.md) and
   [backlog](docs/backlog.md).
 - **Platform scope.** Linux is the verification target; macOS and native Windows are

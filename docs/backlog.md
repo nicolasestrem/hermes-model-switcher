@@ -5,6 +5,10 @@ Nothing here contains private host data.
 
 ## Performance
 
+Measurements below are pre-0.3.0 lab observations recorded before the
+public-seams refactor; they are not carried forward as 0.3.0 acceptance (see
+[release readiness](release-readiness.md)).
+
 - **Cold discovery at scale.** The first state request for 50 synthetic profiles took
   about seven seconds in the lab; subsequent requests were ~1 s. No cache was added,
   because invalidation would have to preserve per-profile and per-runtime freshness.

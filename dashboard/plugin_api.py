@@ -56,7 +56,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import JSONResponse
@@ -615,14 +615,52 @@ def _clean_endpoint_url(value: Any) -> Optional[str]:
     return raw
 
 
-def aux_host_route(desc: Any, payload: Any, current: Any) -> Optional[dict]:
+# Host-assignable auxiliary tasks: POST /api/model/set accepts exactly the
+# host's built-in slots plus plugin-registered tasks (hermes-ref
+# hermes_cli/web_server_config.py: _AUX_TASK_SLOTS and _aux_task_slots());
+# every other runtime-default auxiliary block (background_review,
+# memory_query_rewrite, moa_aggregator, moa_reference, monitor,
+# tts_audio_tags) is refused with 400 "unknown auxiliary task". Those rows
+# stay visible in the inventory but their assignments must route through the
+# backend public writer, never a host step.
+_HOST_AUX_TASK_SLOTS = frozenset((
+    "vision", "compression", "skills_hub", "approval", "mcp",
+    "title_generation", "review", "voice_chat", "triage_specifier",
+    "kanban_decomposer", "profile_describer", "curator",
+))
+
+
+def _host_assignable_aux_tasks(host_aux: Any) -> frozenset:
+    """Auxiliary tasks POST /api/model/set accepts for one profile.
+
+    The host's built-in slots plus the plugin-registered tasks its auxiliary
+    payload lists (rows with a non-empty ``plugin`` field — the same rows
+    ``_plugin_aux_tasks()`` feeds the host's ``_aux_task_slots()``). With no
+    host payload only the built-ins are provably assignable; a task outside
+    this set is refused by the host route, so it stays a backend write.
+    """
+    tasks: Set[str] = set(_HOST_AUX_TASK_SLOTS)
+    rows = host_aux.get("tasks") if isinstance(host_aux, dict) else None
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("task") or "").strip()
+            if key and str(row.get("plugin") or "").strip():
+                tasks.add(key)
+    return frozenset(tasks)
+
+
+def aux_host_route(desc: Any, payload: Any, current: Any,
+                   host_assignable: Any = None) -> Optional[dict]:
     """The host call an aux change maps exactly onto, or None (stay backend).
 
     "Exactly" is the whole rule: the host's own result must EQUAL the reviewed
     result. Removals, extra keys,
     an endpoint that needs a protocol/api_mode the route will not write, and a
     provider change whose cleanup would delete leaves the review keeps all stay
-    BACKEND.
+    BACKEND. A task the host route refuses (not host-assignable) is never
+    handed to it: it stays a backend write the review still names exactly.
     """
     if desc is None or getattr(desc, "family", None) is not SlotFamily.AUXILIARY:
         return None
@@ -634,6 +672,11 @@ def aux_host_route(desc: Any, payload: Any, current: Any) -> Optional[dict]:
     task = path[len("auxiliary."):]
     if not task or "." in task or task == "openrouter_model":
         return None  # the cross-cutting fallback override is a bare model id
+    assignable = _HOST_AUX_TASK_SLOTS if host_assignable is None \
+        else frozenset(host_assignable)
+    if task not in assignable:
+        return None  # the host route refuses this task (400 unknown auxiliary
+        # task); the reviewed backend writer applies it instead
     if not isinstance(payload, dict):
         return None
     if not set(payload).issubset(_AUX_PAYLOAD_KEYS):
@@ -762,12 +805,28 @@ def _salvage_presets(path: Path) -> Tuple[List[ReviewedPreset], bool]:
     return salvaged, dropped
 
 
+def _tighten_presets_file_perms(path: Path) -> None:
+    """A pre-existing presets.json becomes 0600 on load.
+
+    The reviewed intents inside can embed credential-bearing values; a file
+    created wider (by an older release or a foreign writer) must not stay
+    world-readable once this process reads it. Best-effort: on a filesystem
+    that refuses chmod the store must still load, and the next persist
+    rewrites the file private from creation.
+    """
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def _preset_store() -> PresetStore:
     global _PRESET_CORRUPT
     store = PresetStore()
     path = _state_dir() / "presets.json"
     _PRESET_CORRUPT = bool(next(path.parent.glob("presets.json.corrupt-*"), None))
     if path.exists():
+        _tighten_presets_file_perms(path)
         persist_cleaned = False
         try:
             salvaged, dropped = _salvage_presets(path)
@@ -823,8 +882,15 @@ def _persist_presets(store: PresetStore) -> None:
             # every one-click apply
             "ui_changes": _ui_changes_for_preset(p),
         })
+    # The reviewed intents persisted here can embed credential-bearing
+    # values (inline api_key routes, custom base_urls): the file is private
+    # (0600) from the first byte — never a world-readable tempfile. A failed
+    # write raises; os.replace swaps the private file in atomically.
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(records, indent=2))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)  # umask can only narrow; a wider leftover tmp must not survive
+    with os.fdopen(fd, "w") as fh:
+        fh.write(json.dumps(records, indent=2))
     os.replace(tmp, path)
 
 
@@ -1358,6 +1424,33 @@ class MainRouteUnauthenticated(MainRouteRefused):
     public_reason = "provider is not authenticated for this profile"
 
 
+class MainRouteUncatalogued(MainRouteRefused):
+    """The supplied host catalog cannot resolve the typed provider.
+
+    The host persists its OWN canonical provider id (aliases resolved,
+    lowercased); a provider the catalog evidence cannot resolve leaves that
+    persisted form unprovable, so readback could only end in a false
+    external_edit. Refuse with this fixed reason instead."""
+    public_reason = ("provider is not in this profile's host catalog; pick a "
+                     "provider the catalog lists")
+
+
+def _host_canonical_provider(row: Optional[dict], typed: str) -> str:
+    """The provider id the host persists for a main assignment.
+
+    With a matching host options row it is the row's canonical identity
+    (the host resolves aliases and lowercases before persisting — the slug
+    is that canonical id). Without a row (no catalog evidence at all) the
+    typed value is journalled as before: the degraded no-evidence path keeps
+    its warning-and-host-validates contract."""
+    if row is not None:
+        for key in ("slug", "provider_id", "id"):
+            value = str(row.get(key) or "").strip()
+            if value:
+                return value
+    return typed
+
+
 def _stored_main_route(cfg: Dict[str, Any]) -> Tuple[str, str]:
     """The stored ``model.provider`` / ``model.default`` as plain strings."""
     provider = _get_dotted(cfg, "model.provider")
@@ -1385,36 +1478,45 @@ def _main_host_target(cfg: Dict[str, Any], to: Dict[str, Any],
     Validation here is deliberately narrow: the host owns canonicalization and
     model validation. A provider row the host catalog reports as
     UNAUTHENTICATED refuses the preview; a provider/model the catalog does not
-    know is only a WARNING (the host validates at write time).
+    know is only a WARNING (the host validates at write time) — except the
+    provider itself when catalog evidence was supplied: the host persists its
+    own canonical id, so an unresolvable provider is refused (its persisted
+    form would be unprovable at readback) instead of warned about.
     """
     provider = str((to or {}).get("provider") or "").strip()
     model = str((to or {}).get("model") or "").strip()
     if not provider or not model:
         raise MainRouteIncomplete(MainRouteIncomplete.public_reason)
-    stored_provider, stored_model = _stored_main_route(cfg)
-    if stored_provider == provider and stored_model == model:
-        raise MainRouteNoOp(MainRouteNoOp.public_reason)
     options = (host or _EMPTY_HOST).options(profile)
-    warnings: List[str] = []
     row = _host_option_row(options, provider)
+    if row is None and isinstance(options, dict):
+        raise MainRouteUncatalogued(MainRouteUncatalogued.public_reason)
+    # Journal the id the HOST will persist (aliases resolved, lowercased):
+    # readback compares this value against the stored config, so the typed
+    # spelling must never survive into the semantic keys.
+    canonical = _host_canonical_provider(row, provider)
+    stored_provider, stored_model = _stored_main_route(cfg)
+    if stored_provider == canonical and stored_model == model:
+        raise MainRouteNoOp(MainRouteNoOp.public_reason)
+    warnings: List[str] = []
     if _host_provider_authenticated(options, provider) is False:
         raise MainRouteUnauthenticated(MainRouteUnauthenticated.public_reason)
+    ids = _host_option_model_ids(options, provider) if row is not None else None
+    model_catalogued = ids is not None and model in ids
     if isinstance(options, dict):
         if row is None:
             warnings.append(
                 "provider is not in this profile's host catalog; the host "
                 "validates the assignment at write time")
-        else:
-            ids = _host_option_model_ids(options, provider)
-            if ids is not None and model not in ids:
-                warnings.append(
-                    "model is not in this profile's host catalog; the host "
-                    "validates the assignment at write time")
+        elif not model_catalogued:
+            warnings.append(
+                "model is not in this profile's host catalog; if Hermes saves "
+                "it under a different spelling, the change stops for review")
     return {
-        "changes": {"model.provider": provider, "model.default": model},
-        "host_call": main_host_call(profile, provider, model),
+        "changes": {"model.provider": canonical, "model.default": model},
+        "host_call": main_host_call(profile, canonical, model),
         "readback_keys": list(_MAIN_READBACK_KEYS),
-        "allowed_prefixes": main_allowed_prefixes(cfg, provider, options),
+        "allowed_prefixes": main_allowed_prefixes(cfg, canonical, options),
         "warnings": warnings,
     }
 
@@ -1714,7 +1816,9 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
             blocked.append({"profileId": pid, "slotId": c.get("slotId"),
                             "reason": "change is a no-op for this slot"})
             continue
-        route = aux_host_route(desc, payload, _get_dotted(cfg, desc.storage_path))
+        route = aux_host_route(desc, payload, _get_dotted(cfg, desc.storage_path),
+                               host_assignable=_host_assignable_aux_tasks(
+                                   host.auxiliary(pid)))
         if route is not None:
             # An auxiliary task route the host route expresses EXACTLY: the
             # host writes provider/model(/base_url) inside auxiliary.<task>,

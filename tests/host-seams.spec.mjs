@@ -63,8 +63,10 @@ test("host data loads through the SDK with an explicit profile per profile and r
   expect(preview.body.host.profiles.default.auxiliary.main).toEqual({ provider: "anthropic", model: "claude-sonnet-4-6" });
   expect(preview.body.host.profiles.default.moa.presets.default.aggregator.provider).toBe("anthropic");
 
-  // No prettified host text is ever rendered as a catalog or state note.
-  await expect(page.getByTestId("host-notice")).toHaveCount(0);
+  // No prettified host text is ever rendered as a catalog or state note. The
+  // region itself is persistent (DESIGN §8) — a clean host load leaves it
+  // EMPTY, not absent.
+  await expect(page.getByTestId("host-notice")).toHaveText("");
 });
 
 test("apply performs a backend step then a host step on different profiles, shown per store", async ({ page }) => {

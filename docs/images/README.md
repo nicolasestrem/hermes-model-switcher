@@ -1,8 +1,9 @@
 # Product screenshots
 
-All eight PNGs in this directory were regenerated on **2026-10-19** from the current
-routing editor (merged as PR #13). They document the Model Switcher interface, not
-provider execution.
+All eight PNGs in this directory were captured on **2026-10-19** at commit
+`02703e3` (pre-0.3.0), from the routing editor as merged in PR #13, and are
+carried unchanged; current-UI captures are pending. They document the Model
+Switcher interface, not provider execution.
 
 ## Fixture renders — the compiled plugin
 
