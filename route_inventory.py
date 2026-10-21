@@ -415,7 +415,11 @@ def _host_aux_entries(host_aux: Any) -> Dict[str, Dict[str, Any]]:
             _record_inventory_warning(_HOST_AUX_ROW_MALFORMED_WARNING)
             continue
         key = row.get("task")
-        if not (isinstance(key, str) and key.strip()):
+        # Match Hermes' register_auxiliary_task grammar exactly: a task is one
+        # config key, never a dotted path. Do not repair/strip invalid input;
+        # str.isalnum() intentionally allows the host's Unicode alphanumerics.
+        if not (isinstance(key, str) and key
+                and all(c.isalnum() or c == "_" for c in key)):
             _record_inventory_warning(_HOST_AUX_ROW_MALFORMED_WARNING)
             continue
         plugin = row.get("plugin")
@@ -430,8 +434,8 @@ def _host_aux_entries(host_aux: Any) -> Dict[str, Dict[str, Any]]:
         if not plugin.strip():
             continue
         entry: Dict[str, Any] = {
-            "key": key.strip(),
-            "display_name": str(row.get("label") or "").strip() or key.strip(),
+            "key": key,
+            "display_name": str(row.get("label") or "").strip() or key,
             "description": str(row.get("hint") or ""),
             "plugin": plugin.strip(),
         }

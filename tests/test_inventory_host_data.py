@@ -234,6 +234,61 @@ def test_malformed_host_payload_hides_plugin_rows_with_a_warning(payload):
     assert "no plugin" not in joined.lower()
 
 
+@pytest.mark.parametrize("task", [
+    "host.demo",
+    "goal_judge.threshold",
+    "goal_judge.enforcement.nested",
+    "review.threshold",
+    " host_demo",
+    "host_demo ",
+    "host demo",
+    "host\tdemo",
+    "host_demo\n",
+    "host-demo",
+    "host/demo",
+    "host\u200bdemo",       # zero-width space
+    "host\uff0edemo",       # full-width dot
+    "host_demo\u0301",      # combining mark, not an alphanumeric character
+    "host_\U0001f512",      # symbol
+])
+def test_invalid_host_task_key_is_hidden_and_cannot_be_previewed(task):
+    from hermes_cli.plugins_aux_tasks import build_auxiliary_task_entry
+
+    # Assert against the actual host registration grammar, not an invented
+    # ASCII-only regex or a strip/normalization step.
+    with pytest.raises(ValueError, match="alphanumeric characters and underscores"):
+        build_auxiliary_task_entry(
+            "plug", "plug", task, display_name="Task", description="",
+            defaults=None, inherit_from=None, registered={})
+
+    host = _host_aux(_host_row(task, plugin="plug"),
+                     _host_row("valid_task", plugin="plug"))
+    cfg = {"auxiliary": {"goal_judge": {"threshold": 0.8, "enforcement": "warn"}}}
+    result = ri.build_inventory(cfg, host_aux=host)
+    plugin_ids = {o.descriptor.slot_id for o in result if o.descriptor.metadata.get("plugin")}
+    assert plugin_ids == {"auxiliary.valid_task"}
+    assert any("malformed row" in w and "hidden" in w for w in result.warnings)
+
+    edits = [ri.RouteEdit(f"auxiliary.{task}", {"provider": "nous", "model": "own"})]
+    preview = ri.preview_changes(cfg, edits, host_aux=host)
+    assert not preview.clean
+    assert preview.changes == ()
+    assert cfg == {"auxiliary": {"goal_judge": {"threshold": 0.8, "enforcement": "warn"}}}
+
+
+@pytest.mark.parametrize("task", ["host_demo_2", "_", "2demo", "caf\u00e9_\u0662"])
+def test_valid_host_task_key_is_preserved_exactly(task):
+    host = _host_aux(_host_row(task, plugin="plug"))
+    result = ri.build_inventory({}, host_aux=host)
+    obs = next(o for o in result if o.descriptor.slot_id == f"auxiliary.{task}")
+    assert obs.descriptor.storage_path == f"auxiliary.{task}"
+    assert result.warnings == []
+    preview = ri.preview_changes({}, [ri.RouteEdit(
+        f"auxiliary.{task}", {"provider": "nous", "model": "own"})], host_aux=host)
+    assert preview.clean, preview.rejected
+    assert [c.storage_path for c in preview.changes] == [f"auxiliary.{task}"]
+
+
 @pytest.mark.parametrize("plugin", [None, ""])
 def test_rows_without_a_plugin_owner_are_not_plugin_slots(plugin):
     """Built-in rows carry no ``plugin`` owner (or an empty one): they are not
