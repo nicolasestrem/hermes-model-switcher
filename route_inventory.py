@@ -531,8 +531,7 @@ def _aux_inherit_cycle(task: str, inherit: str,
 
 
 def _aux_observation_source(cfg: Dict[str, Any], task: str,
-                            entries_by_key: Mapping[str, Dict[str, Any]],
-                            obs_source: str) -> Optional[str]:
+                            entries_by_key: Mapping[str, Dict[str, Any]]) -> Optional[str]:
     """Return ``"inherited"`` when an UNPINNED plugin task resolves through its
     declared ``inherit_from`` base; else ``None`` (keep the stored source).
 
@@ -586,7 +585,7 @@ def _aux_observation(cfg: Dict[str, Any], desc: SlotDescriptor,
         return obs  # rows without selector semantics
     effective = _aux_effective_route(cfg, task, entries_by_key)
     effective = _host_effective_overlay(effective, entries_by_key.get(task))
-    source = _aux_observation_source(cfg, task, entries_by_key, obs.source)
+    source = _aux_observation_source(cfg, task, entries_by_key)
     if source is None:
         return replace(obs, effective=effective)
     return replace(obs, effective=effective, source=source)
@@ -977,10 +976,6 @@ def _route_payload_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _is_route_payload(value: Any) -> bool:
     return isinstance(value, dict) and "model" in value
-
-
-def _is_chain_payload(value: Any) -> bool:
-    return isinstance(value, dict) and "chain" in value
 
 
 def _shape_refusal(slot_id: str, current: Any, new_stored: Any) -> Optional[str]:

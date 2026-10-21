@@ -63,7 +63,6 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Response
@@ -80,8 +79,6 @@ from model_switcher.adapters import _get_dotted
 from model_switcher.adapters import _MISSING as _STORE_MISSING
 from model_switcher.engine import (
     ApplyBlocked,
-    ApplyHostCallUnbound,
-    ApplyHostResultRejected,
     ApplyHostTokenMismatch,
     apply_operation,
     plan_operation,
@@ -95,7 +92,6 @@ from model_switcher.journal import (
     OP_COMMITTED,
     OP_PARTIAL,
     OP_PENDING,
-    OP_RECOVERY_REQUIRED,
     OP_UNDONE,
     OperationJournal,
     to_public_operation,
@@ -1568,8 +1564,6 @@ def _removal_changes_for(desc, cfg: Dict[str, Any],
             changes[comp] = None
         elif _get_dotted(cfg, comp) is not _STORE_MISSING:
             changes[comp] = None
-    if not changes:
-        raise RemovalNoOp("change is a no-op for this slot")
     return changes
 
 

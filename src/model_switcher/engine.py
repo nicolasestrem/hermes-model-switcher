@@ -105,7 +105,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import os
 import secrets
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -129,7 +128,6 @@ from .journal import (
     STEP_PENDING,
     OP_COMMITTED,
     OP_COMPENSATED,
-    OP_PARTIAL,
     OP_PENDING,
     OP_RECOVERY_REQUIRED,
     OP_UNDONE,
