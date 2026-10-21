@@ -31,7 +31,7 @@ Built for the Hermes Dashboard, using its themes and authenticated transport. MI
 
 ## Screenshots
 
-Current **0.3.0** captures, taken 2026-10-21 at 1280x800 (the last one at 390x844); the UI is unchanged in 0.3.1.
+Current **0.3.2** captures, taken 2026-10-21 at 1280x800 (the last one at 390x844).
 Boundary: *Dashboard SDK fixture with the plugin's real backend and Hermes' own
 `/api/model/*` routers over an isolated lab home.* That is not a live Dashboard
 deployment and not provider execution: the plugin's real FastAPI backend performs
@@ -41,34 +41,34 @@ profile data, credentials, host paths or ports appear in the images. Every captu
 is a viewport screenshot at device scale 1, and the run asserts no console errors,
 no failed requests and no page-level horizontal overflow.
 
-![Model Switcher routing matrix and change editor in the host's dark theme](docs/images/model-switcher-0.3.0-dashboard.png)
+![Model Switcher routing matrix and change editor in the host's dark theme](docs/images/model-switcher-0.3.2-dashboard.png)
 
 *Idle workspace in the host's dark theme: the profile filter, the routing matrix
 and the change editor before any target is selected.*
 
-![A reviewed change from anthropic/claude-sonnet-4-6 to zhipu/glm-5.3-flash](docs/images/model-switcher-0.3.0-preview.png)
+![A reviewed change from anthropic/claude-sonnet-4-6 to zhipu/glm-5.3-flash](docs/images/model-switcher-0.3.2-preview.png)
 
 *Preview before Apply: the exact before → after route for `default/main` plus the
 persisted config diff, with the unknown-cost acknowledgement in place.*
 
-![Operation drawer after Apply showing Applied + read back](docs/images/model-switcher-0.3.0-operation.png)
+![Operation drawer after Apply showing Applied + read back](docs/images/model-switcher-0.3.2-operation.png)
 
 *After Apply: per-profile `Applied + read back`, the operation reference, the
 revision transition, and the guarded Undo control.*
 
-![Provider-grouped model catalog with per-1M-token price columns](docs/images/model-switcher-0.3.0-catalog.png)
+![Provider-grouped model catalog with per-1M-token price columns](docs/images/model-switcher-0.3.2-catalog.png)
 
 *The bird's-eye catalog, grouped by provider, with input/output price columns and a
 status per row. This offline lab host publishes no pricing fields, so rows read
 "price not published" — unknown is never treated as free. Prices, when a host
 supplies them, come from the public host options payload.*
 
-![The same interface following the host's light theme](docs/images/model-switcher-0.3.0-light.png)
+![The same interface following the host's light theme](docs/images/model-switcher-0.3.2-light.png)
 
 *The plugin follows the host Dashboard theme; the same idle workspace under the
 light host tokens.*
 
-![The routing matrix on a 390px-wide viewport](docs/images/model-switcher-0.3.0-narrow.png)
+![The routing matrix on a 390px-wide viewport](docs/images/model-switcher-0.3.2-narrow.png)
 
 *At 390x844 the editor stacks above the matrix and the matrix scrolls horizontally
 inside its own region; the page itself does not overflow.*
@@ -139,7 +139,7 @@ a Python version compatible with your Hermes release. This plugin declares Pytho
 `>=3.10`; the Hermes runtime it integrates with requires Python `>=3.11`. Linux is the
 verification target; macOS and native Windows are unverified.
 
-Version **0.3.1** needs the public Dashboard `/api/model/options`,
+Version **0.3.2** needs the public Dashboard `/api/model/options`,
 `/api/model/auxiliary`, `/api/model/moa` and `/api/model/set` routes. The UI uses
 the authenticated Dashboard SDK; no private Hermes imports or direct pricing-cache
 reads are used by plugin runtime code. Missing required capabilities or host write
@@ -276,11 +276,11 @@ and exact-model removal; see [advanced routing](docs/technical-reference.md).
   not spend estimates, not cost approvals, and unknown cost is never treated as free.
 - **Scale.** Large profile sets increase first-request (cold discovery) time. No
   performance measurement from the pre-refactor candidate is carried forward as
-  0.3.1 acceptance. See
+  0.3.2 acceptance. See
   [release readiness](docs/release-readiness.md) and
   [backlog](docs/backlog.md).
 - **Platform scope.** Linux is the verification target; macOS and native Windows are
-  unverified. Earlier green results do not establish final 0.3.1 compatibility.
+  unverified. Earlier green results do not establish final 0.3.2 compatibility.
 - **Host capabilities required.** Missing public config, home or secret capabilities make
   the plugin read-only; missing host payloads show notices and unknown data. Main and
   compatible auxiliary writes need `/api/model/set`; other slots use public config

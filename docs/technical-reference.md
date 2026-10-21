@@ -172,7 +172,7 @@ the host gates plugin requests, not a duplicate plugin-side backend gate.
 
 The tested reference is Hermes **v0.22.3**, commit
 `5b147ab036d6d19131bff8d20701b5001eab844a`. This is a reproducibility pin, not a
-minimum or exclusive supported version. Final 0.3.1 verification is recorded
+minimum or exclusive supported version. Final 0.3.2 verification is recorded
 separately in [release readiness](release-readiness.md).
 
 Profiles use public `hermes_constants` identity/home helpers. Config and secret

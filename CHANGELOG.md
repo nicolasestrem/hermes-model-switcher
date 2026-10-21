@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.3.2
+
+### Catalog captures re-taken
+
+- The six listing captures are re-taken on the fixed UI and renamed
+  `model-switcher-0.3.2-*.png`; the 0.3.0 catalog capture showed every model
+  id twice (the bug fixed below). The packaged image list, README, image
+  README and catalog-submission template point at the new files.
 
 ### Catalog rows no longer show the model id twice in a solid bar
 
