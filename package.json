@@ -7,7 +7,9 @@
   "type": "module",
   "scripts": {
     "build": "node ui/build.mjs",
-    "test": "playwright test --config=tests/playwright.config.mjs"
+    "test": "playwright test --config=tests/playwright.config.mjs",
+    "check:design": "npx --yes impeccable@4.7.0 detect ui/src/",
+    "check:live": "node scripts/live-catalog-check.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.0",
