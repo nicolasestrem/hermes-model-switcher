@@ -1,17 +1,9 @@
-"""Reviewed presets and billing approval policy (T5).
+"""Reviewed route assignments with explicit billing approval.
 
-A saved preset is a *reviewed* intent: exact profile identities, route
-assignments, slot families and a billing policy. Subsequent Apply is
-one click — no confirmation modal — but preflight still runs on every
-click and blocks (never silently substitutes) when:
-  - a preset target profile is missing credentials,
-  - a route's cost class is unknown,
-  - the preset's billing policy does not approve a route's cost class,
-  - a cost class changed after review (unapproved change),
-  - a new profile exists that is not in the frozen review set (it never
-    silently joins; it appears as not-included until reviewed).
-
-All blocking happens BEFORE any write: preflight is pure.
+Preflight is pure and runs before every apply. Missing credentials, unapproved
+or changed cost classes, and unreviewed profiles block. Unknown costs require
+explicit approval. Saved profile identities and slot intent never auto-expand;
+host execution metadata is re-derived rather than trusted from stored presets.
 """
 from __future__ import annotations
 

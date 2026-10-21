@@ -36,14 +36,8 @@ STEP_COMPENSATED = "compensated"
 STEP_CONFLICT = "conflict"
 STEP_AWAITING_HOST = "awaiting_host"
 
-# Step executors: WHO performs the write.
-#   CALL_BACKEND -- the engine writes through the store adapter's guarded
-#                   apply/readback (the original path).
-#   CALL_HOST    -- the browser calls a PUBLIC Hermes host route and reports
-#                   the outcome back through submit_host_result(). The engine
-#                   never holds a credential and never performs the write; it
-#                   only rechecks the revision, mints a one-time submission
-#                   token and verifies whatever actually landed.
+# Backend steps write through store adapters. Host steps give the browser a
+# public route call; the engine verifies the resulting store without credentials.
 CALL_BACKEND = "backend"
 CALL_HOST = "host"
 

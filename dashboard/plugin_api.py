@@ -1,4 +1,4 @@
-"""hermes-model-switcher — dashboard backend routes (T7 wiring).
+"""hermes-model-switcher — dashboard backend routes.
 
 Mounted by the Dashboard at /api/plugins/hermes-model-switcher/ per the
 official extension contract (website/docs/user-guide/features/
@@ -21,14 +21,10 @@ Wiring (real, no mocks):
   POST /operations/{op_id}/recover reconcile a crash/lost-result window
   POST /operations/{op_id}/undo    revision-guarded undo
 
-Public seam (why this module imports no model-selection internals): the
-Dashboard plugin runs as a separate install and may not import ANY private
-``hermes_cli`` module (the admission lint names them). So the main slot is not
-written here at all: the browser performs the PUBLIC host call
-``POST /api/model/set`` and reports the outcome, and the engine verifies the
-store afterwards (see the HOST ROUTE MAPPING table below).
+Main assignments use the browser's public POST /api/model/set call, followed
+by engine store verification (see HOST ROUTE MAPPING below).
 
-Privacy contract (Phase B review):
+Privacy invariants:
   - Public DTOs NEVER carry raw config documents, journal snapshots, or
     secrets. Only dotted route observations (provider/model/state) and
     sanitized storage names.
@@ -46,9 +42,6 @@ from pathlib import Path
 # backend imports live in different places in each:
 #   packaged: <plugin>/python/model_switcher  + <plugin>/{hermes_adapter,route_inventory}.py
 #   checkout: <plugin>/src/model_switcher    + the same root modules
-# A checkout is a src/ layout (pyproject packages.find where=["src"]), so
-# omitting src/ left every API-backed action dead with
-# ModuleNotFoundError: No module named 'model_switcher'.
 _PKG_ROOT = Path(__file__).resolve().parent.parent
 for _p in (_PKG_ROOT / "python", _PKG_ROOT / "src", _PKG_ROOT):
     if _p.is_dir() and str(_p) not in sys.path:
@@ -150,14 +143,9 @@ _PREVIEW_MAX = 32
 router = APIRouter()
 
 # -- process-local state ----------------------------------------------------
-# The journal + preset store persist under the profile's OWN private state dir:
-# ``<HERMES_HOME>/state/hermes-model-switcher``. There is exactly ONE location —
-# no environment override and no fallback: if the resolved path would live
-# inside this plugin's source tree (or any git worktree, which
-# OperationJournal refuses by design), the plugin reports itself read-only with
-# a fixed reason instead of silently writing somewhere else. Tests get their
-# isolation from a lab HERMES_HOME (``set_hermes_home_override`` / env), never
-# from a plugin-specific state override.
+# Journal and presets stay in <HERMES_HOME>/state/hermes-model-switcher.
+# A path inside the plugin tree or any git worktree makes the plugin read-only;
+# there is no fallback location.
 _LOCK = threading.RLock()
 _ADAPTER = HermesAdapter()
 _STATE_REFUSED_REASON = (
@@ -502,7 +490,7 @@ def _save_normalization_prefixes(cfg: Dict[str, Any]) -> List[str]:
 
     ``load_config``/``save_config`` canonicalize root ``provider``/``base_url``/
     ``context_length``/``api_base`` into the ``model`` block and ``max_turns``
-    into ``agent.max_turns`` (HOST-ROUTES §1 "Whole-document save effects").
+    into ``agent.max_turns``.
     Those leaves may therefore differ after a successful assignment that never
     decided anything about them — but only when the pre-write document actually
     carried them, so the allowance is computed from THIS document.
@@ -631,7 +619,7 @@ def aux_host_route(desc: Any, payload: Any, current: Any) -> Optional[dict]:
     """The host call an aux change maps exactly onto, or None (stay backend).
 
     "Exactly" is the whole rule: the host's own result must EQUAL the reviewed
-    result (HOST-ROUTES §1 "EXACT auxiliary mutations"). Removals, extra keys,
+    result. Removals, extra keys,
     an endpoint that needs a protocol/api_mode the route will not write, and a
     provider change whose cleanup would delete leaves the review keeps all stay
     BACKEND.
@@ -707,7 +695,7 @@ def _host_option_model_ids(options: Any, provider: str) -> Optional[List[str]]:
     return [m for m in ids if m]
 
 
-# Crash-recovery restart path (P1 #6): a crash between a config write and the
+# Crash-recovery restart path: a crash between a config write and the
 # journalled step update leaves operations pending/applying/partial. The first
 # journal use after a (re)start reconciles every unfinished operation against
 # the actual files, so the documented crash-recovery contract holds even when
@@ -826,7 +814,7 @@ def _persist_presets(store: PresetStore) -> None:
                 "executor": t.executor, "host_call": t.host_call,
                 "readback_keys": t.readback_keys,
                 "allowed_prefixes": t.allowed_prefixes,
-                # P1 #2: persist the REAL slot identity of each target —
+                # Persist the slot identity of each target —
                 # applying must restore cron/delegation/auxiliary/...
                 # targets onto their own slots, never rebuild them as main.
                 "slot_id": _slot_id_for_target(p, t),
@@ -894,7 +882,7 @@ def _preset_from_record(rec: Dict[str, Any]) -> ReviewedPreset:
         reviewed_profile_ids=rec.get("reviewed_profile_ids", []))
 
 
-# -- preset intent <-> slot identity (P1 #2) --------------------------------
+# -- preset intent <-> slot identity --------------------------------
 def _infer_slot_id(changes: Dict[str, Any]) -> str:
     """Legacy records carry no ui_changes; infer the slot from the typed
     storage paths so a non-main target is NEVER reconstructed as main."""
@@ -1503,7 +1491,7 @@ def _assert_removal_identity(desc, observed: Dict[str, Any],
 
 def _removal_changes_for(desc, cfg: Dict[str, Any],
                          from_payload: Optional[Any] = None) -> Dict[str, Any]:
-    """P1 #3: an exact-removal edit binds as an UNSET of this slot's own
+    """An exact-removal edit binds as an UNSET of this slot's own
     keys — per slot semantics, never a null/"None" route assignment:
       - route-dict slots (judge/aux/specialist households): ONLY the route
         fields (provider/model/base_url/api_mode) inside that dict are
@@ -1542,8 +1530,7 @@ def _removal_changes_for(desc, cfg: Dict[str, Any],
     # Scalar / chain slots: unset the slot key plus its companions.
     # The reviewed ``from`` identity is validated against the CURRENT stored
     # route FIRST: when the route changed after review, the removal blocks
-    # instead of deleting a route the user never selected. (Route-dict slots
-    # run the same check above; scalar slots previously skipped it.)
+    # instead of deleting a route the user never selected.
     if isinstance(current, str):
         observed = {
             "provider": (
@@ -1659,7 +1646,7 @@ def _changes_to_targets(changes: List[Dict[str, Any]],
             continue
         removal = str(c.get("action") or "").lower() == "remove"
         if removal:
-            # P1 #3: to:null is a REMOVAL intent, not a route assignment.
+            # to:null is a REMOVAL intent, not a route assignment.
             # Removals NEVER become host steps: the host route assigns, it
             # cannot unset a slot.
             try:
@@ -1840,7 +1827,7 @@ def _provider_is_custom_endpoint(cfg: Dict[str, Any], provider: str) -> bool:
 
 
 def _host_provider_authenticated(options_payload: Any, provider: str) -> Optional[bool]:
-    """Provider-scoped authentication from the HOST options payload (C).
+    """Provider-scoped authentication from the host options payload.
 
     True / False / None (no evidence). ``None`` is never treated as
     authenticated — the caller decides the unknown case explicitly. The host
@@ -2235,7 +2222,7 @@ def _host_catalog_required() -> JSONResponse:
 
 
 def _catalog_request(body: Dict[str, Any], host: HostBundle) -> Tuple[Optional[str], str]:
-    """(profileId, provider) from a catalog request body (§C payload shape)."""
+    """(profileId, provider) from a catalog request body."""
     profile_id = body.get("profile") or body.get("profileId")
     profile_id = profile_id if isinstance(profile_id, str) and profile_id else None
     provider = str(body.get("provider") or "")
@@ -2666,7 +2653,7 @@ def save_preset(body: PresetIn):
                     approved_classes=["subscription_included", "metered"],
                     allow_unknown=body.allowUnknownCost),
                 targets=targets, reviewed_profile_ids=reviewed)
-            # P1 #2: freeze the reviewed change intent WITH its slot identity,
+            # Freeze the reviewed change intent WITH its slot identity,
             # so one-click apply restores every target onto its own slot.
             preset.target_slot_ids = build_slot_ids(body.changes, targets)
             preset.ui_changes = [dict(c) for c in body.changes]
@@ -2681,7 +2668,7 @@ def save_preset(body: PresetIn):
             "ok": False, "error": "save failed"}) from None
 
 
-# -- F1: ReviewedPreset.preflight runs BEFORE a one-click apply -------------
+# -- ReviewedPreset.preflight runs BEFORE a one-click apply -------------
 def _profile_has_credentials(profile: str, ident,
                              providers: Optional[List[str]] = None,
                              host: Optional[HostBundle] = None) -> bool:
@@ -2968,7 +2955,7 @@ def _resolve_apply(body: ApplyIn, profiles: Dict[str, Dict[str, Any]],
         except Exception:
             raise HTTPException(status_code=404, detail={
                 "ok": False, "error": "unknown preset"}) from None
-        # P1 #1: preflight gates EVERY one-click apply — missing credentials,
+        # Preflight gates every one-click apply — missing credentials,
         # drifted/unknown cost classes and newly discovered profiles block
         # before any write, never silently substituted.
         reasons = _preset_preflight(
@@ -3115,7 +3102,7 @@ def get_operation(op_id: str):
                 if op is None:
                     raise HTTPException(status_code=404, detail={
                         "ok": False, "error": "unknown operation"})
-                # P1 #6: crash-recovery contract — a pending/applying/partial
+                # Crash recovery — a pending/applying/partial
                 # record is reconciled against the actual files before it is
                 # surfaced; the written configuration never stays ambiguous
                 # indefinitely and recovery_required is reported verbatim.

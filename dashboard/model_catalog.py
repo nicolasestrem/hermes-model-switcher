@@ -1,103 +1,19 @@
-"""Provider-aware model catalog for the dashboard — a PURE TRANSFORM.
+"""Pure catalog transform of GET /api/model/options payloads; no Hermes I/O.
 
-Input is the HOST OPTIONS PAYLOAD: the JSON body of the host's
+Missing/malformed payloads fail with hostCatalogUnavailable, never an empty
+success. Provider aliases match case-insensitively; model IDs match exactly.
+Authenticated rows take precedence over unauthenticated duplicate rows.
 
-    GET /api/model/options?profile=<p>&include_unconfigured=1[&refresh=1]
+Only exact Hermes $digits[.digits] display tokens yield numeric per-million
+rates; exact "free" yields a directional zero. Unknown stays None. Model-level
+free status still requires the host's explicit flag. Pending pricing or
+entitlement makes all affected models unknown, even with a stale pricing map.
+No host billing-route evidence means no subscription-included classification.
 
-route (built by ``hermes_cli.inventory.build_model_options_payload`` at the
-tested revision: ``{providers: [...], model, provider}``).  This module imports
-NOTHING from Hermes — no picker builder, no pricing seam, no disk cache — so it
-cannot drift with a private Hermes import and it cannot start provider I/O.
-The caller fetches the payload from the host and passes it in.
-
-Shape relied on (defensively read; unknown/absent fields stay unknown):
-
-    payload["providers"][i] = {
-      "slug": str, "provider_id": str|absent, "name": str,
-      "models": [str, ...], "total_models": int,
-      "source": str, "is_current": bool, "is_user_defined": bool,
-      "authenticated": bool,            # explicit False on skeleton rows
-      "warning": str|None,              # e.g. "paste KEY to activate"
-      "pricing": {model_id: {"input": str|None, "output": str|None,
-                             "cache": str|None, "free": bool}},   # display text
-      "pricing_pending": bool,          # host has not resolved prices yet
-      "free_tier": bool, "free_tier_pending": bool,
-      "unavailable_models": [str, ...],
-    }
-
-Contract of :func:`models_response` (frozen ``/models`` DTO)::
-
-    models_response(options_payload, provider="", profile_id=None,
-                    refresh=False) -> dict
-
-    {
-      "ok":        bool,   # True iff a provider row resolved for `provider`
-      "provider":  str,    # native slug when resolved, else the request
-      "models":    [{"id": str, "name": str}, ...],   # exact native ids
-      "fetchedAt": None,   # the host payload carries no fetch timestamp
-      "source":    str,    # picker row provenance ("canonical", "hermes", ...)
-      "stale":     bool,   # True: freshness is unproven without a timestamp
-      "error":     str|None,
-      "providers": [{"id": str, "name": str}, ...],   # catalog index
-    }
-
-Contract of :func:`catalog_response` (frozen ``/catalog`` DTO)::
-
-    catalog_response(options_payload, provider="", profile_id=None,
-                     refresh=False) -> dict
-
-    {
-      "ok": bool, "profileId": str|None,
-      "providers": [{
-        "id": str, "label": str, "authenticated": bool, "configured": bool,
-        "isCurrent": bool, "modelCount": int, "fetchedAt": None,
-        "stale": bool, "warning": str|None,
-        "models": [{"id": str, "label": str,
-                    "pricingStatus": "priced"|"free"|"included"|"unknown",
-                    "cost": {unit, input, output, cacheRead, display{input,
-                             output, cache}, free, source, pricingVersion}|None}],
-      }],
-      "cost": {"pending": bool, "unavailableProviders": [str]},
-      "error": str|None,
-    }
-
-Pricing truthfulness (the host payload is the ONLY source):
-
-  * Display strings (``$x.xx`` / ``free`` / ``null``) pass through verbatim.
-  * Exact ``$digits[.digits]`` tokens yield per-million numeric rates;
-    ``free`` yields zero for that direction. All other tokens stay unknown.
-    ``pricingVersion`` is ``None``; ``source`` is "picker" (not an invented
-    claim about the host's upstream pricing source).
-  * ``free`` requires the host's explicit both-directions-free flag; a
-    per-direction "free" string is a zero for that direction only.
-  * A missing/empty pricing entry, and every model of a ``pricing_pending``
-    row, is ``pricingStatus: "unknown"`` with ``cost: None`` — NEVER free and
-    never ``$0.00``.  The legacy ``"included"`` status (subscription route) is
-    unreachable: the host payload carries no billing-route evidence.
-  * ``cost.pending`` is true when a row in THIS response is ``pricing_pending``
-    (or its Nous entitlement is still ``free_tier_pending`` — every model of
-    that row is locked until the host resolves it).
-  * ``cost.unavailableProviders`` names providers in THIS response whose models
-    came with no usable pricing at all (not merely pending).
-
-Freshness: the host payload carries no fetch timestamp, so ``fetchedAt`` is
-``None`` and ``stale`` is ``True`` ("unproven fresh") for every provider.  This
-module never invents a timestamp.  ``refresh`` is accepted for call-site
-compatibility and ignored: refreshing is the HOST's job (``&refresh=1`` on its
-GET), never this transform's.
-
-Truthfulness:
-  * ``options_payload is None`` or malformed (not a mapping, no ``providers``
-    list) -> ``ok=False`` with the fixed reason ``"hostCatalogUnavailable"`` —
-    never an empty success.
-  * A valid payload with zero rows is ``ok=False`` ("no providers in this
-    profile's catalog").
-  * ``ok`` is ``True`` only when a row for the requested provider was found
-    (even with zero models); an absent provider is a truthful ``ok=False``.
-  * ``error`` never carries exception text, paths, URLs or secrets.
-
-Isolation: no writes, no secret reads, no Hermes import, no network.  Every
-input is whatever the caller already fetched.
+Display text is retained; source is "picker", not a claim about the host's
+upstream source. The host supplies no timestamp or pricing version, so these
+remain None and freshness is unproven. Refresh belongs to the caller's host
+request, not this transform. DTO key constants define the public allowlists.
 """
 
 from __future__ import annotations

@@ -1,16 +1,9 @@
-"""Per-store revision/readback/compensation adapters.
+"""Revision, readback, and compensation for individual profile stores.
 
-Each adapter owns one store (a file on disk in a Hermes home: config,
-cron jobs, plugin routing). Adapters supply:
-  - revision(store): monotonically-derivable fingerprint of store state
-  - read(store): raw parsed content
-  - apply(store, changes): write changes, return post-write revision
-  - readback(store): re-read and verify the written value
-  - compensate(store, snapshot): restore snapshot content
-
-A store without an adapter blocks the operation (no blind writes).
-Revision is a hash of normalized file bytes: cross-process edits that
-change the file change the revision, so stale-write risk is detected.
+Stores without adapters block before writing. File adapters hash serialized
+bytes; canonical config uses the strict document revision supplied by Hermes.
+A post-revision must belong to the intended write, not a foreign readback.
+Compensation restores snapshots only when the recorded post-revision matches.
 """
 from __future__ import annotations
 

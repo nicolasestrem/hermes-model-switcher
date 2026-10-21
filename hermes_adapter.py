@@ -1,37 +1,14 @@
-"""Version-tolerant Hermes adapter — built ONLY on Hermes' public plugin seams.
+"""Hermes access through public config, profile, and secret-scope APIs.
 
-Every version-sensitive Hermes import in this plugin lives here. The imports
-this module makes are the ones Hermes documents for plugin authors
-(``hermes_cli/plugin_validate_private_imports.py`` ``_PUBLIC``):
+Profile scoping uses a context-local home override and matching secret scope;
+request handlers never mutate process-global HERMES_HOME. Discovery follows
+Hermes' identity and tombstone rules. Missing required capabilities make the
+adapter read-only; package versions are informational.
 
-- ``hermes_cli.config`` — ``load_config``, ``save_config``,
-  ``require_readable_config_before_write``, ``read_raw_config``,
-  ``get_config_path``, ``DEFAULT_CONFIG``.
-- ``hermes_constants`` — home/root resolution, the context-local home override,
-  and named-profile identity/liveness helpers.
-- ``agent.secret_scope`` — ``get_secret``, ``set_secret_scope``,
-  ``reset_secret_scope``, ``build_profile_secret_scope``.
-
-No private attribute is read through a public module (no ``_CONFIG_LOCK``, no
-``_strip_default_values``, no ``_config_profile_scope``): the adapter scopes a
-profile by installing the public context-local home override plus that
-profile's secret scope, and serializes its own canonical saves with its own
-re-entrant lock.
-
-Contract:
-- Homes resolve through public ``hermes_constants`` helpers only; global
-  ``HERMES_HOME`` is NEVER mutated in a request handler — the context-local
-  override is used instead (``set_hermes_home_override``).
-- The credential scope follows the profile: ``build_profile_secret_scope`` over
-  the profile's own ``.env``, installed with ``set_secret_scope`` so
-  ``get_secret`` resolves the scoped profile and can never read another
-  profile's value.
-- Canonical saves go through ``config.save_config`` /
-  ``require_readable_config_before_write``. No shell interpolation, no textual
-  YAML replacement.
-- Unsupported runtimes are READ-ONLY: the capability probe must find every
-  required public seam importable and callable, otherwise no write path is
-  opened. Nothing here depends on ``install-stamp.json`` or a version string.
+Canonical saves recheck identity and revision, preserve unrelated leaves with
+merge_existing when possible, and verify strict readback. The plugin-local
+lock is not a host-wide transaction: the public API has no compare-and-save,
+and full-state replacement still has a check-then-save race.
 """
 from __future__ import annotations
 
@@ -44,12 +21,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
 
-# The expected (pre-write) config revision is carried into the canonical save
-# guard WITHOUT changing the seam's call signature: the config adapter sets it
-# for the duration of the unmodified apply_canonical_save() call, so a
-# monkeypatched seam that keeps the historical (profile, updated, identity)
-# signature still receives the guard. Callers may equally pass
-# expected_revision= explicitly; an explicit value wins.
+# Carry the pre-write revision through the canonical save call's context.
+# An explicit expected_revision argument takes precedence.
 _EXPECTED_REVISION: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "hermes_adapter_expected_revision", default=None)
 
@@ -131,11 +104,7 @@ class PostSaveConflict(RuntimeError):
 
 
 def _version_label() -> str:
-    """Best-effort, INFORMATIONAL Hermes package version ("" when unknown).
-
-    Never used for gating: a git checkout without distribution metadata reports
-    nothing here and is still fully writable.
-    """
+    """Informational package version, never a capability gate."""
     try:
         from importlib.metadata import version
 
@@ -201,13 +170,7 @@ class RuntimeInfo:
 
 
 def probe_runtime() -> RuntimeInfo:
-    """Capability probe over the public seams (no version comparison).
-
-    ``supported`` iff every required public seam imports and is callable;
-    ``read_only`` is its negation, so an unknown/future Hermes that keeps these
-    seams keeps full write access, and a skewed one that loses any of them
-    degrades to read-only instead of raising deep inside a write.
-    """
+    """Require every public seam; missing capabilities make writes read-only."""
     imported = _import_seam_modules()
     modules = imported["modules"]
     reasons = list(imported["errors"])
@@ -226,7 +189,7 @@ def probe_runtime() -> RuntimeInfo:
 
 
 def _hermes():
-    """The public ``hermes_cli.config`` module (the ONE import site)."""
+    """Load the public config module lazily."""
     from hermes_cli import config as config_mod
 
     return config_mod

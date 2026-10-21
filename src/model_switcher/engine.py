@@ -1,105 +1,29 @@
-"""Journalled apply / compensation / undo engine.
+"""Journalled apply, compensation, recovery, and revision-guarded undo.
 
-Contract (plan §Mutation, failure and rollback contract):
-- Resolve targets strictly; every target must have an adapter or the
-  operation blocks before any write.
-- Journal intent + snapshots BEFORE writing.
-- Apply profiles sequentially: revision recheck -> fresh read -> apply
-  -> readback -> record post-write revision.
-- Repeated operation IDs return the existing operation (no duplicate
-  writes).
-- On failure, stop and compensate completed steps in reverse order, but
-  only when the store's current revision still matches the recorded
-  post-write revision; otherwise that step is a conflict and the whole
-  operation becomes recovery_required (never a forced restore).
-- Crash/timeout reconciliation compares persisted intent against actual
-  files; ambiguous state is reported, not guessed.
-- Undo re-applies snapshots under the same revision guard, so a later
-  external edit is preserved, not clobbered.
+Intent and snapshots are persisted before any write. Targets require an
+adapter and explicit profile binding. Steps run sequentially, checking the
+reviewed revision and verifying readback before recording a post-revision.
+Operation IDs are idempotent.
 
-HOST-EXECUTOR STEP PROTOCOL (public seam; dashboard/plugin_api.py builds on it)
------------------------------------------------------------------------------
-Every step names its EXECUTOR. ``executor='backend'`` (the default) is the
-original path: the engine writes through the store adapter. ``executor='host'``
-means the engine must NOT write: the browser performs one PUBLIC Hermes host
-call and reports the outcome back. The engine keeps the guarantee that no
-unverified or foreign write survives.
+Backend steps write through their store adapter. Host steps return a public
+host_call envelope and await the browser's outcome. Only a token hash is
+persisted; missing, retired, or replayed tokens cannot change operation state.
+Reapplying an untouched awaiting step reissues its token. Submitted readback
+keys and allowed prefixes are persisted so restart verification is identical.
 
-    plan_operation(journal, targets, payload=None, op_id=None) -> op
-        Each target may carry:
-          executor:          'backend' (default) | 'host'
-          host_call:         {"method","path","query","body"}  (host only)
-          readback_keys:     dotted config keys the route's write must satisfy
-          allowed_prefixes:  dotted key prefixes the route may legitimately
-                             touch (default: exactly the step's changes)
-        All of it is journalled before any write; ``host_call`` and the
-        readback keys are persisted so a restart can still verify the call.
+Host outcomes are checked against the store, never trusted as write evidence:
+- Unmoved revision: known no-write failure.
+- Intended write with valid semantic keys and no foreign diff: continue on ok;
+  otherwise record ownership and compensate in reverse order.
+- Intended write with failed semantic readback: compensate as unverified.
+- Foreign or undecidable write: recovery_required, no adopted post-revision,
+  no compensation of this step or earlier clean steps, and undo is refused.
 
-    apply_operation(journal, op_id, fail_after=None) -> op
-        Runs backend steps. On reaching a host step it rechecks the revision
-        (a mismatch takes the ordinary PRE-WRITE conflict path), mints a
-        one-time token, stores ONLY its SHA-256 and returns
-            op["state"] == "awaiting_host"
-            op["host_call"] == {"opId","seq","token","method","path","query","body"}
-        The plaintext token exists only in that return value: it is never
-        persisted, journal-read or logged. Calling apply_operation again on an
-        awaiting step re-issues a fresh token (the previous one is retired) if
-        the store is still untouched, and otherwise resolves the step exactly
-        like a lost result (see reconcile).
-
-    submit_host_result(journal, op_id, seq, token, outcome,
-                       status=None, readback_keys=None, allowed_prefixes=None)
-        -> op
-        ``outcome`` is 'ok' | 'no_write' | 'declined' | 'error' (None derives
-        it from ``status``). Evaluation, in order:
-          1. revision unmoved  -> provably no write; the step fails with
-             host_no_write / host_declined / host_error (write_phase PRE).
-          2. store moved and the step's write verifies (planned changes read
-             back, semantic readback keys hold, nothing outside the allowed
-             prefixes moved):
-               outcome ok          -> applied; continue to the next step (which
-                                      may be another host call)
-               outcome not ok      -> the write landed anyway: recorded with its
-                                      post-revision and compensated back
-                                      (host_no_write/host_declined/host_error)
-          3. store moved but the document is exactly the intended write while a
-             semantic key fails -> UNVERIFIED write: recorded and compensated
-             back (write_verification_failed); no unverified write survives.
-          4. store moved any other way -> FOREIGN diff: the step is a conflict,
-             the operation becomes recovery_required and NOTHING is compensated
-             (external_edit; never a blind restore over someone else's edit).
-        A token that is missing, wrong, retired or replayed raises
-        ApplyHostTokenMismatch (category host_token_mismatch) with NO state
-        change; comparison is hmac.compare_digest over the SHA-256.
-
-    reconcile(journal, op_id) -> op
-        An ``awaiting_host`` step (lost result / restart) is classified exactly
-        like outcome 'error': revision unmoved -> known no-write; our intended
-        write -> written-but-unconfirmed, so it is compensated back per the
-        reverse-order rules; anything else -> external_edit/recovery_required.
-
-Compensation and undo of a host step restore the step's snapshot through the
-step's backend adapter exactly as a backend step does, under the same
-post-write revision guard.
-
-AMBIGUOUS WRITES (backend and host alike)
------------------------------------------
-A save whose strict readback is NOT the document we intended is ambiguous, not
-ours. ``adapters.StoreWriteAmbiguous`` (no post_revision) and a host step's
-foreign diff both take the SAME path, at the moment they are detected:
-
-  * the step is durably marked ``conflict`` with ``write_phase`` ambiguous;
-  * the operation becomes ``recovery_required`` with the fixed category
-    ``external_edit``;
-  * NOTHING is compensated -- not that step (its bytes are not ours) and not
-    the clean steps before it (their snapshots would be restored without ever
-    having seen the ambiguous store);
-  * the step is never retried and never recorded as pending;
-  * ``undo_operation`` REFUSES the operation (``ApplyUndoAmbiguous``), because a
-    snapshot restore would clobber bytes we cannot prove are ours;
-  * ``reconcile`` never downgrades a conflict step.
-
-A human resolves the store and then plans a fresh operation.
+Lost host results reconcile as errors. Compensation and undo restore snapshots
+through the backend adapter only while the recorded post-revision still
+matches; external edits are never forcibly overwritten. Conflicts are not
+retried or downgraded by reconciliation. Human resolution requires a fresh
+operation.
 """
 from __future__ import annotations
 

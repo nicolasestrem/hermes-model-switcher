@@ -1,29 +1,16 @@
-"""Typed route inventory + deterministic change preview (plan T3).
+"""Typed route inventory and deterministic preview from raw config and host data.
 
-Builds a typed descriptor inventory of every supported model-selection slot
-family — main, delegation, auxiliary, judge, fallback, MoA, cron, plugin,
-specialist — from a raw profile config, and produces a deterministic
-before/after preview for explicitly selected edits.
+Only selected slots enter a preview; protected policy fields never enter an
+edit. The same inputs yield the same sorted, timestamp-free preview.
+Judge/reviewer slots reject plain chat replacements. cron.model pairs with
+cron.model_provider (inference), never cron.provider (scheduler). Fallback
+chains preserve order and null-versus-empty semantics. Invalid MoA removals
+are rejected before writing.
 
-Determinism contract: previews are sorted lists of plain dataclasses, carry no
-timestamps, no random IDs and no process state; the same (config, edits) pair
-always yields the same preview. Only explicitly selected slots appear; protected
-fields (thresholds, identity, enforcement, etc.) can never enter an edit.
-
-Protocol discipline (PLAN.md slot registry): judge/reviewer slots speak a typed
-decision protocol and reject plain chat-model replacements; cron's
-``cron.model`` pairs with ``cron.model_provider`` (the inference provider) and
-never touches ``cron.provider`` (the scheduler); delegation fallback chains
-preserve order and the null-vs-[] semantics (config_defaults.py:1327-1343);
-invalid MoA removals are rejected before any write (models.py:323-338's
-reject-don't-repair rule).
-
-Runtime-path discipline: every writable storage path must be a key the runtime
-actually reads (``hermes_cli/config_defaults.py`` / the registry descriptors).
-Chains live at ``fallback_providers`` and ``delegation.fallback_providers``;
-specialist routes live at the backend-specific ``stt.<provider>.model`` /
-``tts.<provider>.model``. A path with no runtime consumer is exposed explicitly
-read-only (``writable=False``), never as a fake editable route.
+Writable paths must have runtime consumers. Speech routes use the backend's
+stt/tts storage key; model-less backends are read-only but may allow an explicit
+backend switch. Auxiliary defaults come from public DEFAULT_CONFIG, while
+plugin registrations and MoA names can be supplied by public host payloads.
 """
 from __future__ import annotations
 
@@ -54,8 +41,7 @@ PROTOCOL_EMBEDDING = "embedding"
 PROTOCOL_SPEECH = "speech"
 PROTOCOL_IMAGE = "image"
 
-# Fields that are protected by default (PLAN.md "Protected by default") — an
-# edit touching any of these paths is rejected, never silently applied.
+# Edits touching these policy paths are rejected, never silently applied.
 _PROTECTED_PATHS = {
     "auxiliary.goal_judge.threshold",
     "auxiliary.goal_judge.enforcement",
@@ -239,9 +225,7 @@ def _record_inventory_warning(message: str) -> None:
 
 
 class InventoryResult(list):
-    """List-compatible inventory result (existing ``for x in build_inventory``
-    callers, ``len``, ``next`` and set-comprehensions all keep working) that also
-    carries the per-build ``warnings`` recorded while it was constructed."""
+    """List of observations with isolated per-build warnings."""
 
     def __init__(self, observations: Iterable[SlotObservation], warnings: List[str]):
         super().__init__(observations)
@@ -249,11 +233,7 @@ class InventoryResult(list):
 
 
 def _installed_default_config() -> Dict[str, Any]:
-    """The runtime ``DEFAULT_CONFIG`` through the PUBLIC ``hermes_cli.config``
-    seam, or ``{}`` when the Hermes runtime is unavailable.
-
-    Every runtime default this module mirrors is read through here — never from
-    the private ``hermes_cli.config_defaults`` module."""
+    """Public runtime defaults, or an empty map when unavailable."""
     try:
         from hermes_cli.config import DEFAULT_CONFIG as _installed
     except Exception:
@@ -306,13 +286,7 @@ def _mirror_layer_route_over_inherited(inherited: Dict[str, Any],
 
 def _layer_route_over_inherited(inherited: Dict[str, Any],
                                 user: Dict[str, Any]) -> Dict[str, Any]:
-    """Read-time layering of a task block over its inherit base.
-
-    The local exact-shape mirror IS the implementation: the runtime helper it
-    mirrors lives in a private module (``agent.auxiliary_task_config``), so
-    importing it would couple this plugin to a core internal. The mirror is
-    kept byte-equivalent to that helper (``test_inventory_host_data`` asserts
-    parity against the checked-out runtime, and flags drift)."""
+    """Layer locally; test_inventory_host_data checks parity with Hermes."""
     try:
         return _mirror_layer_route_over_inherited(inherited, user)
     except Exception:
@@ -577,9 +551,7 @@ def _aux_observation(cfg: Dict[str, Any], desc: SlotDescriptor,
     unpinned task following a declared base reports source 'inherited' so the UI
     shows the provider/model the runtime uses."""
     obs = _obs(cfg, desc)
-    # Only auxiliary SELECTOR rows (built-in or plugin-registered) reach here;
-    # the openrouter scalar row is added directly by build_inventory, so no
-    # dead "is this the scalar?" comparison exists.
+    # Only auxiliary selector rows reach here.
     task = desc.slot_id.split(".", 1)[1]
     if task not in selector_keys and task not in entries_by_key:
         return obs  # rows without selector semantics
