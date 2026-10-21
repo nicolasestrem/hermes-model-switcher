@@ -266,6 +266,21 @@
     return { provider: (slot && slot.provider) || "", model: (slot && slot.model) || "" };
   }
 
+  // Host per-model capability flags, in the host's own shape
+  // (`hermes_cli/inventory.py::_apply_capabilities`): one map per provider row
+  // keyed by the exact model id, `fast`/`reasoning` always present,
+  // `can_disable_reasoning` only for catalogs that report it. A model without
+  // an entry is one the host knows nothing about — the UI must treat that as
+  // unknown, so the fixture leaves some models out on purpose.
+  const hostCapabilityFixture = {
+    "hermes-4-405b": { fast: true, reasoning: true },
+    "hermes-4-70b": { fast: false, reasoning: true, can_disable_reasoning: true },
+    "hermes-4-mini": { fast: true, reasoning: false },
+    "deepseek-v4.1-flash": { fast: true, reasoning: true, can_disable_reasoning: false },
+    "another-model": { fast: false, reasoning: true },
+    "llama3.3-local": { fast: false, reasoning: false },
+  };
+
   function hostOptionsFor(profileId) {
     const providers = catalogProviders.map((p) => {
       const models = (p.models || []).map((m) => m.id);
@@ -278,7 +293,7 @@
           cache: display.cache === undefined ? null : display.cache,
           free: Boolean(m.cost && m.cost.free),
         };
-        capabilities[m.id] = { fast: true, reasoning: false };
+        if (hostCapabilityFixture[m.id]) capabilities[m.id] = { ...hostCapabilityFixture[m.id] };
       }
       return {
         slug: p.id, name: p.label, models, total_models: models.length,
