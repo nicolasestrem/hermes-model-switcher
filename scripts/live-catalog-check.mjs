@@ -37,10 +37,10 @@ async function check(engine) {
       const id = tr.dataset.modelId;
       const label = cell.querySelector(".hms-catalog-model-label")?.textContent;
       if (label === id && cell.innerText.split(id).length - 1 > 1) out.push(`duplicated id: ${id}`);
-      const range = document.createRange(); range.selectNodeContents(cell);
-      const h = range.getBoundingClientRect().height;
-      // One line when label === id, two (label + id) otherwise.
-      if (h > (label === id ? 30 : 56)) out.push(`model cell too tall (${Math.round(h)}px): ${id}`);
+      // Count stacked block lines, not pixels: a long id may legitimately wrap.
+      const blocks = [...cell.children].filter((el) => el.getClientRects().length
+        && getComputedStyle(el).display === "block").length;
+      if (blocks > (label === id ? 1 : 2)) out.push(`model cell stacks ${blocks} lines: ${id}`);
     }
     for (const el of document.querySelectorAll(".hms-root code")) {
       const bg = getComputedStyle(el).backgroundColor;
