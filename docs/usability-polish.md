@@ -14,8 +14,9 @@ editor-first DOM order and wide-screen matrix/rail arrangement.
 
 Selection counts use a polite live announcement. Provider browsing explains
 both an empty catalog and a search with no matches, retaining manual exact-ID
-entry. Secondary inline text respects the 13 px minimum. Model identifiers wrap,
-preview entries have clearer separation, and narrow screens wrap filter fields.
+entry. Secondary inline text respects the 13 px minimum. Matrix route identifiers
+stay whole in the table’s horizontal scroll region; preview entries have clearer
+separation, and narrow screens wrap filter fields.
 All styles remain scoped to the plugin and use host tokens; no external fonts,
 decorative animation, or additional network requests were introduced.
 
@@ -208,6 +209,52 @@ The first rendered detector needed a local Chromium executable override; failed 
 
 Reports: `CRITIQUE.md`, `assessment-a-after.md`, `assessment-b-after.md`, `FINAL.md`; raw `before-static.json`, `before-rendered-browser-path.json`, `after-static.json`, `after-rendered.json`, `after-rendered-sdk.json`; both state manifests and PNGs. The scratch evidence is fixture-only, not a live-host, screen-reader, zoom/reflow, performance, or accessibility PASS.
 
+
+## Impeccable round 2 — concrete defect closure
+
+The second restrained pass keeps exact configured/observed route IDs on one line,
+with 240px route cells and native table-owned horizontal scrolling. Slot, Family
+and State also have readable minimum widths: a fresh review caught short labels
+being squeezed after the first nowrap change; that regression was fixed before
+final capture. The pinned seven columns and sticky profile identity remain.
+
+The header advisory now owns a line below its actions. The preset's existing
+button says **Load preset**, without adding a focus target. The zero summary is
+**No slots selected**; the routine loaded status remains only in the polite
+screen-reader live region. The empty editor leads with **Select writable slots
+in the table to start.**, while its fields are visually subordinate, not disabled
+or reordered. Checked rows have restrained selection fill, including sticky
+identity cells; read-only rows state **Read-only** plus their actual reason.
+Advanced/catalog/acknowledgement groups have 16/24px separation. The original
+cost acknowledgement and every safety gate are unchanged; **Required before
+Apply.** explains when it is needed.
+
+Only wording-pinned assertions changed in existing specs: zero selection and
+Read-only capitalization in `usability-polish.spec.mjs`, plus catalog profile
+wording in `dropdowns.spec.mjs`. The read-only reason assertion was strengthened.
+The new `polish-round2.spec.mjs` adds 13 cases for wording/focus/selection, owned
+scrolling and readable target labels, and composited muted-text contrast.
+
+Final bounded evidence is under profile scratch `impeccable-polish/round2/`:
+
+- `npm run build`: exit 0. Source, shipped and fixture CSS are byte-equal.
+- Exact mock-only command above: **151 passed, 0 failed**, exit 0.
+- Static detector and both rendered fixture detectors: **[]**, exit 0.
+- Fresh capture: **96 unique state/theme/viewport cells, 300 PNGs**, no missing
+  files or recorded page errors; includes preview, progress, confirmation, host
+  error, recovery-required and catalog in both themes at 1440/768/375px.
+- Enabled secondary text matching the muted host token was measured on actual
+  composited initial/selected/catalog surfaces, not judged by eye: light minimum
+  **6.711:1 initially / 5.544:1 selected**, dark **7.774:1 / 6.450:1**. All exceed
+  AA 4.5:1; no unnecessary replacement of host muted colors was introduced.
+- Honest critique: Round1 **27/40**, final Round2 **27/40**, specificity **7/10**.
+  Local defects are fixed; broader stacked-layout, review-position and recovery
+  guidance debt remains. Detector cleanliness is not a design/accessibility pass.
+
+`round2/FINAL.md` lists per-defect before/after screenshots, every copy change,
+exact commands and receipts. `round2/CRITIQUE.md` retains the independent interim
+regression finding and final reinspection addendum. No live configuration,
+provider network, source-order change or weakened behavior assertion is implied.
 
 ## Earlier evidence boundary and verification
 
