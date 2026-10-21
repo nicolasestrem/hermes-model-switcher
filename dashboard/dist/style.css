@@ -309,6 +309,8 @@
   border: 1px solid var(--hms-border);
   border-radius: var(--hms-radius);
   margin-top: 8px;
+  overflow-x: scroll; /* Keep the native horizontal scroll affordance. */
+  scrollbar-gutter: stable;
 }
 
 /* Preserve readable route columns while the narrow viewport scrolls the table. */
@@ -329,10 +331,12 @@
   overflow-wrap: anywhere;
 }
 
-.hms-root td[data-column="configured"] {
+.hms-root [data-testid="matrix-scroll"] td[data-column="configured"],
+.hms-root [data-testid="matrix-scroll"] td[data-column="observed"] {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  min-width: 160px;
-  overflow-wrap: anywhere;
+  min-width: 240px;
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 
 .hms-root tr[data-selected="true"] {
