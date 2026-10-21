@@ -115,7 +115,7 @@ from .adapters import (
     StoreAdapter,
     _MISSING,
     _get_dotted,
-    _set_dotted,
+    _changes_applied,
     adapter_for,
 )
 from .journal import (
@@ -1067,16 +1067,6 @@ def reconcile(journal: OperationJournal, op_id: str) -> Dict[str, Any]:
                 # operation are required to proceed.
                 journal.finish(op_id, OP_PENDING)
     return journal.get(op_id)  # type: ignore[return-value]
-
-
-def _changes_applied(base: Dict[str, Any],
-                     changes: Dict[str, Any]) -> Dict[str, Any]:
-    """In-memory projection of snapshot + planned changes (no I/O)."""
-    import copy
-    data = copy.deepcopy(base)
-    for dotted, value in changes.items():
-        _set_dotted(data, dotted, value)
-    return data
 
 
 # -- explicit, revision-guarded undo ----------------------------------
