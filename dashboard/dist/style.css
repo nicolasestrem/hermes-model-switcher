@@ -815,3 +815,51 @@
   }
 }
 
+
+/* Public host seams — DESIGN §5; flat, token-paired, no decorative motion. */
+.hms-root .hms-confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--foreground, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+}
+.hms-root .hms-confirm {
+  background: var(--hms-surface);
+  color: var(--midground, var(--text-color, #e6e8ee));
+  border: 1px solid var(--hms-border);
+  border-radius: var(--hms-radius);
+  padding: 16px;
+  max-width: 520px;
+  width: calc(100% - 32px);
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+.hms-root .hms-confirm h3 { margin: 0 0 8px; font-size: 16px; }
+.hms-root .hms-confirm p { margin: 0 0 12px; white-space: pre-wrap; }
+.hms-root .hms-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.hms-root .hms-apply-progress {
+  border: 1px solid var(--hms-border);
+  border-radius: var(--hms-radius);
+  padding: 8px;
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+.hms-root .hms-apply-progress [data-step-status="applied"] { color: var(--success-color, #3fb950); }
+.hms-root .hms-apply-progress [data-step-status="failed"],
+.hms-root .hms-apply-progress [data-step-status="recovery_required"] { color: var(--danger-color, #e5534b); }
+.hms-root .hms-apply-progress [data-step-status="awaiting_host"],
+.hms-root .hms-apply-progress [data-step-status="confirm"],
+.hms-root .hms-host-notice:not([data-state="loading"]) { color: var(--warning-color, #d29922); }
+.hms-root .hms-host-notice[data-state="loading"] { color: var(--text-muted-color, #9aa1ad); }
+.hms-root button[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+@media (prefers-reduced-motion: reduce) {
+  .hms-root .hms-confirm, .hms-root .hms-confirm-backdrop, .hms-root .hms-apply-progress {
+    transition: none;
+    animation: none;
+    scroll-behavior: auto;
+  }
+}

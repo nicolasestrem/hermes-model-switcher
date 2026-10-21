@@ -241,7 +241,7 @@
         authenticated: p.authenticated !== false,
         key_env: null, warning: p.warning || null,
         featured_models: models.slice(0, 2), capabilities, pricing,
-        pricing_pending: false,
+        pricing_pending: p.id === "ollama-local",
         free_tier: Boolean(p.id === "nous"), free_tier_pending: false,
         unavailable_models: [],
       };
@@ -310,7 +310,7 @@
   function hostSet(body, params) {
     const M = window.__mockApi;
     const scope = body.scope || "main";
-    const profileId = params.get("profile") || "default";
+    const profileId = body.profile || params.get("profile") || "default";
     if (M.hostSetHttp) {
       return { status: M.hostSetHttp, body: { detail: "host assignment failed", ok: false } };
     }
@@ -343,6 +343,7 @@
       return { status: 404, body: { detail: "Not Found", ok: false } };
     }
     const profileId = params.get("profile") || "default";
+    if (M.hostWrongShapeParts?.includes(part)) return { status: 200, body: { detail: "not host evidence" } };
     if (part === "options" && method === "GET") return { status: 200, body: hostOptionsFor(profileId) };
     if (part === "auxiliary" && method === "GET") return { status: 200, body: hostAuxiliaryFor(profileId) };
     if (part === "moa" && method === "GET") return { status: 200, body: hostMoaFor(profileId) };
@@ -356,8 +357,7 @@
   // with a single-use token, and the backend continues on `host-result`.
   function isHostSlot(slotId) {
     const id = String(slotId || "");
-    return id === "main" || id.startsWith("auxiliary.") || id.startsWith("cron.")
-      || id.startsWith("plugin.") || id.startsWith("specialist.") || id.startsWith("judge.");
+    return id === "main" || id.startsWith("auxiliary.");
   }
 
   function hostSetBodyFor(step) {
@@ -742,7 +742,9 @@
       const method = (opts && opts.method) || "GET";
       let body = {};
       try { body = opts && opts.body ? JSON.parse(opts.body) : {}; } catch (e) {}
-      window.__mockApi.requests.push({ path: u.pathname, search: u.search, method, body, host: true });
+      const sessionHeader = new Headers(opts?.headers).get("X-Hermes-Session-Token");
+      window.__mockApi.requests.push({ path: u.pathname, search: u.search, method, body, host: true, sessionHeader });
+      if (sessionHeader !== "fixture-session") return new Response(JSON.stringify({detail: "Unauthorized"}), { status: 401 });
       const res = await handleHost(u.pathname, method, body, u.searchParams);
       return new Response(JSON.stringify(res.body), {
         status: res.status, headers: { "Content-Type": "application/json" },

@@ -211,38 +211,63 @@ export function hostFailureText(failures) {
     "Catalog and assignment details may be incomplete.";
 }
 
-// Host transport: SDK.fetchJSON when the shell exposes it (it injects the
-// session token), otherwise a bare fetch for the standalone fixture. Failures
-// are normalised to ApiError, so `hostStatusOf` always has a number.
+// SDK.fetchJSON injects the session token. Resolve the SDK on every request;
+// missing SDK is unavailable evidence, never permission for a bare host fetch.
 function hostTransport() {
   const sdk = globalThis.__HERMES_PLUGIN_SDK__;
   if (sdk && typeof sdk.fetchJSON === "function") {
     return (url, init) => sdk.fetchJSON(url, init);
   }
-  return async (url, init) => {
-    const opts = init || {};
-    let res;
-    try {
-      res = await fetch(url, {
-        ...opts,
-        cache: "no-store",
-        headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
-      });
-    } catch (e) {
-      throw new ApiError("Network failure: " + (e && e.message ? e.message : String(e)), { status: 0 });
-    }
-    let body = null;
-    try { body = await res.json(); } catch (e) { body = null; }
-    if (!res.ok) throw new ApiError("HTTP " + res.status, { status: res.status, body });
-    return body;
-  };
+  throw new ApiError("Dashboard SDK unavailable", { status: 0 });
+}
+
+// Validate real host read shapes, not the plugin's {ok:true} envelope.
+const record = (v) => Boolean(v && typeof v === "object" && !Array.isArray(v));
+const routePair = (v) => record(v) && typeof v.provider === "string" && typeof v.model === "string";
+export function validHostPart(part, value) {
+  if (!record(value)) return false;
+  if (part === "options") return Array.isArray(value.providers) &&
+    typeof value.provider === "string" && typeof value.model === "string" &&
+    value.providers.every((p) => record(p) && typeof p.slug === "string" &&
+      typeof p.name === "string" && Array.isArray(p.models) && p.models.every((m) => typeof m === "string"));
+  if (part === "auxiliary") return Array.isArray(value.tasks) && routePair(value.main) &&
+    value.tasks.every((t) => routePair(t) && typeof t.task === "string" && typeof t.base_url === "string");
+  if (part === "moa") return typeof value.default_preset === "string" &&
+    typeof value.active_preset === "string" && record(value.presets) &&
+    Object.values(value.presets).every((preset) => record(preset) &&
+      Array.isArray(preset.reference_models) && preset.reference_models.every(routePair) && routePair(preset.aggregator));
+  return false;
+}
+
+// Fail closed before an authenticated write. Body profile overrides query on
+// the host; a preconfirmed body would bypass the user's confirmation dialog.
+export function validateHostCall(call, operationId) {
+  const fail = () => { throw new ApiError("Invalid host step", { status: 0 }); };
+  if (!record(call) || call.opId !== operationId || !Number.isInteger(call.seq) || call.seq < 1 ||
+      typeof call.token !== "string" || !call.token || call.method !== "POST" || call.path !== HOST_ROUTES.set ||
+      !record(call.query) || Object.keys(call.query).some((k) => k !== "profile") ||
+      typeof call.query.profile !== "string" || !call.query.profile || !record(call.body)) fail();
+  const b = call.body;
+  const allowed = ["scope", "provider", "model", "task", "base_url", "reasoning_effort"];
+  if (Object.keys(b).some((k) => !allowed.includes(k)) || !["main", "auxiliary"].includes(b.scope) ||
+      typeof b.provider !== "string" || typeof b.model !== "string") fail();
+  if (b.scope === "main" && ("base_url" in b || "task" in b || "reasoning_effort" in b)) fail();
+  if (b.scope === "auxiliary" && (typeof b.task !== "string" || !b.task)) fail();
+  if ("base_url" in b) {
+    try { const u = new URL(b.base_url); if (u.username || u.password || u.search || u.hash || !["http:", "https:"].includes(u.protocol)) fail(); }
+    catch { fail(); }
+  }
+  return call;
 }
 
 // One host request. Always resolves to the parsed body or throws ApiError
 // (with a numeric status); the caller decides what a failure means.
 export async function hostJSON(path, init) {
   try {
-    return await hostTransport()(path, init);
+    return await hostTransport()(path, {
+      ...init, cache: "no-store",
+      headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
+    });
   } catch (e) {
     if (e instanceof ApiError) throw e;
     throw new ApiError("HTTP " + hostStatusOf(e), { status: hostStatusOf(e) });
@@ -276,7 +301,9 @@ export async function loadHostBundle(profileIds, { refresh = false, limit = 3 } 
       const parts = {};
       for (const part of HOST_PARTS) {
         try {
-          parts[part] = await hostJSON(pathFor(part, pid));
+          const value = await hostJSON(pathFor(part, pid));
+          if (!validHostPart(part, value)) throw new ApiError("Malformed host data", { status: 200 });
+          parts[part] = value;
         } catch (e) {
           parts[part] = null;
           failures.push({ profileId: pid, part, status: hostStatusOf(e) });
@@ -330,6 +357,8 @@ export const api = {
     method: "POST", body: JSON.stringify(payload), preserveOperationFailure: true }),
   getOperation: (id) => request("/operations/" + encodeURIComponent(id),
     { preserveOperationFailure: true }),
+  recover: (id) => request("/operations/" + encodeURIComponent(id) + "/recover",
+    { method: "POST", preserveOperationFailure: true }),
   undo: (id) => request("/operations/" + encodeURIComponent(id) + "/undo",
     { method: "POST", preserveOperationFailure: true }),
   // `POST /models {profile, provider, options, refresh, host}` →
@@ -342,7 +371,7 @@ export const api = {
   // `hostCall` (`{opId, seq, token, method, path, query, body}`); the profile is
   // the query value, URL-encoded, and the body is sent as JSON.
   hostCall: (call, { confirmExpensiveModel = false } = {}) => {
-    if (!call || !call.path) throw new ApiError("Host call missing a route", { status: 0 });
+    validateHostCall(call, call && call.opId);
     const qs = new URLSearchParams();
     const query = call.query && typeof call.query === "object" ? call.query : {};
     for (const [key, value] of Object.entries(query)) {

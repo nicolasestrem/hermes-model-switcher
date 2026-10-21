@@ -8,7 +8,7 @@ import { setRoute, modelExact } from "./route-helpers.mjs";
 // confirmation. Everything here runs against tests/mock-api.js, which emulates
 // the host routes in the host's own shapes.
 
-const URL = "/fixture.html";
+const URL = "/fixture-sdk.html";
 
 async function open(page, flags) {
   await page.goto(URL);
@@ -143,6 +143,7 @@ test("the host's expensive-model guard: Confirm applies with confirm_expensive_m
   // `declined` and the backend compensates with its own fixed category. An
   // apply consumes its review, so the change is reviewed again first.
   await expect(page.getByTestId("preview-panel")).toHaveCount(0);
+  await page.getByRole("button", { name: "Close operation drawer", exact: true }).click();
   await page.getByRole("button", { name: "Preview changes", exact: true }).click();
   await expect(page.getByTestId("preview-panel")).toBeVisible();
   await page.getByTestId("apply-custom").click();
@@ -196,6 +197,27 @@ test("a missing host route degrades with a notice instead of blocking the tab", 
 
   // The other host parts still arrived.
   expect((await hostRequests(page, "auxiliary")).length).toBeGreaterThan(0);
+});
+
+test("confirmation owns keyboard focus at mobile width and Escape cancels", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 });
+  await open(page);
+  await selectAndReview(page, ["Select default main"], "nous", "hermes-4-405b-max", { exact: true });
+  await page.getByTestId("apply-custom").click();
+  const dialog = page.getByTestId("confirm-dialog");
+  await expect(dialog).toBeVisible();
+  const confirm = page.getByTestId("confirm-accept");
+  const cancel = page.getByTestId("confirm-cancel");
+  await expect(confirm).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(cancel).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(confirm).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByTestId("operation-failure")).toHaveAttribute("data-failure-category", "host_declined");
+  await page.getByRole("button", { name: "Close operation drawer", exact: true }).click();
+  await expect(page.getByTestId("apply-custom")).toBeFocused();
 });
 
 test("Refresh catalog refetches the host options with refresh=1 before the transform", async ({ page }) => {
