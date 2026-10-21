@@ -36,12 +36,14 @@ sys.path.insert(0, str(REPO / "src"))
 from model_switcher import engine  # noqa: E402
 from model_switcher.adapters import (  # noqa: E402
     JsonConfigStoreAdapter,
+    StoreWriteAmbiguous,
     WriteOutcome,
     _set_dotted,
 )
 from model_switcher.engine import (  # noqa: E402
     ApplyHostResultRejected,
     ApplyHostTokenMismatch,
+    ApplyUndoAmbiguous,
     apply_operation,
     plan_operation,
     reconcile,
@@ -60,6 +62,7 @@ from model_switcher.journal import (  # noqa: E402
     STEP_COMPENSATED,
     STEP_CONFLICT,
     STEP_FAILED,
+    WRITE_PHASE_AMBIGUOUS,
     WRITE_PHASE_POST,
     WRITE_PHASE_PRE,
     OperationJournal,
@@ -394,6 +397,67 @@ def test_token_mismatch_makes_no_state_change(tmp_path):
         journal.close()
 
 
+def test_status_without_an_outcome_is_derived(tmp_path):
+    """The route reports an HTTP status; the engine derives the outcome
+    vocabulary from it (2xx ok, 4xx declined, 5xx error)."""
+    paths, journal = _lab(tmp_path, profiles=("ok", "declined", "error"))
+    try:
+        op_ok = plan_operation(journal, [_host_target(paths["ok"], profile="ok")])
+        token_ok = apply_operation(journal, op_ok["op_id"])["host_call"]["token"]
+        _host_write(paths["ok"], HOST_CHANGES)
+        assert submit_host_result(journal, op_ok["op_id"], 0, token_ok,
+                                  status=200)["state"] == OP_COMMITTED
+
+        op_declined = plan_operation(
+            journal, [_host_target(paths["declined"], profile="declined")])
+        token_declined = apply_operation(
+            journal, op_declined["op_id"])["host_call"]["token"]
+        out = submit_host_result(journal, op_declined["op_id"], 0,
+                                 token_declined, status=409)
+        assert out["failure_category"] == "host_declined"
+        assert _read(paths["declined"]) == LAB_DOC
+
+        op_error = plan_operation(
+            journal, [_host_target(paths["error"], profile="error")])
+        token_error = apply_operation(
+            journal, op_error["op_id"])["host_call"]["token"]
+        out = submit_host_result(journal, op_error["op_id"], 0, token_error,
+                                 status=500)
+        assert out["failure_category"] == "host_error"
+    finally:
+        journal.close()
+
+
+def test_route_expectations_can_be_supplied_at_submission_time(tmp_path):
+    """A planner that knows nothing about the route can hand the semantic keys
+    and allowed prefixes to the submit call; they are then journalled, so a
+    later reconcile would verify the same write."""
+    paths, journal = _lab(tmp_path)
+    path = paths["default"]
+    try:
+        target = _host_target(path)
+        target.pop("readback_keys")
+        target.pop("allowed_prefixes")
+        op = plan_operation(journal, [target])
+        planned = journal.get(op["op_id"])["steps"][0]
+        assert planned["host_readback_keys"] is None
+        assert planned["host_allowed_prefixes"] is None
+
+        token = apply_operation(journal, op["op_id"])["host_call"]["token"]
+        _host_write(path, HOST_CHANGES)
+        result = submit_host_result(
+            journal, op["op_id"], 0, token, "ok",
+            readback_keys=["main.provider", "main.model"],
+            allowed_prefixes=["main."])
+
+        assert result["state"] == OP_COMMITTED
+        stored = journal.get(op["op_id"])["steps"][0]
+        assert stored["host_readback_keys"] == ["main.provider", "main.model"]
+        assert stored["host_allowed_prefixes"] == ["main."]
+    finally:
+        journal.close()
+
+
 def test_used_token_cannot_be_replayed(tmp_path):
     paths, journal = _lab(tmp_path)
     path = paths["default"]
@@ -444,6 +508,49 @@ def test_unknown_outcome_is_rejected_without_a_state_change(tmp_path):
         with pytest.raises(ApplyHostResultRejected):
             submit_host_result(journal, op["op_id"], 7, token, "ok")
         assert journal.get(op["op_id"])["state"] == OP_AWAITING_HOST
+    finally:
+        journal.close()
+
+
+def test_unreadable_store_after_the_call_needs_recovery(tmp_path):
+    """A store that moved and cannot be parsed is undecidable: recovery, never
+    a guess (and never a blind compensation)."""
+    paths, journal = _lab(tmp_path)
+    path = paths["default"]
+    try:
+        op = plan_operation(journal, [_host_target(path)])
+        token = apply_operation(journal, op["op_id"])["host_call"]["token"]
+        Path(path).write_text("{not json")
+
+        result = submit_host_result(journal, op["op_id"], 0, token, "ok")
+
+        assert result["state"] == OP_RECOVERY_REQUIRED
+        assert result["failure_category"] == "store_unreadable"
+        assert _steps(result) == [STEP_CONFLICT]
+        assert Path(path).read_text() == "{not json"
+    finally:
+        journal.close()
+
+
+def test_a_second_concurrent_submission_finds_the_token_gone(tmp_path):
+    """The token is consumed atomically, so a racing second submission can
+    never evaluate the same store twice."""
+    paths, journal = _lab(tmp_path)
+    path = paths["default"]
+    try:
+        op = plan_operation(journal, [_host_target(path)])
+        token = apply_operation(journal, op["op_id"])["host_call"]["token"]
+        presented = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        # Another request got there first.
+        assert journal.consume_host_token(op["op_id"], 0, presented) is True
+        assert journal.consume_host_token(op["op_id"], 0, presented) is False
+
+        _host_write(path, HOST_CHANGES)
+        with pytest.raises(ApplyHostTokenMismatch):
+            submit_host_result(journal, op["op_id"], 0, token, "ok")
+        state = journal.get(op["op_id"])
+        assert state["state"] == OP_AWAITING_HOST
+        assert _read(path)["main"]["provider"] == "nous"  # untouched by us
     finally:
         journal.close()
 
@@ -709,6 +816,98 @@ def test_undo_of_a_host_step_never_clobbers_a_later_edit(tmp_path):
 
         assert undone["state"] == OP_RECOVERY_REQUIRED
         assert _read(path)["main"]["provider"] == "later-writer"
+    finally:
+        journal.close()
+
+
+# ------------------- 9b. an ambiguous save (StoreWriteAmbiguous)
+
+class AmbiguousSaveAdapter(JsonConfigStoreAdapter):
+    """A save lands, then the strict readback shows a document that is not ours
+    (a concurrent writer replaced the file). Carries NO post_revision."""
+
+    def apply_changes_guarded(self, changes, expected_revision=None):
+        disk = self.read() or {}
+        disk["main"] = {"interloper": True}
+        self.write(disk)  # the save really happened
+        raise StoreWriteAmbiguous(
+            "readback does not match the intended document")
+
+
+def test_ambiguous_backend_write_requires_recovery_and_refuses_undo(
+        tmp_path, monkeypatch):
+    """A StoreWriteAmbiguous step is durably ambiguous: recovery_required with
+    the fixed external_edit category, no post_revision, no compensation write
+    anywhere (not even for the clean step before it), no retry, refused undo."""
+    paths, journal = _lab(tmp_path, profiles=("clean", "ambiguous"))
+    ambiguous_path = str(paths["ambiguous"])
+    real_adapter_for = engine.adapter_for
+
+    def _adapter_for(kind, path, profile=None):
+        if path == ambiguous_path:
+            return AmbiguousSaveAdapter(path)
+        return real_adapter_for(kind, path, profile)
+
+    monkeypatch.setattr(engine, "adapter_for", _adapter_for)
+    try:
+        op = plan_operation(journal, [
+            _backend_target(paths["clean"], profile="clean"),
+            _backend_target(paths["ambiguous"], profile="ambiguous"),
+        ])
+        result = apply_operation(journal, op["op_id"])
+
+        assert result["state"] == OP_RECOVERY_REQUIRED
+        assert result["failure_category"] == "external_edit"
+        assert result["final_state"] == OP_RECOVERY_REQUIRED
+        assert _steps(result) == [STEP_APPLIED, STEP_CONFLICT]
+        step = result["steps"][1]
+        assert step["post_revision"] is None, "never adopt a post revision"
+        assert step["write_phase"] == WRITE_PHASE_AMBIGUOUS
+
+        # NO compensation write: the interloper's document stands, and the
+        # clean step before it is not rolled back either.
+        assert _read(paths["ambiguous"])["main"] == {"interloper": True}
+        assert _read(paths["clean"])["main"]["provider"] == "nous"
+
+        # Never retried: a same-id apply returns the record, writes nothing.
+        again = apply_operation(journal, op["op_id"])
+        assert again["state"] == OP_RECOVERY_REQUIRED
+        assert _read(paths["ambiguous"])["main"] == {"interloper": True}
+
+        # Undo is refused, and refusing changes nothing.
+        with pytest.raises(ApplyUndoAmbiguous) as caught:
+            undo_operation(journal, op["op_id"])
+        assert caught.value.public_reason
+        after = journal.get(op["op_id"])
+        assert after["state"] == OP_RECOVERY_REQUIRED
+        assert _steps(after) == [STEP_APPLIED, STEP_CONFLICT]
+        assert _read(paths["clean"])["main"]["provider"] == "nous"
+
+        # reconcile keeps the ambiguous operation where a human can see it.
+        assert reconcile(journal, op["op_id"])["state"] == OP_RECOVERY_REQUIRED
+        assert op["op_id"] not in {o["op_id"]
+                                   for o in journal.unfinished_operations()}
+    finally:
+        journal.close()
+
+
+# ------------------- 9c. the same rule for a host foreign diff
+
+def test_host_foreign_diff_also_refuses_undo(tmp_path):
+    """A host step that saw a foreign diff leaves the op ambiguous too: undo
+    must not restore snapshots over bytes we cannot prove are ours."""
+    paths, journal = _lab(tmp_path)
+    path = paths["default"]
+    try:
+        op = plan_operation(journal, [_host_target(path)])
+        token = apply_operation(journal, op["op_id"])["host_call"]["token"]
+        _host_write(path, HOST_CHANGES, extra={"plugins": {"x": 1}})
+        assert submit_host_result(journal, op["op_id"], 0, token,
+                                  "ok")["state"] == OP_RECOVERY_REQUIRED
+
+        with pytest.raises(ApplyUndoAmbiguous):
+            undo_operation(journal, op["op_id"])
+        assert _read(path)["plugins"] == {"x": 1}
     finally:
         journal.close()
 

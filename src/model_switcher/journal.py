@@ -324,6 +324,19 @@ class OperationJournal:
             "UPDATE steps SET host_token_hash=NULL WHERE op_id=? AND seq=?",
             (op_id, seq))
 
+    def consume_host_token(self, op_id: str, seq: int, token_hash: str) -> bool:
+        """Atomically retire a host token for a submission.
+
+        True iff THIS call consumed it: the conditional UPDATE means two
+        simultaneous submissions (double-click, retried request) can never both
+        be accepted, and the loser sees exactly the replay path (no state
+        change) instead of a second evaluation of the same store.
+        """
+        cur = self._conn.execute(
+            "UPDATE steps SET host_token_hash=NULL"
+            " WHERE op_id=? AND seq=? AND host_token_hash=?", (op_id, seq, token_hash))
+        return cur.rowcount == 1
+
     def set_host_expectations(self, op_id: str, seq: int,
                               readback_keys: Optional[List[str]] = None,
                               allowed_prefixes: Optional[List[str]] = None) -> None:

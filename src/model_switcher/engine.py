@@ -81,6 +81,25 @@ unverified or foreign write survives.
 Compensation and undo of a host step restore the step's snapshot through the
 step's backend adapter exactly as a backend step does, under the same
 post-write revision guard.
+
+AMBIGUOUS WRITES (backend and host alike)
+-----------------------------------------
+A save whose strict readback is NOT the document we intended is ambiguous, not
+ours. ``adapters.StoreWriteAmbiguous`` (no post_revision) and a host step's
+foreign diff both take the SAME path, at the moment they are detected:
+
+  * the step is durably marked ``conflict`` with ``write_phase`` ambiguous;
+  * the operation becomes ``recovery_required`` with the fixed category
+    ``external_edit``;
+  * NOTHING is compensated -- not that step (its bytes are not ours) and not
+    the clean steps before it (their snapshots would be restored without ever
+    having seen the ambiguous store);
+  * the step is never retried and never recorded as pending;
+  * ``undo_operation`` REFUSES the operation (``ApplyUndoAmbiguous``), because a
+    snapshot restore would clobber bytes we cannot prove are ours;
+  * ``reconcile`` never downgrades a conflict step.
+
+A human resolves the store and then plans a fresh operation.
 """
 from __future__ import annotations
 
@@ -93,6 +112,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .adapters import (
     StoreConflict,
     StoreUnreadable,
+    StoreWriteAmbiguous,
     StoreAdapter,
     _MISSING,
     _get_dotted,
@@ -176,6 +196,19 @@ class ApplyUnknownOperation(ApplyBlocked):
 
 class ApplyNothingToUndo(ApplyBlocked):
     public_reason = "operation has no applied steps to undo"
+
+
+class ApplyUndoAmbiguous(ApplyBlocked):
+    """Undo is refused for an operation that carries an ambiguous write.
+
+    A step whose save landed but whose strict readback shows a foreign or
+    undecidable document (``StoreWriteAmbiguous``) is never adopted as ours: its
+    snapshot must not be restored over someone else's bytes, and the other steps
+    of that operation must not be undone piecemeal either. A human resolves the
+    operation first.
+    """
+
+    public_reason = "operation is ambiguous and cannot be undone"
 
 
 class ApplyHostCallUnbound(ApplyBlocked):
@@ -488,9 +521,19 @@ def _host_expectations(step: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     reconcile can still verify the call after a restart. The default is
     deliberately narrow: the step's own changes are the only keys it may move.
     """
-    readback_keys = list(step.get("host_readback_keys") or [])
-    allowed = (list(step.get("host_allowed_prefixes") or [])
-               or sorted(step.get("changes") or {}))
+    readback_keys = [str(k) for k in (step.get("host_readback_keys") or [])
+                     if str(k).strip()]
+    # Tolerate a route prefix written as "model." (trailing dot) -- callers pass
+    # the route's own vocabulary -- and never let the list collapse to "nothing
+    # is allowed", which would make every write look foreign.
+    allowed: List[str] = []
+    for prefix in (list(step.get("host_allowed_prefixes") or [])
+                   or sorted(step.get("changes") or {})):
+        cleaned = str(prefix).strip().rstrip(".")
+        if cleaned:
+            allowed.append(cleaned)
+    if not allowed:
+        allowed = sorted(step.get("changes") or {})
     return readback_keys, allowed
 
 
@@ -535,7 +578,11 @@ def _evaluate_host_step(step: Dict[str, Any], outcome: str) -> Tuple[str, Option
       "conflict" -> a foreign diff: recovery_required, NO compensation
     """
     adapter = _adapter_for_step(step)
-    current = adapter.revision()
+    try:
+        current = adapter.revision()
+    except (StoreUnreadable, OSError):
+        # The store cannot be fingerprinted after the call: undecidable.
+        return "conflict", None, "store_unreadable"
     if current == step["pre_revision"]:
         # Revision identical before and after the call: provably no write, so
         # the step is a KNOWN no-write (a later revision change is somebody
@@ -544,7 +591,8 @@ def _evaluate_host_step(step: Dict[str, Any], outcome: str) -> Tuple[str, Option
     try:
         data = adapter.read()
     except StoreUnreadable:
-        data = None
+        # It moved AND cannot be read: never guessed -> recovery_required.
+        return "conflict", None, "store_unreadable"
     if _host_write_verified(adapter, step, data):
         if outcome == "ok":
             return "applied", current, ""
@@ -740,6 +788,20 @@ def _drive(journal: OperationJournal, op_id: str,
         adapter = _adapter_for_step(step)
         try:
             post = _apply_step(adapter, step["changes"], step["pre_revision"])
+        except StoreWriteAmbiguous:
+            # A save WAS attempted and the strict readback is not the document
+            # we intended (a foreign/undecidable write). Never adopt a
+            # post-revision, never retry, never mark it pending, and never
+            # compensate blindly -- not this step and not the ones before it
+            # (their snapshots would be restored without ever having seen the
+            # ambiguous store). The operation goes to recovery_required with
+            # the fixed category used for every foreign-diff verdict.
+            journal.set_step_phase(op_id, seq, WRITE_PHASE_AMBIGUOUS)
+            journal.set_step_state(op_id, seq, STEP_CONFLICT)
+            journal.set_failure_category(op_id, "external_edit")
+            journal.finish(op_id, OP_RECOVERY_REQUIRED)
+            return _failure_result(journal, op_id, "external_edit",
+                                   OP_RECOVERY_REQUIRED)
         except (StoreConflict, StoreUnreadable, StepFailure, OSError) as exc:
             failure = exc
             post_rev = getattr(exc, "post_revision", None)
@@ -827,6 +889,11 @@ def submit_host_result(journal: OperationJournal, op_id: str, seq: int,
         raise ApplyHostTokenMismatch("host token rejected")
     if step["state"] != STEP_AWAITING_HOST:
         raise ApplyHostResultRejected("step is not awaiting a host result")
+    # Consume the token ATOMICALLY before evaluating: a second concurrent
+    # submission with the same token loses here and gets the fixed mismatch
+    # refusal with no state change, instead of evaluating the same store twice.
+    if not journal.consume_host_token(op_id, seq, presented):
+        raise ApplyHostTokenMismatch("host token already consumed")
     normalized = _normalize_host_outcome(outcome, status)
     # The step's journalled expectations are authoritative (they survive a
     # restart); a caller may only SUPPLY them when the planner had none.
@@ -903,7 +970,12 @@ def reconcile(journal: OperationJournal, op_id: str) -> Dict[str, Any]:
     for step in op["steps"]:
         adapter = _adapter_for_step(step)
         current = adapter.revision()
-        if step["state"] == STEP_APPLIED:
+        if step["state"] == STEP_CONFLICT:
+            # Already ambiguous (a foreign diff, an unverifiable host write, or
+            # a StoreWriteAmbiguous save). reconcile NEVER downgrades it to
+            # pending/compensated: a human decides.
+            ambiguous = True
+        elif step["state"] == STEP_APPLIED:
             if current != step["post_revision"] or \
                     not adapter.readback(step["changes"]):
                 ambiguous = True
@@ -1018,6 +1090,13 @@ def undo_operation(journal: OperationJournal, op_id: str) -> Dict[str, Any]:
     op = journal.get(op_id)
     if op is None:
         raise ApplyUnknownOperation("unknown operation")
+    if op["state"] == OP_RECOVERY_REQUIRED or any(
+            s["state"] == STEP_CONFLICT for s in op["steps"]):
+        # An ambiguous write is nobody's to roll back from here: restoring the
+        # snapshot would clobber bytes we cannot prove are ours, and undoing
+        # only the clean steps would half-revert a store whose real state is
+        # unknown.
+        raise ApplyUndoAmbiguous("operation is ambiguous")
     applied = [s for s in op["steps"] if s["state"] == STEP_APPLIED]
     if not applied:
         raise ApplyNothingToUndo("operation has no applied steps to undo")
