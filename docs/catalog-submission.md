@@ -116,9 +116,12 @@ capabilities:
   requires_env: []
 ```
 
-Re-pins update `sha` and every `<sha>`-pinned image URL together. Keep `version`
-aligned with the pinned manifests, rerun validation and disclose the
-storage/compatibility limits above in the PR. Historical screenshots do not verify
+The live pinned commit is the one in
+[NousResearch/hermes-agent#141744](https://github.com/NousResearch/hermes-agent/pull/141744);
+do not copy this block's `<sha>` placeholders literally. Re-pins update `sha` and
+every `<sha>`-pinned image URL together. Keep `version` aligned with the pinned
+manifests, rerun validation and disclose the storage/compatibility limits above
+in the PR. Historical screenshots do not verify
 the final 0.3.2 tree; the `model-switcher-0.3.2-*` captures were re-taken after the
 catalog-row fix (the 0.3.0 catalog capture showed each model id twice).
 

@@ -4,19 +4,16 @@
 
 ### Documentation
 
-- Accuracy corrections: the technical reference no longer states that final
-  0.3.2 verification is recorded in release-readiness.md (that page holds the
-  0.3.0/0.3.1 evidence trail only); backlog.md reports the entry's current
-  review status; verification.md extends the public-seams
-  statement to every release from 0.3.0 onward; CLAUDE.md attributes preset
-  quarantine, salvage and `presetsCorrupt` to the plugin API's preset loader in
-  `dashboard/plugin_api.py`, not `src/model_switcher/presets.py`; the README and
-  image-README captions now state the preview shows semantic provider/model
-  intent and that the exact persisted config diff appears only after Apply
-  readback.
-- catalog-submission.md now carries the real submitted 0.3.2 entry re-pinned in
-  NousResearch/hermes-agent#141744 (awaiting maintainer re-review), with `<sha>`
-  placeholders for the pinned commit and screenshot URLs.
+- README and image-README preview captions now state that the preview shows
+  semantic provider/model intent and that the exact persisted config diff
+  appears only after Apply readback.
+- catalog-submission.md carries the submitted 0.3.2 entry with `<sha>`
+  placeholders, and its review status in
+  NousResearch/hermes-agent#141744 (awaiting maintainer re-review).
+- Smaller accuracy corrections in the technical reference, backlog.md,
+  verification.md and CLAUDE.md (including the preset storage notes, which now
+  name `dashboard/plugin_api.py` as the quarantine/salvage loader and describe
+  `src/model_switcher/presets.py` separately).
 
 ## 0.3.2
 
