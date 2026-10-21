@@ -1,7 +1,11 @@
 """Pure catalog transform of GET /api/model/options payloads; no Hermes I/O.
 
 Missing/malformed payloads fail with hostCatalogUnavailable, never an empty
-success. Provider aliases match case-insensitively; model IDs match exactly.
+success. When the UI declares the host call failed with its fixed
+``hostRestartRequired`` token (the host's 503 code-skew guard), the DTO's
+``error`` names that instead — the token is a closed-vocabulary category the
+plugin chose, never host response text. Provider aliases match
+case-insensitively; model IDs match exactly.
 Authenticated rows take precedence over unauthenticated duplicate rows.
 
 Only exact Hermes $digits[.digits] display tokens yield numeric per-million
@@ -28,6 +32,7 @@ __all__ = [
     "models_response",
     "provider_authenticated",
     "HOST_UNAVAILABLE",
+    "HOST_RESTART_REQUIRED",
     "RESULT_KEYS",
     "CATALOG_RESULT_KEYS",
     "PROVIDER_KEYS",
@@ -41,6 +46,20 @@ __all__ = [
 
 #: Fixed, non-leaking failure reason for a missing/malformed host payload.
 HOST_UNAVAILABLE = "hostCatalogUnavailable"
+
+#: Fixed failure reason for the host's 503 code-skew guard: the running
+#: dashboard process predates the checkout on disk, so ``/api/model/options``
+#: refuses with ``detail="Restart required: …"`` (upstream
+#: ``hermes_cli/web_routers/models.py`` `_dashboard_code_skew_guard`, introduced
+#: by commit f293e7206b, 2026-08-14, #86207 — i.e. the guard predates this
+#: plugin's Hermes pin). A restart fixes it; ``hostCatalogUnavailable`` alone
+#: never told the user that. The UI classifies the host detail prefix and
+#: forwards ONLY this fixed token — never the host's sentence.
+HOST_RESTART_REQUIRED = "hostRestartRequired"
+
+#: Closed vocabulary the plugin backend accepts for a caller-declared options
+#: failure. Anything else is ignored (fail-soft back to HOST_UNAVAILABLE).
+_OPTIONS_FAILURE_CATEGORIES = (HOST_RESTART_REQUIRED,)
 
 #: Keys always present on the ``/models`` DTO.
 RESULT_KEYS = ("ok", "provider", "models", "fetchedAt", "source", "stale",
@@ -320,17 +339,23 @@ def catalog_response(
     provider: str = "",
     profile_id: Optional[str] = None,
     refresh: bool = False,
+    options_failure: Optional[str] = None,
 ) -> dict:
     """Return the aggregate provider -> models -> cost catalog for a profile.
 
     ``options_payload`` is the host's ``GET /api/model/options`` body for that
     profile (``None`` when the host call failed).  ``profile_id`` is echoed as
     the DTO's ``profileId`` only.  ``refresh`` is accepted and ignored: the
-    host owns refreshing.
+    host owns refreshing.  ``options_failure`` is the caller's (UI's) fixed
+    classification of WHY the host call failed — only the closed-vocabulary
+    ``hostRestartRequired`` token is honoured, and only when the payload is
+    absent; it is a category the plugin chose, never host response text.
 
     See the module docstring for the frozen DTO and the pricing rules.
     """
     requested = str(provider or "").strip().lower()
+    declared_failure = (
+        options_failure if options_failure in _OPTIONS_FAILURE_CATEGORIES else None)
 
     result: dict = {
         "ok": False,
@@ -342,7 +367,8 @@ def catalog_response(
 
     rows = _payload_rows(options_payload)
     if rows is None:
-        result["error"] = HOST_UNAVAILABLE
+        result["error"] = (
+            HOST_RESTART_REQUIRED if declared_failure else HOST_UNAVAILABLE)
         return result
 
     rows = _dedupe_provider_rows(rows)
@@ -397,6 +423,7 @@ def models_response(
     provider: str = "",
     profile_id: Optional[str] = None,
     refresh: bool = False,
+    options_failure: Optional[str] = None,
 ) -> dict:
     """Return the provider-aware model list (frozen ``/models`` DTO).
 
@@ -404,8 +431,12 @@ def models_response(
     profile the route resolved (``None`` when that host call failed).
     ``profile_id`` and ``refresh`` are accepted for one uniform call site and
     have no effect here (no scoping and no fetching happen in this transform).
+    ``options_failure`` follows ``catalog_response``: only the fixed
+    ``hostRestartRequired`` token is honoured, and only without a payload.
     """
     requested = str(provider or "").strip().lower()
+    declared_failure = (
+        options_failure if options_failure in _OPTIONS_FAILURE_CATEGORIES else None)
 
     result: dict = {
         "ok": False,
@@ -424,7 +455,8 @@ def models_response(
 
     rows = _payload_rows(options_payload)
     if rows is None:
-        result["error"] = HOST_UNAVAILABLE
+        result["error"] = (
+            HOST_RESTART_REQUIRED if declared_failure else HOST_UNAVAILABLE)
         return result
     result["providers"] = [
         {"id": _row_id(r), "name": _row_name(r)} for r in rows if _row_id(r)

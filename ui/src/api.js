@@ -11,11 +11,14 @@
 // fully succeed", not "discard the data" — see `preserveOperationFailure` in
 // `request` and the `api` operation methods below.
 export class ApiError extends Error {
-  constructor(message, { status = 0, body = null } = {}) {
+  constructor(message, { status = 0, body = null, category = null } = {}) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.body = body;
+    // Fixed failure category the host seam can attach (see
+    // HOST_RESTART_REQUIRED): chosen by this module, never host text.
+    this.category = category;
   }
 }
 
@@ -198,11 +201,81 @@ export function hostStatusOf(err) {
   return m ? Number(m[1]) : 0;
 }
 
+// ---------------------------------------------------------------------------
+// Host 503 "Restart required" classification (host code-skew guard)
+// ---------------------------------------------------------------------------
+// The host refuses /api/model/options and /api/model/set with HTTP 503 when
+// the running dashboard process predates the checkout on disk
+// (hermes_cli/web_routers/models.py `_dashboard_code_skew_guard`:
+// ``detail="Restart required: This process is running code from <sha> but the
+// checkout on disk is now <sha>. …"``). Without a restart the picker cannot
+// work at all, so "Host data unavailable (options — HTTP 503)" leaves the user
+// stranded. We classify that case into ONE fixed category and surface ONE
+// fixed actionable sentence.
+//
+// PRIVACY: the host's detail text is read ONLY to test the fixed prefix below
+// — it is never displayed, logged, stored, or forwarded to the plugin backend.
+// The category and every user-visible sentence are this module's own constants.
+export const HOST_RESTART_REQUIRED = "hostRestartRequired";
+
+// The host's fixed detail prefix (unchanged since the guard was introduced:
+// upstream commit f293e7206b "fix(dashboard): detect stale code after hermes
+// update and refuse model picker with clear 503"). Matching the prefix is
+// deliberately strict: any other 503 detail stays an ordinary failure.
+const HOST_RESTART_REQUIRED_DETAIL_PREFIX = "Restart required:";
+
+// True only when the caught error carries the host's 503 restart-required
+// detail. The SDK's `fetchJSON` error holds the RAW response body as a string;
+// our own errors hold the parsed body (or nothing). Every shape is handled
+// defensively: malformed input is simply "not classified", never an exception.
+function restartRequiredDetail(err) {
+  const body = err && err.body;
+  let detail = null;
+  if (typeof body === "string" && body) {
+    try {
+      const parsed = JSON.parse(body);
+      if (parsed && typeof parsed === "object") detail = parsed.detail;
+    } catch { /* non-JSON body: not classified */ }
+  } else if (body && typeof body === "object") {
+    detail = body.detail;
+  }
+  return typeof detail === "string" &&
+    detail.startsWith(HOST_RESTART_REQUIRED_DETAIL_PREFIX);
+}
+
+// Fixed actionable sentence for the restart-required category (and for the
+// backend DTO error token). Never interpolates host text.
+export const HOST_RESTART_REQUIRED_NOTICE =
+  "Hermes was updated on disk but this dashboard is still running old code. " +
+  "Restart the dashboard (hermes dashboard --port <port>, or your service " +
+  "restart), then Refresh state.";
+
+// The fixed category of a caught host error, or null. Reads ONLY the category
+// this module attached; the host's own text never reaches a caller.
+export function hostFailureCategoryOf(err) {
+  return err && err.category === HOST_RESTART_REQUIRED
+    ? HOST_RESTART_REQUIRED : null;
+}
+
+// Text for a backend catalog/models DTO `error` value. The DTO's `error` is
+// already a sanitized plugin-generated string; the ONE closed-vocabulary token
+// that names the restart-required case gets the fixed actionable sentence —
+// still no host text anywhere.
+export function catalogErrorText(error) {
+  return error === HOST_RESTART_REQUIRED ? HOST_RESTART_REQUIRED_NOTICE : error;
+}
+
 // A failed host part, as a fixed category the UI can show: the route name and
 // the numeric status. Never the host's message.
 export function hostFailureText(failures) {
   const list = Array.isArray(failures) ? failures : [];
   if (!list.length) return "";
+  // The restart-required case wins: it is not "data missing", it is "this
+  // process cannot serve the picker until it is restarted" — the user needs
+  // the restart instruction, not the generic unavailable line.
+  if (list.some((f) => f && f.category === HOST_RESTART_REQUIRED)) {
+    return HOST_RESTART_REQUIRED_NOTICE;
+  }
   const routes = [...new Set(list.map((f) => f.part))];
   const statuses = [...new Set(list.map((f) => f.status))];
   const routeText = routes.join(", ");
@@ -269,8 +342,16 @@ export async function hostJSON(path, init) {
       headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
     });
   } catch (e) {
-    if (e instanceof ApiError) throw e;
-    throw new ApiError("HTTP " + hostStatusOf(e), { status: hostStatusOf(e) });
+    const status = hostStatusOf(e);
+    // Classify BEFORE wrapping so the category survives the body drop below.
+    // Neither branch carries host response text (privacy invariant).
+    const category = status === 503 && restartRequiredDetail(e)
+      ? HOST_RESTART_REQUIRED : null;
+    if (e instanceof ApiError) {
+      if (category && e.category !== HOST_RESTART_REQUIRED) e.category = category;
+      throw e;
+    }
+    throw new ApiError("HTTP " + status, { status, category });
   }
 }
 
@@ -314,7 +395,10 @@ export async function loadHostBundle(profileIds, { refresh = false, limit = 3 } 
         if (!validHostPart(part, value)) throw new ApiError("Malformed host data", { status: 200 });
         host.profiles[pid][part] = value;
       } catch (e) {
-        failures.push({ profileId: pid, part, status: hostStatusOf(e) });
+        failures.push({
+          profileId: pid, part, status: hostStatusOf(e),
+          category: hostFailureCategoryOf(e),
+        });
       }
     }
   };
@@ -327,7 +411,11 @@ export async function loadHostBundle(profileIds, { refresh = false, limit = 3 } 
 // filter, the explicit refresh flag, and the host OPTIONS payload for that
 // profile (the catalog is a pure transform of it). The whole host bundle rides
 // along so the backend can evidence credentials without another round trip.
-export function catalogBody({ profileId, provider, refresh, host } = {}) {
+// `optionsFailure` is the UI's fixed classification of WHY the options read
+// failed (only the closed-vocabulary token `hostRestartRequired` is ever
+// attached, and only when no options payload exists) — it is a category this
+// module chose, never host response text.
+export function catalogBody({ profileId, provider, refresh, host, optionsFailure } = {}) {
   const pid = profileId || "";
   const body = {
     profile: pid,
@@ -336,6 +424,9 @@ export function catalogBody({ profileId, provider, refresh, host } = {}) {
   };
   if (provider) body.provider = provider;
   if (refresh) body.refresh = true;
+  if (!body.options && optionsFailure === HOST_RESTART_REQUIRED) {
+    body.optionsFailure = HOST_RESTART_REQUIRED;
+  }
   return body;
 }
 

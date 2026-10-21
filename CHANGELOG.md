@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Host 503 "Restart required" is now named and actionable
+
+- When the running Hermes dashboard process is older than the checkout on disk,
+  upstream refuses `/api/model/options` (and `/api/model/set`) with HTTP 503
+  and a fixed `Restart required: …` detail (upstream
+  `hermes_cli/web_routers/models.py` `_dashboard_code_skew_guard`, introduced by
+  commit `f293e7206b`, 2026-08-14, #86207 — the guard predates the plugin's
+  Hermes v0.22.3 reference pin, so any pinned host can emit it after a
+  `hermes update`). Until now the tab only said
+  `Host data unavailable (options — HTTP 503)` and
+  `hostCatalogUnavailable`, leaving no hint that a dashboard restart fixes it.
+- The UI (ui/src) classifies that host failure into ONE fixed category,
+  `hostRestartRequired`, by matching the host detail's fixed prefix — the
+  host's own sentence is never displayed, logged, stored, or forwarded. The
+  host notice becomes a fixed actionable sentence: "Hermes was updated on disk
+  but this dashboard is still running old code. Restart the dashboard
+  (`hermes dashboard --port <port>`, or your service restart), then Refresh
+  state."
+- The backend DTO path carries the category too: `POST /catalog` and
+  `POST /models` accept an `optionsFailure` field with the closed vocabulary
+  `{"hostRestartRequired"}` (only accepted when no options payload is present;
+  anything else is ignored, so arbitrary values are never echoed back), and
+  `dashboard/model_catalog.py`'s transform reports it as the DTO `error` token
+  instead of `hostCatalogUnavailable`. The UI maps that token back to the same
+  fixed sentence. DTO keys are unchanged.
+- New tests: `tests/test_host_restart_required.py` (pytest: transform rules,
+  route sanitization, no host-text echo) and `tests/restart-required.spec.mjs`
+  (browser suite: classification, fixed sentences, privacy).
+
 ## 0.3.1
 
 ### Upstream reference re-pin (Hermes v0.22.3)

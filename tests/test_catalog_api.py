@@ -153,7 +153,8 @@ def test_refresh_is_transform_metadata_not_core_fetch(fake, monkeypatch, refresh
         body["refresh"] = True
     r = _client().post("/catalog", json=body)
     assert r.status_code == 200 and r.json()["ok"] is True
-    assert calls == [(fake, "nous", {"profile_id": "work", "refresh": refresh})]
+    assert calls == [(fake, "nous", {
+        "profile_id": "work", "refresh": refresh, "options_failure": None})]
     assert catalog_response(fake, refresh=True) == catalog_response(fake, refresh=False)
 
 
