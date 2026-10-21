@@ -29,12 +29,13 @@
   font-size: 14px;
   line-height: 1.5;
   min-width: 0;
+  padding: 16px;
   overflow-wrap: anywhere;
   font-variant-numeric: tabular-nums;
 }
 
 .hms-root .hms-page-header {
-  margin-bottom: 24px;
+  margin-bottom: 16px;
 }
 
 .hms-root .hms-page-header h2 {
@@ -53,7 +54,7 @@
   flex-wrap: wrap;
   gap: 8px 12px;
   align-items: center;
-  padding: 12px 0 16px;
+  padding: 8px 0 12px;
   margin-bottom: 16px;
   border-bottom: 1px solid var(--hms-border);
 }
@@ -113,16 +114,16 @@
   vertical-align: middle;
 }
 
-.hms-root button:hover:not(:disabled) {
+.hms-root button:hover:not(:disabled):not([aria-disabled="true"]) {
   border-color: var(--hms-accent);
 }
 
-.hms-root button:active:not(:disabled) {
+.hms-root button:active:not(:disabled):not([aria-disabled="true"]) {
   border-color: currentColor;
 }
 
 .hms-root .hms-preview,
-.hms-root .hms-apply:not(:disabled),
+.hms-root .hms-apply:not(:disabled):not([aria-disabled="true"]),
 .hms-root .hms-apply-preset:not(:disabled) {
   border-color: var(--hms-accent);
   font-weight: 600;
@@ -239,9 +240,7 @@
 
 /* Removal disclosure reads as advanced, but its controls stay reachable */
 .hms-root details[data-testid="removal-advanced"] {
-  border: 1px solid var(--hms-border);
-  border-radius: var(--hms-radius);
-  padding: 6px 10px;
+  padding: 4px 0;
 }
 
 .hms-root details[data-testid="removal-advanced"] summary {
@@ -261,9 +260,9 @@
 }
 
 .hms-root .hms-profile-scope {
-  flex-basis: 100%;
+  grid-column: 1 / -1;
   min-width: 0;
-  padding: 12px;
+  padding: 8px;
   border: 1px solid var(--hms-border);
   border-radius: var(--hms-radius);
 }
@@ -350,6 +349,8 @@
 
 .hms-root [data-testid="profile-options"] label {
   padding: 4px;
+  min-height: 38px;
+  align-items: center;
   overflow-wrap: anywhere;
 }
 
@@ -365,7 +366,8 @@
   border-radius: 999px;
   font-size: 13px;
   font-weight: 600;
-  line-height: 18px;
+  line-height: 1.5;
+  white-space: nowrap;
 }
 
 /* ---------- Route dropdowns (native selects) ---------- */
@@ -390,8 +392,7 @@
 }
 
 .hms-root .hms-route-exact {
-  padding-left: 12px;
-  border-left: 2px solid var(--hms-border);
+  padding-inline-start: 8px;
   font-weight: 400;
   font-size: 13px;
 }
@@ -450,7 +451,6 @@
 @media (max-width: 480px) {
   .hms-root .hms-page-header { margin-bottom: 16px; }
   .hms-root .hms-workspace-tools .hms-note { flex-basis: 100%; }
-  .hms-root .hms-filter { flex-basis: 100%; }
   .hms-root .hms-preset { width: 100%; text-align: left; }
   .hms-root [data-testid="action-surface"] { padding: 12px; }
 }
@@ -542,9 +542,7 @@
 
 .hms-root .hms-catalog-summary > div {
   min-width: 0;
-  border: 1px solid var(--hms-border);
-  border-radius: var(--hms-radius);
-  padding: 8px 10px;
+  padding: 4px 0;
 }
 
 .hms-root .hms-catalog-summary dt {
@@ -575,9 +573,9 @@
 
 .hms-root .hms-catalog-notices {
   display: grid;
-  gap: 2px;
-  border-left: 3px solid var(--hms-border);
-  padding-left: 8px;
+  gap: 4px;
+  border-top: 1px solid var(--hms-border);
+  padding-top: 8px;
 }
 
 .hms-root .hms-catalog-controls {
@@ -611,7 +609,7 @@
 
 .hms-root .hms-catalog-toggles button[aria-pressed="true"] {
   border-color: var(--hms-accent);
-  box-shadow: inset 0 0 0 1px var(--hms-accent);
+  font-weight: 600;
 }
 
 .hms-root .hms-catalog-sort {
@@ -630,7 +628,7 @@
   border: 1px solid var(--hms-border);
   border-radius: var(--hms-radius);
   overscroll-behavior: contain;
-  scroll-behavior: smooth;
+  scroll-behavior: auto;
 }
 
 .hms-root .hms-catalog-scroll:focus-visible {
@@ -773,8 +771,8 @@
   font-size: 13px;
 }
 
-.hms-root .hms-catalog-panel[data-kind="error"] {
-  border-left: 4px solid var(--hms-accent);
+.hms-root .hms-catalog-panel[data-kind="error"] strong {
+  color: var(--danger-color, var(--hms-danger-text, #e5534b));
 }
 
 @media (max-width: 768px) {
@@ -812,6 +810,71 @@
   }
 }
 
+
+/* Compact form rhythm and native filter grid: no focus-order changes. */
+.hms-root .hms-page-header p { margin-bottom: 0; }
+
+.hms-root .hms-editor-fields {
+  display: grid;
+  gap: 8px;
+}
+
+.hms-root [data-testid="change-editor"] .hms-section-description {
+  margin-bottom: 8px;
+}
+
+.hms-root .hms-matrix-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(130px, 100%), 1fr));
+  align-items: end;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.hms-root .hms-filter input,
+.hms-root .hms-filter select { margin-top: 0; }
+
+.hms-root .hms-matrix-filters > button { align-self: end; }
+
+.hms-root .hms-cost-ack {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding-block: 4px;
+}
+
+.hms-root .hms-cost-ack > input[type="checkbox"] {
+  flex: 0 0 auto;
+  margin: 3px 0 0;
+}
+
+.hms-root .hms-preview-panel {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hms-border);
+}
+
+.hms-root [data-testid="profile-filter"] input[type="text"],
+.hms-root [data-testid="profile-filter"] input:not([type]) { flex: 1 1 160px; }
+
+.hms-root button[aria-pressed="true"] {
+  border-color: var(--hms-accent);
+  font-weight: 600;
+}
+
+.hms-root summary:hover { text-decoration: underline; text-underline-offset: 3px; }
+.hms-root summary:active { color: var(--hms-accent); }
+
+@media (min-width: 600px) {
+  .hms-root .hms-workspace:not(.hms-wide) .hms-route-picks {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+  .hms-root .hms-workspace:not(.hms-wide) .hms-route-status,
+  .hms-root .hms-workspace:not(.hms-wide) .hms-route-summary {
+    grid-column: 1 / -1;
+  }
+}
 
 /* Public host seams — DESIGN §5; flat, token-paired, no decorative motion. */
 .hms-root .hms-confirm-backdrop {

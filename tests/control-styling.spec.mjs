@@ -116,6 +116,30 @@ for (const theme of ["light", "dark"]) {
   });
 }
 
+test("scoped polish keeps narrow filters compact and disclosure chrome flat", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.goto("/fixture.html");
+  const family = page.getByLabel("Filter by family", { exact: true });
+  const task = page.getByLabel("Filter by subfamily", { exact: true });
+  await expect(family).toBeVisible();
+  const familyBox = await family.boundingBox(), taskBox = await task.boundingBox();
+  expect(Math.abs(familyBox.y - taskBox.y)).toBeLessThan(1);
+  expect(taskBox.x).toBeGreaterThan(familyBox.x);
+  await expect(page.getByTestId("removal-advanced")).toHaveCSS("border-left-width", "0px");
+  const matrixTop = await page.getByTestId("matrix-scroll").evaluate(el => el.getBoundingClientRect().top + scrollY);
+  expect(matrixTop).toBeLessThan(1600);
+  const root = await page.locator(".hms-root").boundingBox();
+  expect(await family.evaluate(el => getComputedStyle(el).fontSize)).toBe("14px");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+  expect(root.width).toBeLessThanOrEqual(375);
+  await page.getByTestId("catalog-toggle").click();
+  await expect(page.getByTestId("catalog-table")).toBeVisible();
+  await expect(page.locator(".hms-catalog-scroll")).toHaveCSS("scroll-behavior", "auto");
+  await expect(page.locator(".hms-catalog-summary > div").first()).toHaveCSS("border-left-width", "0px");
+  await page.getByTestId("catalog-group-toggle").click();
+  await expect(page.locator(".hms-catalog-notices")).toHaveCSS("border-left-width", "0px");
+});
+
 test("modern theme overrides a stale opaque legacy surface", async ({ page }) => {
   await page.route("**/fixture-sdk.html", async route => {
     const response = await route.fetch();

@@ -794,7 +794,7 @@ function PresetsBar({ presets, onReview, busy }) {
       <h3 style={{ margin: "4px 0" }}>Favorite presets</h3>
       {presets.length === 0 && (
         <p data-testid="presets-empty" style={{ color: THEME.muted, margin: "4px 0" }}>
-          Keep a setup you love. Select slots, preview your changes, then save a preset to reuse them.
+          Select slots, preview your changes, then save a preset to reuse this setup.
         </p>
       )}
       <div role="list" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
@@ -850,7 +850,7 @@ function ProfileFilter({ profiles, value, onChange }) {
             {p.name || p.id}
           </label>
         ))}
-        {visible.length === 0 && <span style={{ color: THEME.muted }}>No profiles match.</span>}
+        {visible.length === 0 && <span style={{ color: THEME.muted }}>No profiles match. Change the search to see other profiles.</span>}
       </div>
     </div>
   );
@@ -941,15 +941,15 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
   return (
     <section aria-label="Profile model matrix">
       <h3 style={{ margin: "4px 0" }}>Select your targets</h3>
-      <p className="hms-section-description">Choose the profile slots you want to change. Filters help you find them; selected targets stay selected.</p>
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "baseline", margin: "4px 0" }}>
+      <p className="hms-section-description">Select profile slots to change. Filters narrow the view; selected targets stay selected.</p>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", margin: "8px 0" }}>
         <p data-testid="selection-summary" aria-live="polite" style={{ margin: 0 }}>{summaryText}</p>
         <button type="button" data-testid="clear-selection" disabled={selection.size === 0}
           title="Deselect every selected target, including ones hidden by the current filters"
           onClick={() => onClearSelection()}>Clear selection</button>
       </div>
       <div role="group" aria-label="Matrix filters"
-        style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+        className="hms-matrix-filters">
         <div className="hms-profile-scope"><strong>Profiles shown</strong>
         <ProfileFilter profiles={profiles} value={filters.profileIds}
           onChange={(profileIds) => setFilter({ profileIds, subfamily: "all" })} />
@@ -1310,15 +1310,14 @@ function ChangeEditor({
     <section aria-label="Custom change editor" data-testid="change-editor"
       style={{ marginTop: 0 }}>
       <h3 style={{ margin: "4px 0" }}>Choose your routing</h3>
-      <p className="hms-section-description">Set the route, preview the exact changes, then apply when you’re ready.</p>
-      {!hasSelection && <p style={{ color: THEME.muted }}>Select slots in the matrix to build a change.</p>}
+      <p className="hms-section-description">Preview changes before applying.</p>
       <p data-testid="editor-applicability" style={{ color: THEME.muted, margin: "0 0 4px" }}>{applicability}</p>
       {selectedSlots.some(s => s.note || s.metadata?.description) && <ul data-testid="selected-route-notes" className="hms-note">
         {[...new Set(selectedSlots.map(s => s.note || s.metadata?.description).filter(Boolean))].map(note => <li key={note}>{note}</li>)}
       </ul>}
       {selectedSlots.some(s => String(s.protocol).replaceAll("-", "_") === "typed_decision") &&
         <p className="hms-note">These targets require a compatible typed-decision route. Preview validates compatibility; a plain chat model is not interchangeable.</p>}
-      <div style={{ display: "grid", gap: 6, maxWidth: "min(640px, 100%)" }}>
+      <div className="hms-editor-fields">
         <label>Change type
           <select data-testid="change-type" aria-label="Change type" value={editor.changeType}
             onChange={(e) => set({ changeType: e.target.value })}>
@@ -1489,7 +1488,7 @@ function ChangeEditor({
           )}
         </div>
 
-        <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <label className="hms-cost-ack">
           <input type="checkbox" checked={editor.ackUnknownCost}
             onChange={(e) => set({ ackUnknownCost: e.target.checked })} />
           I acknowledge unknown-cost routes are never treated as free
@@ -1545,7 +1544,7 @@ function PreviewPanel({ preview }) {
   if (!preview) return null;
   return (
     <section aria-label="Change preview" data-testid="preview-panel"
-      style={{ marginTop: 8, border: `1px solid ${THEME.border}`, padding: 8 }}>
+      className="hms-preview-panel">
       <h3 style={{ margin: "0 0 6px" }}>Preview ({preview.changes.length} {preview.changes.length === 1 ? "change" : "changes"})</h3>
       <ul>
         {preview.changes.map((c, i) => (
@@ -2477,12 +2476,12 @@ function App() {
   );
 
   return (
-    <div ref={rootRef} className="hms-root" style={{ color: THEME.fg, padding: 12, fontFamily: "inherit" }}>
+    <div ref={rootRef} className="hms-root" style={{ color: THEME.fg, fontFamily: "inherit" }}>
       <div aria-live="polite" role="status" data-testid="live-status"
         style={{ position: "absolute", left: -9999 }}>{status.text}</div>
       <header className="hms-page-header">
         <h2>Model Switcher</h2>
-        <p>Choose models across your Hermes profiles. Review every change. Reuse your setup with presets.</p>
+        <p>Choose models across Hermes profiles. Preview changes, then apply or save a preset.</p>
       </header>
       {state.presetsCorrupt && <p role="alert" style={{ color: THEME.warn }}>
         A damaged preset store was saved aside for recovery. Its presets are not loaded; recover them before replacing saved presets.

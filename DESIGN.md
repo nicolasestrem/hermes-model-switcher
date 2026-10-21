@@ -27,5 +27,9 @@ No decorative motion or smooth-scroll dependency. Optional color transitions <=1
 ## 7. Depth & Surface
 Flat surfaces with 1px borders, 6px radius baseline. No gradients, glass, decorative shadows or dashboard card grid. Use spacing and weight for hierarchy.
 
+Refinement floor: 16px plugin-root gutters; 8px form rhythm; two-column narrow matrix filters; 14px matrix body and at least 13px secondary/badge/catalog text. Disclosures are native controls, not nested cards. Provider notices use neutral 1px separators and explicit text, not thick side stripes. Catalog counts remain a flat definition list. Never trade pinned editor/target/action order or the first Tab target for density.
+
+Inline table/editor borders resolve modern host tokens before legacy aliases, just like control chrome. Host danger/success/warning tokens remain authoritative. A modern host supplying only foreground/surface may derive semantic text from the established fallback and `--midground`; absence of that token preserves legacy colors. Measure actual enabled text in both prescribed host themes. Unavailable `aria-disabled` actions keep existing focus behavior but do not acquire enabled hover/pressed emphasis.
+
 ## 8. Accessibility Constraints & Accepted Debt
 Keyboard-reachable native controls, associated labels and inline descriptions, visible focus, indeterminate bulk checkbox, text status indicators and aria-live action feedback. Dialog drawer manages focus and Escape. Responsive/keyboard/light-dark checks at 1440/768/375px required; no accessibility or performance pass implied by this contract. Runtime coverage is bounded by installed Hermes support; unsupported selectors stay read-only. Preserve preview/apply/readback/undo, stale reviews, exact identities, non-model settings and cost acknowledgment. No live route writes during visual verification; isolate mutation tests.
