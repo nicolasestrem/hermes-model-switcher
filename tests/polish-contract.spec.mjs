@@ -112,5 +112,5 @@ test('a pinned OpenRouter selection loads the catalog without touching the disab
   await expect(model.locator('option[value="vendor/listed-model"]')).toHaveCount(1);
   expect(catalogHits).toHaveLength(1);
   await model.selectOption('vendor/listed-model');
-  await expect(page.getByTestId('route-summary')).toHaveText('Route: openrouter/vendor/listed-model');
+  await expect(page.getByTestId('route-summary')).toHaveText('Route: openrouter · vendor/listed-model');
 });

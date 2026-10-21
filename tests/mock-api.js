@@ -18,6 +18,12 @@
       // Real provider catalogs (e.g. Nous Portal) send label === id (true);
       // "missing" drops the label entirely.
       catalogIdLabels: false,
+      // Vendor-namespaced model ids: a provider whose model ids already carry
+      // their own vendor prefix (`primalabs` + `primalabs-ai/…`, `openrouter` +
+      // `openrouter/pareto-code`). Displayed routes must read `provider · model`
+      // and never re-prefix the id; off by default so every existing fixture
+      // keeps its exact provider/model totals.
+      namespacedRoutes: false,
       // ---- host route emulation (Hermes' own /api/model/*) ----------------
       // `hostMissing` / `hostMissingParts` = the route is not served at all
       // (an older host, or a plugin running without it). `hostSetHttp` = the
@@ -63,6 +69,12 @@
     mk("default", "auxiliary.vision", "auxiliary", "nous", "hermes-4-405b"),
     mk("research", "cron.model", "automation", "nous", "hermes-4-405b"),
     mk("research", "auxiliary.vision", "auxiliary", "nous", "hermes-4-405b"),
+  );
+  // Vendor-namespaced assignments: the model id already carries its provider's
+  // own namespace, so any `provider/model` display would double the prefix.
+  if (window.__mockApi.namespacedRoutes) slots.push(
+    mk("default", "auxiliary.compiler", "auxiliary", "primalabs", "primalabs-ai/DeepSeek-V4.1-Flash-1017"),
+    mk("research", "auxiliary.scout", "auxiliary", "openrouter", "openrouter/pareto-code"),
   );
 
   const presets = [{
@@ -138,6 +150,23 @@
       models: [] },
   ];
 
+  // Gated by `namespacedRoutes`: providers whose model ids already carry the
+  // vendor's own namespace (`primalabs-ai/…`, `openrouter/…`). Real hermes
+  // inventories spell ids exactly this way.
+  const namespacedProviders = [
+    { id: "primalabs", label: "Primalabs", authenticated: true, configured: true, isCurrent: false,
+      fetchedAt: "2026-10-18T12:00:00Z", stale: false, warning: null,
+      models: [
+        { id: "primalabs-ai/DeepSeek-V4.1-Flash-1017", label: "DeepSeek V4.1 Flash",
+          pricingStatus: "priced", cost: pricedCost(0.2, 0.8) },
+      ] },
+    { id: "openrouter", label: "OpenRouter", authenticated: true, configured: true, isCurrent: false,
+      fetchedAt: "2026-10-18T12:00:00Z", stale: false, warning: null,
+      models: [
+        { id: "openrouter/pareto-code", label: "Pareto Code", pricingStatus: "unknown", cost: null },
+      ] },
+  ];
+
   const bulkModels = Array.from({ length: 60 }, (_, i) => {
     const n = i + 1;
     return {
@@ -173,6 +202,7 @@
         return p;
       });
     if (M.catalogDuplicateModel && !M.catalogEmpty) base = [...base, gatewayProvider];
+    if (M.namespacedRoutes && !M.catalogEmpty) base = [...base, ...namespacedProviders];
     const rows = provider
       ? base.filter((p) => p.id === provider)
       : base;
@@ -210,7 +240,9 @@
   }
 
   function modelsFor(provider) {
-    const row = catalogProviders.find((p) => p.id === provider);
+    const pool = window.__mockApi.namespacedRoutes
+      ? [...catalogProviders, ...namespacedProviders] : catalogProviders;
+    const row = pool.find((p) => p.id === provider);
     if (!row || row.authenticated === false) {
       return { ok: false, provider, providers: [], models: [], fetchedAt: null, source: "unknown", stale: true,
         error: `provider '${provider}' is not available in this profile's catalog (not configured or not authenticated)` };

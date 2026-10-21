@@ -233,7 +233,7 @@ function CatalogRow({ provider, model, pending, grouped, routeIndex, onUse, prof
       <td data-column="configured" title={configured.title}>{configured.text}</td>
       <td data-column="use">
         <button type="button" data-testid={useId} disabled={blocked}
-          title={blocked ? `Sign-in needed for ${provider.id}; this profile cannot route there.` : `Use ${provider.id}/${model.id}`}
+          title={blocked ? `Sign-in needed for ${provider.id}; this profile cannot route there.` : `Use ${formatRoute(provider.id, model.id)}`}
           onClick={() => onUse(provider, model)}>Use</button>
         {blocked && (
           <span className="hms-catalog-use-reason">
@@ -765,19 +765,34 @@ export function subfamilyOf(slot) {
   return dot < 0 ? id : id.slice(dot + 1);
 }
 
+// A displayed route is `provider · model`, exactly like Hermes' own Models page
+// (`${eff.provider} · ${eff.model}`, web/src/pages/ModelsPage.tsx). The model id
+// is rendered verbatim and never carries a provider prefix: Hermes model ids are
+// frequently vendor-namespaced already (`openrouter/pareto-code`,
+// `primalabs-ai/DeepSeek-V4.1-Flash-1017`), so a `provider/model` string would
+// read `openrouter/openrouter/pareto-code`. This is display only — every request
+// body still carries provider and model as separate fields.
+export function formatRoute(provider, model) {
+  const p = typeof provider === "string" ? provider.trim() : "";
+  const m = typeof model === "string" ? model.trim() : "";
+  if (!p) return m;
+  if (!m) return p;
+  return `${p} · ${m}`;
+}
+
 function routeText(slot) {
   const st = normalizeState(slot.state);
   if (st === "inherited") return "inherit";
   if (st === "disabled") return "disabled";
   if (Array.isArray(slot.chain) && slot.chain.length) {
-    return slot.chain.map((route) => typeof route === "string" ? route : `${route.provider || "auto"}/${route.model || "auto"}`).join(" → ");
+    return slot.chain.map((route) => typeof route === "string" ? route : formatRoute(route.provider || "auto", route.model || "auto")).join(" → ");
   }
   if (st === "unset" || st === "auto") {
     return slot.provider || slot.model
-      ? `${slot.provider || "auto"}/${slot.model || "auto"}`
+      ? formatRoute(slot.provider || "auto", slot.model || "auto")
       : "unset / auto";
   }
-  return `${slot.provider || "auto"}/${slot.model || "auto"}`;
+  return formatRoute(slot.provider || "auto", slot.model || "auto");
 }
 
 // Diff values are arbitrary storage values: scalars, lists (chains) and route
@@ -1060,7 +1075,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
                   <td data-column="configured">{routeText(s)}</td>
                   <td style={{ color: THEME.muted }} data-column="observed" data-provider={s.provider}
                     data-model={s.model}>
-                    {s.lastObserved ? `${s.lastObserved.provider}/${s.lastObserved.model}` : "No recorded usage"}
+                    {s.lastObserved ? formatRoute(s.lastObserved.provider, s.lastObserved.model) : "No recorded usage"}
                   </td>
                 </tr>
                 {expanded[key] && (
@@ -1276,7 +1291,7 @@ function ChangeEditor({
     }
     setModelOther(false);
     set({ model: value, changeType: "set" });
-    if (value) announce?.(`Route set to ${modelProvider}/${value}`);
+    if (value) announce?.(`Route set to ${formatRoute(modelProvider, value)}`);
   };
 
   // Applicability is stated in words: a change type that cannot reach every
@@ -1419,7 +1434,7 @@ function ChangeEditor({
             )}
             {modelProvider && editor.model && (
               <p className="hms-route-summary" data-testid="route-summary">
-                Route: <code>{modelProvider}/{editor.model}</code>
+                Route: <code>{formatRoute(modelProvider, editor.model)}</code>
               </p>
             )}
           </div>
@@ -1539,7 +1554,7 @@ function routeId(text) {
 }
 
 function changeHeadline(c) {
-  const from = c.from ? `${c.from.provider || "default"}/${c.from.model || "automatic"}` : "unset";
+  const from = c.from ? formatRoute(c.from.provider || "default", c.from.model || "automatic") : "unset";
   const fromId = routeId(from);
   if (c.action === "remove") return <>remove {fromId}</>;
   const to = c.to;
@@ -1547,11 +1562,11 @@ function changeHeadline(c) {
   if (Array.isArray(to)) return <>turn off fallback — was {fromId}</>;
   if (to && Array.isArray(to.chain)) {
     if (!to.chain.length) return "disable chain (explicit empty list)";
-    const chain = to.chain.map((e) => routeId(`${e.provider}/${e.model}`));
+    const chain = to.chain.map((e) => routeId(formatRoute(e.provider, e.model)));
     return <>set chain [{chain.map((part, i) => (i > 0 ? [" → ", part] : part))}]</>;
   }
   if (to && Object.hasOwn(to, "chain") && to.chain === null) return "unset chain (inherit)";
-  const toText = to ? `${to.provider || (c.slotId === "auxiliary.openrouter_model" ? "openrouter" : "default")}/${to.model || "automatic"}` : "?";
+  const toText = to ? formatRoute(to.provider || (c.slotId === "auxiliary.openrouter_model" ? "openrouter" : "default"), to.model || "automatic") : "?";
   return <>{fromId} → {routeId(toText)}</>;
 }
 
@@ -2416,7 +2431,7 @@ function App() {
   const useCatalogRoute = (provider, model) => {
     if (provider.authenticated === false) return;
     editEditor({ ...editor, changeType: "set", provider: provider.id, model: model.id });
-    announce(`Route set to ${provider.id}/${model.id}`);
+    announce(`Route set to ${formatRoute(provider.id, model.id)}`);
     const rail = rootRef.current?.querySelector('[data-testid="change-editor"]');
     const reduce = typeof window !== "undefined" && typeof window.matchMedia === "function" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;

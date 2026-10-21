@@ -54,7 +54,7 @@ test("real router: preset select → preview → apply writes configs on disk �
   await page.getByRole("button", { name: /Fast lane/ }).click();
   const panel = page.getByTestId("preview-panel");
   await expect(panel).toBeVisible();
-  await expect(panel).toContainText("zhipu/glm-5.3-flash");
+  await expect(panel).toContainText("zhipu · glm-5.3-flash");
   await expect(page.getByTestId("apply-preset")).toBeEnabled();
   // Trace every real continuation. The initial operation is NOT committed:
   // the browser must execute hostCall, then report only seq/token/outcome/status.
@@ -182,7 +182,7 @@ test("real router: backend delegation apply reads back lab config and undoes wit
   await expect(page.getByTestId("result-research")).toContainText("Applied + read back");
   expect(cfg("research")).toMatch(/delegation:\n\s+model: glm-5.3-flash\n\s+provider: zhipu/);
   expect(cfg("default")).toBe(before.default);
-  await expect(page.locator('tr[data-row="research/delegation.model"] [data-column="configured"]')).toContainText("zhipu/glm-5.3-flash");
+  await expect(page.locator('tr[data-row="research/delegation.model"] [data-column="configured"]')).toContainText("zhipu · glm-5.3-flash");
   expect(requests.filter((r) => r.url().includes("/api/model/set"))).toHaveLength(0);
   await page.getByTestId("undo-guard").check();
   await page.getByTestId("undo-button").click();

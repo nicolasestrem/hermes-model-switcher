@@ -51,7 +51,7 @@ test('real API: edits invalidate review and refresh after mutation reveals confi
   await page.getByRole('button', { name: 'Preview changes', exact: true }).click();
   await page.getByTestId('apply-custom').click();
   await expect(page.getByTestId('result-research')).toContainText('Applied + read back');
-  await expect(page.locator('tr[data-row="research/delegation.model"] [data-column="configured"]')).toContainText('zhipu/glm-5.3-flash');
+  await expect(page.locator('tr[data-row="research/delegation.model"] [data-column="configured"]')).toContainText('zhipu · glm-5.3-flash');
   await expect(page.locator('tr[data-row="research/delegation.model"] [data-column="observed"]')).toHaveText('No recorded usage');
   await expect(page.getByTestId('preview-panel')).toHaveCount(0);
   await page.getByTestId('undo-guard').check();
@@ -85,7 +85,7 @@ test('real API: unavailable catalog is visible and manual exact ID stays usable'
   await expect(page.getByTestId('model-error')).toContainText('not available');
   await setProvider(page, 'nous');
   await setModel(page, 'deepseek/deepseek-v4.1-flash');
-  await expect(page.getByTestId('route-summary')).toHaveText('Route: nous/deepseek/deepseek-v4.1-flash');
+  await expect(page.getByTestId('route-summary')).toHaveText('Route: nous · deepseek/deepseek-v4.1-flash');
 });
 
 test('real API: a late preview response cannot revive an edited review', async ({ page }) => {
@@ -133,7 +133,7 @@ test('picker contract fixture: selection preserves provider-native IDs', async (
     await model.selectOption(id);
     await expect(page.getByLabel('Exact provider slug', { exact: true })).toHaveValue(provider);
     await expect(model).toHaveValue(id);
-    await expect(page.getByTestId('route-summary')).toHaveText(`Route: ${provider}/${id}`);
+    await expect(page.getByTestId('route-summary')).toHaveText(`Route: ${provider} · ${id}`);
   }
 });
 
