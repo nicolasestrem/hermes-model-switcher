@@ -14,6 +14,38 @@ async function open(page, theme, width) {
   await expect(page.locator('.hms-workspace')).toHaveCSS('display', width === 1440 ? 'grid' : 'block');
 }
 
+test('workflow copy and state guide selection without changing focus order', async ({ page }) => {
+  await open(page, 'dark', 1440);
+  await page.keyboard.press('Tab');
+  const preset = page.getByRole('button', { name: /Fast lane/ });
+  await expect(preset).toBeFocused();
+  await expect(preset).toContainText('Load preset');
+  await expect(page.getByTestId('live-status')).toContainText('state loaded');
+  await expect(page.getByTestId('visible-status')).toHaveCount(0);
+  await expect(page.getByTestId('selection-summary')).toHaveText('No slots selected');
+  const editor = page.getByTestId('change-editor');
+  await expect(page.getByTestId('editor-applicability')).toHaveText('Select writable slots in the table to start.');
+  await expect(editor).toHaveAttribute('data-empty', 'true');
+  await expect(page.getByTestId('catalog-summary')).toHaveText('Catalog not loaded yet');
+  await expect(page.getByTestId('removal-advanced').locator('summary')).toHaveText('Advanced: remove a specific route');
+  const actions = page.locator('.hms-workspace-tools');
+  const note = await actions.locator('.hms-note').boundingBox();
+  const refresh = await page.getByTestId('refresh-state').boundingBox();
+  expect(note.y).toBeGreaterThanOrEqual(refresh.y + refresh.height);
+  const row = page.locator('[data-row="default/main"]');
+  const before = await row.evaluate(el => getComputedStyle(el).backgroundColor);
+  await page.getByLabel('Select default main', { exact: true }).check();
+  await expect(row).toHaveAttribute('data-selected', 'true');
+  expect(await row.evaluate(el => getComputedStyle(el).backgroundColor)).not.toBe(before);
+  expect(await row.locator('[data-column="profile"]').evaluate(el => getComputedStyle(el).backgroundColor)).not.toBe('rgb(22, 24, 29)');
+  await expect(editor).toHaveAttribute('data-empty', 'false');
+  await expect(page.locator('[data-row="archived/main"]')).toContainText('Read-only');
+  await expect(page.getByLabel('Select archived main', { exact: true })).toBeDisabled();
+  await expect(page.getByTestId('removal-advanced')).toHaveCSS('margin-top', '8px');
+  await expect(page.getByTestId('picker-advanced')).toHaveCSS('margin-top', '8px');
+  await expect(page.locator('.hms-cost-ack')).toHaveCSS('margin-top', '16px');
+});
+
 for (const theme of ['light', 'dark']) for (const width of [1440, 768, 375]) {
   test(`matrix identifiers stay whole with discoverable owned scroll in ${theme} ${width}`, async ({ page }) => {
     await open(page, theme, width);

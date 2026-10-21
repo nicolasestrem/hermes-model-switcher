@@ -49,6 +49,10 @@
   margin: 0 0 16px;
 }
 
+.hms-root .hms-workspace-tools > .hms-note {
+  flex-basis: 100%;
+}
+
 .hms-root .hms-workspace-tools {
   display: flex;
   flex-wrap: wrap;
@@ -240,7 +244,8 @@
 
 /* Removal disclosure reads as advanced, but its controls stay reachable */
 .hms-root details[data-testid="removal-advanced"] {
-  padding: 4px 0;
+  padding: 0;
+  margin-top: 8px;
 }
 
 .hms-root details[data-testid="removal-advanced"] summary {
@@ -340,6 +345,7 @@
 }
 
 .hms-root tr[data-selected="true"] {
+  background: color-mix(in srgb, var(--hms-accent) 12%, var(--hms-surface));
   outline: 1px solid var(--hms-accent);
   outline-offset: -1px;
 }
@@ -418,8 +424,9 @@
 
 .hms-root .hms-catalog-tools {
   display: grid;
-  gap: 6px;
-  padding-top: 6px;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 16px;
   border-top: 1px solid var(--hms-border);
 }
 
@@ -818,6 +825,27 @@
 /* Compact form rhythm and native filter grid: no focus-order changes. */
 .hms-root .hms-page-header p { margin-bottom: 0; }
 
+.hms-root .hms-editor-guidance {
+  margin: 0 0 16px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+.hms-root [data-testid="change-editor"][data-empty="true"] .hms-editor-guidance {
+  color: inherit;
+  font-weight: 600;
+}
+
+.hms-root [data-testid="change-editor"][data-empty="true"] .hms-editor-fields > label,
+.hms-root [data-testid="change-editor"][data-empty="true"] .hms-route-field {
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+  font-weight: 400;
+}
+
+.hms-root .hms-cost-relevance,
+.hms-root .hms-readonly {
+  display: block;
+}
+
 .hms-root .hms-editor-fields {
   display: grid;
   gap: 8px;
@@ -844,7 +872,8 @@
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding-block: 4px;
+  padding-block: 0;
+  margin-top: 16px;
 }
 
 .hms-root .hms-cost-ack > input[type="checkbox"] {

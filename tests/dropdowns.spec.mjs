@@ -77,7 +77,7 @@ test("catalog line is one compact summary; freshness detail stays collapsed; Ref
   const summary = page.getByTestId("catalog-summary");
   await expect(summary).toContainText("5 providers · 15 models");
   await expect(summary).toContainText("3 stale");
-  await expect(summary).toContainText("scope default");
+  await expect(summary).toContainText("Catalog for profile default");
 
   const details = page.getByTestId("catalog-freshness");
   expect(await details.evaluate((el) => el.tagName)).toBe("DETAILS");

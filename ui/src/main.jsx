@@ -807,6 +807,7 @@ function PresetsBar({ presets, onReview, busy }) {
             onClick={() => onReview(p)}
             title={`Billing policy: ${p.billingPolicy}`}
           >
+            <span className="hms-note">Load preset · </span>
             <strong>{p.name}</strong>
             <span style={{ color: THEME.muted, marginLeft: 8, fontSize: 13 }}>
               {scopeSummary(p)}
@@ -934,7 +935,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
   const selProfileCount = new Set([...selection.values()].map((s) => s.profileId)).size;
   const inViewKeys = new Set(filtered.map(rowKey));
   const hiddenCount = [...selection.keys()].filter((k) => !inViewKeys.has(k)).length;
-  const summaryText = `${selCount} slot${selCount === 1 ? "" : "s"} on ` +
+  const summaryText = !selCount ? "No slots selected" : `${selCount} slot${selCount === 1 ? "" : "s"} on ` +
     `${selProfileCount} profile${selProfileCount === 1 ? "" : "s"} selected` +
     (hiddenCount > 0 ? ` · ${hiddenCount} hidden by current filters` : "");
 
@@ -984,7 +985,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
         </select></label>
         <button type="button" onClick={() => setFilter({ profileIds: [], family: "all", subfamily: "all", provider: "", model: "", state: "all" })}>Reset filters</button>
       </div>
-      <p style={{ color: THEME.muted, fontSize: 13, margin: "4px 0" }}>{filtered.length} matching slots · {filtered.filter(s => !canSelectSlot(s)).length} read-only. Scroll horizontally to inspect routes on narrow screens.</p>
+      <p style={{ color: THEME.muted, fontSize: 13, margin: "4px 0" }}>{filtered.length} matching slots · {filtered.filter(s => !canSelectSlot(s)).length} read-only. Scroll horizontally to inspect routes.</p>
       <div data-testid="matrix-scroll" role="region" aria-label="Scrollable model slots" tabIndex={0} style={{ maxHeight: "70vh", overflowY: "auto" }}>
       <table style={{ borderCollapse: "collapse", width: "100%" }}>
         {/* Screen-reader-only caption. The hidden styles are INLINE: the host
@@ -1021,9 +1022,9 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
             const checked = selection.has(key);
             return (
               <React.Fragment key={key}>
-                <tr data-row={key} data-selected={checked}
+                <tr data-row={key} data-selected={checked} data-readonly={!canSelectSlot(s)}
                   style={{ borderBottom: `1px solid ${THEME.border}` }}>
-                  <td data-column="select" style={{ position: "sticky", left: 0, background: stickyBg, zIndex: 1, minWidth: 32 }}>
+                  <td data-column="select" style={{ position: "sticky", left: 0, background: checked ? `color-mix(in srgb, ${THEME.accent} 12%, ${stickyBg})` : stickyBg, zIndex: 1, minWidth: 32 }}>
                     <input
                       type="checkbox"
                       aria-label={`Select ${s.profileId} ${s.slotId}`}
@@ -1032,14 +1033,15 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
                       onChange={() => onToggle(key, s)}
                     />
                   </td>
-                  <td data-column="profile" data-profile-id={s.profileId} style={{ position: "sticky", left: 40, background: stickyBg, zIndex: 1 }}>
+                  <td data-column="profile" data-profile-id={s.profileId} style={{ position: "sticky", left: 40, background: checked ? `color-mix(in srgb, ${THEME.accent} 12%, ${stickyBg})` : stickyBg, zIndex: 1 }}>
                     {profiles.find((p) => p.id === s.profileId)?.name || s.profileId}
                     {s.requiresModelBackend && (
                       <span className="hms-note" data-testid="backend-switch-note"> Current backend has no model field; choose a model-bearing backend to switch.</span>
                     )}
                     {!canSelectSlot(s) && (
-                      <span className="hms-note" data-testid="readonly-reason">
-                        {" "}{s.note ? s.note : "Profile is read-only — routing can not be changed on this profile."}
+                      <span className="hms-note hms-readonly" data-testid="readonly-reason">
+                        <strong>Read-only</strong>
+                        {" — "}{s.note ? s.note : "Routing cannot be changed on this profile."}
                       </span>
                     )}
                   </td>
@@ -1283,7 +1285,7 @@ function ChangeEditor({
   const assignmentMismatch = assignmentOnly.length > 0 && editor.changeType !== "set";
   const applicability = (() => {
     if (!writableSelected.length) {
-      return "No writable slot selected — select rows in the matrix to build a change.";
+      return "Select writable slots in the table to start.";
     }
     if (assignmentOnly.length > 0) {
       return `${assignmentOnly.length} selected speech slot(s) have no current model field. Choose a model and an explicit model-bearing backend to switch; resetting, removing or disabling an imaginary model field is not supported.`;
@@ -1307,11 +1309,11 @@ function ChangeEditor({
   })();
 
   return (
-    <section aria-label="Custom change editor" data-testid="change-editor"
+    <section aria-label="Custom change editor" data-testid="change-editor" data-empty={!writableSelected.length}
       style={{ marginTop: 0 }}>
       <h3 style={{ margin: "4px 0" }}>Choose your routing</h3>
-      <p className="hms-section-description">Preview changes before applying.</p>
-      <p data-testid="editor-applicability" style={{ color: THEME.muted, margin: "0 0 4px" }}>{applicability}</p>
+      {writableSelected.length > 0 && <p className="hms-section-description">Preview changes before applying.</p>}
+      <p data-testid="editor-applicability" className="hms-editor-guidance">{applicability}</p>
       {selectedSlots.some(s => s.note || s.metadata?.description) && <ul data-testid="selected-route-notes" className="hms-note">
         {[...new Set(selectedSlots.map(s => s.note || s.metadata?.description).filter(Boolean))].map(note => <li key={note}>{note}</li>)}
       </ul>}
@@ -1440,7 +1442,7 @@ function ChangeEditor({
 
         {/* Advanced actions are collapsed until requested. */}
         <details data-testid="removal-advanced">
-          <summary style={{ cursor: "pointer" }}>Advanced — remove an exact provider/model</summary>
+          <summary style={{ cursor: "pointer" }}>Advanced: remove a specific route</summary>
           <label>Exact route to remove (<code>provider/model</code>, matches exact identity only)
             <input value={editor.removeExact} onChange={(e) => set({ removeExact: e.target.value })}
               aria-label="Exact provider/model to remove" placeholder="e.g. openai/gpt-4o" /></label>
@@ -1463,8 +1465,8 @@ function ChangeEditor({
                   (providerList.some((p) => p.fetchedAt)
                     ? (staleProviderCount ? ` · ${staleProviderCount} stale` : " · fresh")
                     : ` · ${catalog.refreshed ? "refresh requested" : "from Hermes picker cache"}`)
-                : catalog.loading ? "Loading catalog…" : "Catalog not loaded"}
-              {" · scope "}<code>{catalogProfileId}</code>
+                : catalog.loading ? "Loading catalog…" : "Catalog not loaded yet"}
+              {catalog.data && <> · Catalog for profile <code>{catalogProfileId}</code></>}
             </span>
             <button type="button" data-testid="refresh-catalog"
               disabled={busy || catalog.loading}
@@ -1491,7 +1493,9 @@ function ChangeEditor({
         <label className="hms-cost-ack">
           <input type="checkbox" checked={editor.ackUnknownCost}
             onChange={(e) => set({ ackUnknownCost: e.target.checked })} />
-          I acknowledge unknown-cost routes are never treated as free
+          <span>I acknowledge unknown-cost routes are never treated as free
+            <span className="hms-note hms-cost-relevance">Required before Apply.</span>
+          </span>
         </label>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <button className="hms-preview" disabled={!writableSelected.length || busy || chainBad || incompatibleChain || mixedScalar || assignmentMismatch || !buildCustomChanges(editor, selectedSlots).length}
@@ -1507,7 +1511,7 @@ function ChangeEditor({
           <span style={{ color: THEME.muted, alignSelf: "center" }}>
             {busy ? "Request in progress…" : preview
               ? previewInvalid ? "Preview stale — preview your changes again" : `${preview.changes.length} ${preview.changes.length === 1 ? "change" : "changes"} reviewed`
-              : !hasSelection ? "Select writable targets first" : incompatibleChain || mixedScalar || assignmentMismatch ? "Resolve the selection mismatch first" : "Preview required"}
+              : !hasSelection ? "" : incompatibleChain || mixedScalar || assignmentMismatch ? "Resolve the selection mismatch first" : "Preview required"}
           </span>
           {preview && !editor.ackUnknownCost && <span className="hms-note">Acknowledge the cost policy before applying.</span>}
         </div>
@@ -2550,7 +2554,7 @@ function App() {
             seam) or a failed preview used to be silent on screen: the button
             just did nothing. Mirror the same message visibly, next to the
             buttons that trigger it. */}
-        {status.text && (
+        {status.text && status.text !== "Model switcher state loaded" && (
           <p data-testid="visible-status" data-kind={status.kind}
             style={{
               margin: "0 0 8px", fontSize: 13,
