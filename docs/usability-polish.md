@@ -15,7 +15,7 @@ editor-first DOM order and wide-screen matrix/rail arrangement.
 Selection counts use a polite live announcement. Provider browsing explains
 both an empty catalog and a search with no matches, retaining manual exact-ID
 entry. Secondary inline text respects the 13 px minimum. Model identifiers wrap,
-preview entries have clearer separation, and narrow screens stack filter fields.
+preview entries have clearer separation, and narrow screens wrap filter fields.
 All styles remain scoped to the plugin and use host tokens; no external fonts,
 decorative animation, or additional network requests were introduced.
 
@@ -175,7 +175,41 @@ The polish does not relax the review pipeline:
   state automatically; **Last observed** stays **No recorded usage** until real
   runtime usage evidence exists and is never fabricated from configuration.
 
-## Evidence boundary and verification
+## Impeccable scoped polish — observed fixture evidence
+
+This refinement preserves the host-native design contract, native selects, editor-first DOM, pinned first Tab target, seven matrix columns, exact DTOs and every preview/apply/readback/undo guard. It restores 14px matrix body / 13px secondary text, modern host-token precedence, readable semantic fallbacks on both prescribed host themes, 16px root gutters, two-column narrow filters and compact tablet picks. It removes duplicate no-selection prose, both thick side borders, nested advanced-disclosure chrome, metric-card boxes and smooth scrolling. Empty-state copy is concrete; unavailable Apply no longer receives enabled hover/primary emphasis.
+
+Evidence is in the profile scratch `impeccable-polish/` folder, not committed screenshots:
+
+| Evidence | Observed result |
+|---|---|
+| Independent critique | Before 26/40; after 27/40. Before specificity qualitative; after 7/10. Remaining issues below. |
+| Static detector `detect --json ui/src` | 2 side-tab warnings → `[]`; final exit 0 |
+| Rendered detector `detect --json http://localhost:8951/fixture.html` | edge-gutter + nested-card warnings → `[]`; final exit 0 |
+| SDK host-reset detector | `[]`, exit 0 |
+| State matrix | Before and after: 96 unique state/theme/viewport cells, 300 PNGs each; 1440×900 / 768×1024 / 375×812, light + dark |
+| States | Initial, selected matrix, editor, preview, host loading/partial/unavailable, host-step apply progress, confirm, host error, recovery required, catalog + priced/free/unknown/unauthenticated rows |
+| Enabled-text contrast samples, light / dark | Foreground 17.495 / 14.496; muted 6.711 / 7.774; danger 6.411 / 6.876; success 6.523 / 9.948; warning 6.473 / 10.170 |
+| Build | `npm run build`, exit 0 |
+| Mock specs | `env -u PYTHONPATH HMS_FXT_PORT=8951 node_modules/.bin/playwright test --config=/home/hermes/.hermes/profiles/brian/cache/scratch/ps-ui-mock.config.mjs --workers=2`, exit 0; **138 passed, 0 failed** |
+| Stylesheet contract | `ui/src/styles.css`, `dashboard/dist/style.css`, `ui/dist/style.css` byte-equal; scoped-style spec green |
+
+The new regression tests assert actual host-rule colors, 14/13px type, sampled warning-text contrast in both themes, compact two-column filters, flat disclosure/notices/counts and no smooth-scroll dependency. Existing behavior assertions were not weakened. Build outputs were generated only with the build command.
+
+The first rendered detector needed a local Chromium executable override; failed attempts are preserved rather than counted as clean scans. Successful final scans used installed Chromium1248. No browser download or live configuration writes occurred. Initial Assessment A used the ordinary fixture; the controlled before/after state matrix uses the same SDK fixture. Its provisional recovery score was revised after exercising failures, so the one-point overall improvement is not an accessibility or quality certification.
+
+### Deliberately retained / pin conflicts
+
+- Editor-first DOM and first Tab on the preset remain pinned: stacked target/editor travel is improved, not eliminated. No new workflow jump/reordering was introduced.
+- Consequential Apply still appears before exact preview spatially; review gates were preserved rather than moved under a polish label.
+- Repeated-profile result rows need richer target identity only if actual DTOs provide it; no fields were invented. Recovery guidance needs separately scoped, guard-aware copy.
+- The critique's generic four-item cognitive-load advice does not justify dropping any of the pinned seven matrix columns.
+- Host fonts, surfaces, explicit semantic token overrides and legacy fallbacks remain authoritative. No new palette/font/motion/portal was introduced.
+
+Reports: `CRITIQUE.md`, `assessment-a-after.md`, `assessment-b-after.md`, `FINAL.md`; raw `before-static.json`, `before-rendered-browser-path.json`, `after-static.json`, `after-rendered.json`, `after-rendered-sdk.json`; both state manifests and PNGs. The scratch evidence is fixture-only, not a live-host, screen-reader, zoom/reflow, performance, or accessibility PASS.
+
+
+## Earlier evidence boundary and verification
 
 Observed evidence for this pass is bounded and must not be read more broadly
 than it is:
