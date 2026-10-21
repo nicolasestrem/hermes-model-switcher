@@ -185,6 +185,47 @@ test("a host error during apply is reported by fixed category, never the host's 
   await expect(page.getByTestId("visible-status")).not.toContainText("500:");
 });
 
+// Round-2 finding (PR #17, discussion_r4332719377): a DECIDED no-write host
+// step — the user declined the confirmation, the host answered an error, or
+// the host answered ok but wrote nothing — ends the operation ``pending``
+// with a fixed category in {host_declined, host_error, host_no_write} and
+// every step failed-or-never-attempted. The store is provably untouched, so
+// the operation is finished-with-issues and retryable after a fresh review.
+// It must NOT fall into the unfinished path that demands recovery: that
+// locked Preview/Apply until a page reload, contradicting the retry copy.
+for (const [title, flags] of [
+  ["a declined confirmation", {}],
+  ["a host error before any write", { hostSetHttp: 500 }],
+  ["a host ok-but-no-write", { hostNoWrite: true }],
+]) test(`${title} stays retryable: no recovery prompt, fresh Preview works`, async ({ page }) => {
+  const declined = !Object.keys(flags).length;
+  await open(page, declined ? undefined : flags);
+  await selectAndReview(page, ["Select default main"], "nous",
+    declined ? "hermes-4-405b-max" : "hermes-4-405b", declined ? { exact: true } : undefined);
+  await page.getByTestId("apply-custom").click();
+  if (declined) {
+    const dialog = page.getByTestId("confirm-dialog");
+    await expect(dialog).toBeVisible();
+    await page.getByTestId("confirm-cancel").click();
+    await expect(dialog).toHaveCount(0);
+  }
+  await expect(page.getByTestId("operation-failure")).toHaveAttribute("data-failure-category",
+    declined ? "host_declined" : flags.hostNoWrite ? "host_no_write" : "host_error");
+
+  // Known no-write: the operation ends finished-with-issues — no recovery
+  // banner, no "interrupted" readback note like a lost continuation.
+  await expect(page.getByTestId("apply-progress")).toContainText("finished with issues");
+  await expect(page.getByTestId("recover-operation")).toHaveCount(0);
+  await expect(page.getByTestId("operation-state")).toContainText("Not changed — review again");
+
+  // The user can review again immediately — no reload, no recovery round-trip.
+  await page.getByRole("button", { name: "Close operation drawer", exact: true }).click();
+  await page.getByRole("button", { name: "Preview changes", exact: true }).click();
+  await expect(page.getByTestId("preview-panel")).toBeVisible();
+  // And the fresh review re-enables Apply (aria-disabled, never a dead button).
+  await expect(page.getByTestId("apply-custom")).toHaveAttribute("aria-disabled", "false");
+});
+
 test("a missing host route degrades with a notice instead of blocking the tab", async ({ page }) => {
   // One host route absent (an older Hermes); the config half still works.
   await open(page, { hostMissingParts: ["options"] });

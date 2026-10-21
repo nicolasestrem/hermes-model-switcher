@@ -2427,9 +2427,22 @@ function App() {
       }
       const terminal = ["committed", "undone", "partial", "compensated", "recovery_required", "failed"];
       const finalState = op.operation.final_state || op.operation.state;
-      const noWriteConflict = finalState === "pending" && op.operation.failure === "revision_conflict" &&
+      // A DECIDED no-write host step — the user declined the confirmation,
+      // the host answered an error, or it answered ok but the store revision
+      // did not move — ends the op ``pending`` with a fixed category and every
+      // step failed-or-never-attempted. The store is provably untouched, so
+      // the operation is finished-with-issues and retryable after a fresh
+      // review; it must not fall into the unfinished path below, which would
+      // demand recovery (and lock Preview/Apply until reload) for a store
+      // that never changed. Categories that can follow a real or ambiguous
+      // write (external_edit, store_unreadable, write_verification_failed)
+      // never end ``pending``, so they keep the recovery gate. The
+      // lost-continuation catch below is untouched: there, ``pending`` may
+      // mean a write whose result was lost.
+      const NO_WRITE_FAILURES = new Set(["revision_conflict", "host_no_write", "host_declined", "host_error"]);
+      const noWriteFailure = finalState === "pending" && NO_WRITE_FAILURES.has(op.operation.failure) &&
         op.operation.results.every((r) => ["failed", "pending"].includes(r.status));
-      if (!terminal.includes(finalState) && !noWriteConflict) throw new ApiError("Operation is unfinished");
+      if (!terminal.includes(finalState) && !noWriteFailure) throw new ApiError("Operation is unfinished");
       setRecoveryNeeded(finalState === "recovery_required");
       setProgress({ entries: progressEntries(op.operation, null, profileNameOf),
         note: op.ok === true ? "finished" : finalState === "recovery_required" ? "recovery required" : "finished with issues" });
