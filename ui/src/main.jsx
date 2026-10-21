@@ -1128,7 +1128,7 @@ export function chainInvalid(entries) {
 
 function ChangeEditor({
   selection, slots, editor, setEditor, onPreview, onApply, preview, previewInvalid,
-  busy, host, catalog, catalogProfileId, onEnsureCatalog, onRefreshCatalog, onRetryCatalog, announce,
+  busy, host, catalog, catalogProfileId, catalogOptionsFailure, onEnsureCatalog, onRefreshCatalog, onRetryCatalog, announce,
 }) {
   const selectedSlots = slots.filter((s) => selection.has(s.profileId + "/" + s.slotId));
   const hasSelection = selectedSlots.length > 0;
@@ -1181,7 +1181,7 @@ function ChangeEditor({
     setModelState({ key, data: null, error: null, loading: true });
     try {
       const data = await Promise.race([
-        api.getModels({ provider, profileId: catalogProfileId, host }),
+        api.getModels({ provider, profileId: catalogProfileId, host, optionsFailure: catalogOptionsFailure }),
         new Promise((_, reject) => setTimeout(
           () => reject(new Error("Model list timed out — retry, or choose Other to type an exact model id.")),
           4000,
@@ -2134,6 +2134,10 @@ function App() {
   const [progress, setProgress] = useState(null);
   const [confirmAsk, setConfirmAsk] = useState(null);
   const hostRef = useRef({ profiles: {} });
+  // Per-profile failure categories from the last host read, keyed by profile
+  // id. ensureHostFor returns these on cache hits so callers (loadCatalog,
+  // fetchModels) can still derive optionsFailure without a redundant fetch.
+  const hostFailuresRef = useRef(new Map());
   const confirmResolve = useRef(null);
   const reviewSeq = useRef(0);
   const catalogSeq = useRef(0);
@@ -2158,6 +2162,16 @@ function App() {
     const { host: bundle, failures } = await loadHostBundle(profileIds, { refresh });
     if (mine !== hostSeq.current || (seq !== null && seq !== loadSeq.current)) return null;
     adoptHost(bundle);
+    // Cache per-profile failure categories so ensureHostFor cache hits and
+    // /models can still carry the fixed optionsFailure token.
+    for (const f of failures) {
+      const fp = f.profileId || "";
+      if (!hostFailuresRef.current.has(fp)) hostFailuresRef.current.set(fp, []);
+      hostFailuresRef.current.get(fp).push(f);
+    }
+    for (const [pid, parts] of Object.entries(bundle.profiles)) {
+      if (parts && parts.options) hostFailuresRef.current.delete(pid);
+    }
     const available = Object.values(bundle.profiles).some((parts) => Object.values(parts).some(Boolean));
     setHostNotice({ text: hostFailureText(failures), kind: available ? "partial" : "unavailable" });
     // Upgrade the config-only paint with the host-derived rows. Best effort:
@@ -2182,10 +2196,14 @@ function App() {
   const ensureHostFor = async (profileId, { refresh = false } = {}) => {
     const pid = profileId || "";
     const current = hostRef.current && hostRef.current.profiles ? hostRef.current.profiles[pid] : null;
-    if (current && !refresh) return { parts: current, failures: [] };
+    if (current && !refresh) return { parts: current, failures: hostFailuresRef.current.get(pid) || [] };
     const { host: bundle, failures } = await loadHostBundle([pid], { refresh });
     const merged = { profiles: { ...(hostRef.current.profiles || {}), ...bundle.profiles } };
     adoptHost(merged);
+    // Store/clear per-profile failure categories for this profile.
+    const pf = failures.filter((f) => (f.profileId || "") === pid);
+    if (pf.length) hostFailuresRef.current.set(pid, pf);
+    else if (merged.profiles[pid] && merged.profiles[pid].options) hostFailuresRef.current.delete(pid);
     if (failures.length) setHostNotice({ text: hostFailureText(failures), kind: "partial" });
     return { parts: merged.profiles[pid], failures };
   };
@@ -2275,6 +2293,13 @@ function App() {
   // Scope for /catalog and /models: the single checked profile, else default
   // (same rule the retired picker used). The freshness line states the scope.
   const catalogProfileId = filters.profileIds.length === 1 ? filters.profileIds[0] : "default";
+  // Derive optionsFailure for the editor's profile scope from the cached
+  // failure categories, so /models (which doesn't go through ensureHostFor)
+  // can still carry the fixed token on a cache hit.
+  const catalogOptionsFailure = (!host?.profiles?.[catalogProfileId]?.options &&
+    (hostFailuresRef.current.get(catalogProfileId) || []).some((f) =>
+      f && f.part === "options" && f.category === HOST_RESTART_REQUIRED))
+    ? HOST_RESTART_REQUIRED : null;
   const selectedSlots = slots.filter((slot) => selection.has(slot.profileId + "/" + slot.slotId));
   const customChanges = buildCustomChanges(editor, selectedSlots);
   const customFingerprint = "custom:" + JSON.stringify(customChanges);
@@ -2761,6 +2786,7 @@ function App() {
           editor={editor} setEditor={editEditor}
           host={host}
           catalog={catalog} catalogProfileId={catalogProfileId}
+          catalogOptionsFailure={catalogOptionsFailure}
           onEnsureCatalog={() => loadCatalog()}
           onRefreshCatalog={() => loadCatalog({ refresh: true })}
           onRetryCatalog={() => loadCatalog({ force: true })}

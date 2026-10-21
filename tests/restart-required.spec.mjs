@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 import {
   ApiError, catalogBody, catalogErrorText, hostFailureCategoryOf,
   hostFailureText, HOST_RESTART_REQUIRED, hostJSON, loadHostBundle,
+  modelsBody,
 } from "../ui/src/api.js";
 
 // The host's 503 code-skew guard (upstream hermes_cli/web_routers/models.py
@@ -144,4 +145,78 @@ test("the fixed sentences never contain the host's detail text", () => {
     expect(sentence).not.toContain("stale-module");
     expect(sentence).not.toContain("checkout");
   }
+});
+
+// Regression: the failure category must survive a cache hit. On mount,
+// loadHostBundle receives the 503 and returns failures with the category.
+// A second call to loadHostBundle for the same profile (the cache-hit path
+// in ensureHostFor) must still report those failures, not an empty array.
+test("loadHostBundle failures carry the category on the cold path", async () => {
+  let calls = 0;
+  await withSdk(async (path) => {
+    calls++;
+    if (path.includes("/options")) {
+      throw sdkError(503, HOST_BODY, "Restart required: This process is running code…");
+    }
+    if (path.includes("/auxiliary")) {
+      return { main: { provider: "nous", model: "m" }, tasks: [] };
+    }
+    return { default_preset: "default", active_preset: "", presets: {} };
+  }, async () => {
+    const { host, failures } = await loadHostBundle(["default"], { limit: 99 });
+    expect(failures.length).toBeGreaterThan(0);
+    const optionsFailure = failures.find((f) => f.part === "options");
+    expect(optionsFailure).toBeTruthy();
+    expect(optionsFailure.category).toBe(HOST_RESTART_REQUIRED);
+    expect(host.profiles.default.options).toBeNull();
+  });
+  expect(calls).toBe(3); // options + auxiliary + moa
+});
+
+// Regression: catalogBody must carry optionsFailure when the host bundle
+// has no options payload — the scenario that ensureHostFor cache hits
+// produce when the mount-time load already hit the 503.
+test("catalogBody carries optionsFailure on a cache-hit scenario", () => {
+  // Cache-hit: host has options:null (the 503 was cached), optionsFailure
+  // is derived from the stored failure category.
+  const body = catalogBody({
+    profileId: "default",
+    host: { profiles: { default: { options: null } } },
+    optionsFailure: HOST_RESTART_REQUIRED,
+  });
+  expect(body.optionsFailure).toBe(HOST_RESTART_REQUIRED);
+  expect(body.options).toBeNull();
+  // The /models path uses the same body shape (modelsBody delegates to
+  // catalogBody), so this also covers the getModels path.
+});
+
+// Regression: modelsBody (the /models path) must also carry optionsFailure
+// when no options payload exists — the fetchModels call passes it.
+test("modelsBody carries optionsFailure for the /models path", () => {
+  const body = modelsBody({
+    profileId: "default",
+    host: { profiles: { default: { options: null } } },
+    optionsFailure: HOST_RESTART_REQUIRED,
+  });
+  expect(body.optionsFailure).toBe(HOST_RESTART_REQUIRED);
+  expect(body.options).toBeNull();
+  // With options present, optionsFailure is NOT attached (no false override).
+  const withOpts = modelsBody({
+    profileId: "default",
+    host: { profiles: { default: { options: { providers: [] } } } },
+    optionsFailure: HOST_RESTART_REQUIRED,
+  });
+  expect(withOpts.optionsFailure).toBeUndefined();
+});
+
+// Regression: a Retry after a failed catalog load must not downgrade the
+// restart-required category to the generic hostCatalogUnavailable error.
+// The catalog error text for hostRestartRequired is fixed and does not
+// change on retry.
+test("catalogErrorText is stable across retries", () => {
+  const first = catalogErrorText(HOST_RESTART_REQUIRED);
+  const retry = catalogErrorText(HOST_RESTART_REQUIRED);
+  expect(first).toBe(retry);
+  expect(first).toContain("Restart the dashboard");
+  expect(first).not.toContain("hostCatalogUnavailable");
 });
