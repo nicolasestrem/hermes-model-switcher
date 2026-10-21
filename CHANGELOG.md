@@ -21,8 +21,79 @@
   contains a colon (`custom:my-endpoint`) still works there and is not
   reinterpreted as a displayed route.
 
+### Per-model capability flags in the catalog
+
+- The catalog and `/models` DTOs now expose the host's per-model capability
+  evidence as an optional, allowlisted `capabilities` object on each model
+  entry — `{fast, reasoning, canDisableReasoning}`, booleans only — so the UI
+  can filter on them. The object appears only when the host reported at least
+  one of those flags for that exact model id; a model the host knows nothing
+  about carries no `capabilities` key at all, because missing means unknown and
+  is never defaulted to false. Non-boolean values are dropped, and other host
+  keys (`ultrafast`, `supported_efforts`, tools/vision/context) are not
+  forwarded.
+- `tests/mock-api.js` host `/api/model/options` rows gained a per-row
+  `capabilities` map for `hermes-4-405b`, `hermes-4-70b`, `hermes-4-mini` and
+  `deepseek-v4.1-flash`, so the default mock fixture carries flags too.
+
+### Model picker: Lab select and filter for multi-lab providers
+
+- A provider whose model ids span two or more vendor namespaces (openrouter, 62
+  models across 19 labs; nous, 67 across 21) now shows a labelled native `Lab`
+  select above `Model`: `All labs (62)`, then each lab by label with its count.
+  Rows under "All labs" are one `<optgroup>` per lab (`Anthropic · 9`) showing
+  the leaf id (`claude-opus-5.5`); a chosen lab shows the same leaf rows flat.
+- A `Filter models` search box (multi-lab providers, and any list over 20
+  models such as opencode-go's 46 bare ids) matches ids and names
+  case-insensitively and combines with the lab filter. The placeholder states
+  the narrowed count (`Choose a model (3 of 62)…`), zero matches add a disabled
+  `No models match`, and `Other — type an exact model id…` is always available.
+- Option values, option titles and the Route line keep the full model id, so
+  preview/apply still send `{provider, model}` unchanged. A filtered-out
+  selection stays pinned in the select (lab named) so the editor cannot lose
+  the value, and lab and filter reset when the provider changes.
+- Unknown prices no longer append `— price not published` to every row; when
+  every model of the selected provider is unknown, one muted note under the
+  select says `No list prices published for this provider.` Real rates, `free`
+  and `included in subscription` still render per row, and unknown data is
+  still never shown as free or `$0.00`.
+- Single-lab and bare-id providers keep today's flat full-id option text. New
+  `tests/picker-labs.spec.mjs` and `tests/picker-labs-layout.spec.mjs` cover
+  them.
+
+### Model catalog: set-up providers first, real filters, honest prices
+
+- The catalog now leads with providers whose `authenticated` is not false
+  (current provider first, host order otherwise) and collapses every
+  `authenticated: false` provider into one native "Not set up (N)" disclosure
+  at the bottom, collapsed by default and still truthful when opened ("sign-in
+  needed"). The header states `N set up · N providers · N models`, so a 9/54
+  profile no longer looks like 54 empty headers with the few working providers
+  buried in host order (opencode-go was 34th of 54).
+- Filters are real: Lab (counts across providers via the shared labs helper),
+  Provider (set-up only), Status (All / Set up / Needs sign-in), In use (exact
+  provider+model slots), Fast and Can disable reasoning (only rendered when a
+  loaded model carries `capabilities`), and "OpenRouter :free ids" labelled as
+  an id-suffix match, explicitly not a price claim.
+- Price controls are conditional: with no `priced`/`free` row (every one of
+  the 1,584 audited models is `unknown`) the Free only / Priced only buttons
+  and both price sort options are hidden, sort falls back to Name, and one note
+  says why. Price data that exists behaves exactly as before.
+- "Group by provider" became a `Group by` select: Provider (with the ordering
+  above), Lab (cross-provider groups; leaf id shown, full id in the title), or
+  None (flat table with dedicated Provider and Lab columns, still 100 rows per
+  page with Show all N).
+- The catalog profile is explicit: a labelled "Catalog for profile" select
+  seeds from a single checked matrix profile (else `default`), loads through
+  the existing catalog cache/fetch path, and is named in the provenance line.
+  New `tests/catalog-filters.spec.mjs` and a realistic 54-provider/258-model
+  fixture pin all of it.
+
 ### Documentation
 
+- README, DESIGN.md §5 and the technical reference now describe the picker's
+  Lab select and filter, the catalog's set-up-first structure with its
+  conditional price controls, and the allowlisted `capabilities` object.
 - README and image-README preview captions now state that the preview shows
   semantic provider/model intent and that the exact persisted config diff
   appears only after Apply readback.

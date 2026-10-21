@@ -471,6 +471,32 @@
   font-size: 13px;
 }
 
+/* Lab + filter for a long Model list (aggregators such as openrouter/nous).
+   Both span the pick grid so the reading order stays provider → lab → filter →
+   model; they sit side by side while there is room and stack when there is
+   not. Counts are muted text, never a colour-only signal. */
+.hms-root .hms-picker-narrow {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.hms-root .hms-picker-match {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-weight: 400;
+  font-size: 13px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+.hms-root .hms-picker-price-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-weight: 400;
+}
+
 .hms-root .hms-route-status {
   display: flex;
   flex-wrap: wrap;
@@ -688,6 +714,59 @@
   font-weight: 600;
 }
 
+/* Labelled native selects: the catalog's real filters (lab, provider, setup
+   status, grouping, profile). Each keeps a 38px target and wraps as a unit. */
+.hms-root .hms-catalog-filter {
+  display: grid;
+  gap: 4px;
+  flex: 1 1 160px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.hms-root .hms-catalog-filter select {
+  min-height: 38px;
+  max-width: 100%;
+}
+
+.hms-root .hms-catalog-profile {
+  flex: 0 1 auto;
+}
+
+.hms-root .hms-catalog-profile select {
+  max-width: 240px;
+}
+
+.hms-root .hms-catalog-match-count {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+/* Providers that are authenticated: false live in ONE native disclosure at the
+   bottom instead of interleaving empty headers through the catalog. */
+.hms-root .hms-catalog-unsetup {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--hms-border);
+  padding-top: 8px;
+}
+
+.hms-root .hms-catalog-unsetup > summary {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.hms-root .hms-catalog-unsetup > p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
 .hms-root .hms-catalog-sort {
   display: grid;
   gap: 4px;
@@ -887,6 +966,9 @@
   }
   .hms-root .hms-catalog-sort {
     flex: 1 1 100%;
+  }
+  .hms-root .hms-catalog-filter {
+    flex-basis: 100%;
   }
 }
 
