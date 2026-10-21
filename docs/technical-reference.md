@@ -1,135 +1,207 @@
 # Technical reference
 
-Implementation and advanced routing details for contributors.
+Implementation and advanced routing details for contributors. The 0.3.0 integration
+uses public Hermes modules and authenticated Dashboard routes only.
 
 ## Dashboard integration
 
-3b. Frontend host contract — the Dashboard entry is a plain IIFE that hands a
-   React component to the host registry, exactly as documented in Hermes'
-   *Extending the Dashboard* guide:
+The Dashboard entry is a plain IIFE that registers synchronously:
+`window.__HERMES_PLUGINS__.register("hermes-model-switcher", App)`. The registered
+name must equal `dashboard/manifest.json`'s `name`; the host mounts the component.
+React comes from `window.__HERMES_PLUGIN_SDK__.React`, not a bundled React or an
+assumed `globalThis.React`. Self-mounting is a standalone fixture fallback only.
 
-   - React comes from `window.__HERMES_PLUGIN_SDK__.React`. React is never
-     bundled, and **the Dashboard does not set `globalThis.React` /
-     `globalThis.ReactDOM`** — a bundle that destructures them dies on load with
-     `Cannot destructure property 'useState' of 'q' as it is undefined`.
-   - The entry registers synchronously and must not mount itself:
-     `window.__HERMES_PLUGINS__.register("hermes-model-switcher", App)`. The
-     registered name must equal `dashboard/manifest.json`'s `name`, and the host
-     renders the component inside the tab. There is no ReactDOM on the SDK and no
-     host-provided root element.
-   - Control styling is plugin-owned: the manifest declares `css: "dist/style.css"`,
-     built from `ui/src/styles.css` and shipped beside the JS in both checkout and
-     assembled package. Tailwind's host reset removes native button/input/select
-     chrome; an unstyled control in the DOM is not a usable action. Scoped styles
-     supply borders, padding, focus rings and disabled feedback without changing
-     other Dashboard tabs. Fixtures load this same asset under the host reset,
-     rather than supplying their own control styles.
-   - Theme colours follow the Dashboard's background/midground tokens, with legacy
-     aliases supported. Sticky headers reject unsafe alpha values and use an opaque
-     theme background instead of a universally dark fallback in light themes.
-   - API calls use `window.__HERMES_PLUGIN_SDK__.authedFetch` so the host's
-     authentication and profile scope are preserved. Bare `fetch` is only a
-     standalone/fixture fallback, not the Dashboard transport.
-   - `ui/dist/plugin.js` (the standalone layout) keeps a self-mount fallback for
-     hosts that provide `globalThis.React`/`ReactDOM` instead — that is what the
-     local Playwright fixture uses.
+The manifest declares `css: "dist/style.css"`, built from `ui/src/styles.css` and
+shipped beside the JS. Scoped styles restore control borders, padding, focus rings
+and disabled feedback under the host's reset. Theme colours follow Dashboard
+background/midground tokens with legacy aliases; sticky headers require an opaque
+theme background. Fixtures must load these same assets, not substitute styles.
 
-   Both contracts are covered by `npm test`: `tests/fixture-sdk.html` reproduces
-   the real shell (SDK + registry globals, no `globalThis.React`) and loads the
-   shipped `dashboard/dist/index.js`; `tests/fixture.html` covers the legacy path.
+Host requests use the Dashboard SDK's `fetchJSON`; plugin requests use its
+authenticated transport (`authedFetch`). Bare `fetch` is not the Dashboard transport.
+SDK fixtures check registration without global React, but do not establish live
+Dashboard authentication or deployment.
 
+## Public host data
+
+For each discovered profile, the UI obtains these payloads through the SDK, with
+at most three concurrent requests:
+
+- `GET /api/model/options?profile=<name>&include_unconfigured=1`: provider/model
+  options, authentication and pricing evidence. Explicit catalog refresh adds
+  `refresh=1`; refresh is the host's job, not proof of successful live discovery.
+- `GET /api/model/auxiliary?profile=<name>`: main/auxiliary routes, inheritance and
+  profile-specific plugin tasks.
+- `GET /api/model/moa?profile=<name>`: MoA presets. The host also exposes
+  `PUT /api/model/moa`; plugin MoA slot edits use the backend config path below.
+
+The root profile uses `profile=default`. Failed or unavailable host reads become
+`null` with a non-blocking notice, not an empty successful catalog or proof that no
+plugin tasks exist. Missing/malformed auxiliary data hides plugin-registered rows
+with a warning; built-in inheritance uses a local exact-shape mirror of the host's
+layering rules. MoA preset validation uses host preset names when available, then
+configured preset names; without either catalog it refuses the edit.
+
+The UI sends a bounded bundle with state, preview and operation requests:
+
+```json
+{"host":{"profiles":{"default":{"options":null,"auxiliary":null,"moa":null}}}}
+```
+
+`GET /state` remains config-only; `POST /state {host}` enriches the same response.
+Host payloads are display, credential and cost evidence, never write-target
+allowlists. Only discovered profiles can be mutation targets.
 
 ## Model catalog
 
-**Browse model catalog** opens a read-only, provider-grouped overview of every
-model the current profile can route to, with list prices per 1M tokens where the
-installed Hermes catalog knows them. Prices are informational: they come from
-Hermes' picker pricing caches, its official-pricing snapshot, and the local
-models.dev registry cache (in that order), never from inference calls and never
-from recorded spend. A missing price renders as unknown ("—", *never treated as
-free*); `free` appears only on an explicit free flag; `$0.00` is never displayed.
-Hermes' price caches carry no fetch timestamps, so the UI reports pending/stale
-evidence instead of inventing an as-of time.
+**Browse model catalog** is a read-only, provider-grouped view of the host options
+payload. `dashboard/model_catalog.py` is a pure transform with no Hermes imports;
+it does not read provider caches or a registry from disk. Prices come only from
+host pricing fields, never inference calls or recorded spend. Missing or pending
+pricing stays unknown ("—"), never zero/free; an explicit free flag is required
+for `free`. No fetch timestamp is invented.
 
-Data flows through the read-only `GET /catalog` route (validated `profileId`, an
-optional `provider` filter, `refresh=1` only on an explicit user action), which
-aggregates every provider row in one call. The response is never cached, performs
-no journal, preset or configuration writes, and keeps working on a read-only
-runtime. Unknown profiles and lookup failures return a visible `ok:false` error
-instead of an empty success; per-provider failures degrade that provider only.
-The provider and model dropdowns are native selects fed by the same catalog
-data; an "Other" entry reveals an exact-ID field for custom routes.
+Plugin `POST /catalog {profile, provider, options, ...filters}` and `POST /models`
+transform that host payload. Their old GET forms return HTTP 410 with
+`{"ok":false,"reason":"hostCatalogRequired"}`. Missing/malformed options return
+`ok:false` with `hostCatalogUnavailable`, never an empty success. These reads do
+not write configuration, presets or the operation journal and remain useful in
+read-only mode when host evidence is available.
 
-The catalog is informational only: it never widens what Preview/Apply will write,
-and a listed model is not proof it is routable — credentials are still validated
-per profile, and billing approval is re-derived server-side.
+Provider and model dropdowns share this data; an "Other" entry preserves exact-ID
+manual entry. IDs are not portable across providers: Nous may use
+`deepseek/deepseek-v4.1-flash` while OpenCode Go uses `deepseek-v4.1-flash`.
+A listed model is not proof it is routable. Credential and billing policy are
+checked for each target profile, and cost remains unknown without evidence.
+
+## Preview, Apply and recovery
+
+Each journal step declares `executor: "host"` or `"backend"`:
+
+- Main assignments and auxiliary assignments that exactly match the public route's
+  semantics use `POST /api/model/set?profile=<name>` through the SDK. Requests
+  never carry an API key. Main requests omit `base_url` so Hermes resolves it;
+  auxiliary endpoint URLs must not carry userinfo or query data.
+- Other slots, including cron, delegation, fallback, judge, speech and unsupported
+  auxiliary edit shapes, use public `hermes_cli.config.load_config`,
+  `require_readable_config_before_write` and `save_config` in the target profile's
+  home scope. The adapter serializes its own writes, rechecks revisions immediately
+  before saving and verifies readback; it does not use private host locks/helpers.
+
+Main preview shows semantic intent (`model.provider`, `model.default`), not a
+predicted exact canonical config diff. Hermes resolves the final assignment and
+may change related fields; the exact persisted diff is known only after readback.
+A non-empty provider is required. Explicitly unauthenticated host options refuse
+the preview; a manually entered model absent from the catalog produces a warning,
+with final validation owned by the host write route.
+
+The host-step protocol is:
+
+1. `POST /operations` journals intent and each pre-change config snapshot, executes
+   backend steps in order, then rechecks the revision before a host step. It stores
+   a one-time token hash and returns `awaiting_host` with
+   `hostCall: {opId, seq, token, method, path, query, body}`.
+2. The UI executes that call through SDK `fetchJSON`. A host response with
+   `confirm_required: true` opens a dialog displaying `confirm_message` as text.
+   Approval resends with `confirm_expensive_model: true`; cancellation reports
+   `declined`. This host confirmation is separate from plugin billing approval.
+3. The UI posts `/operations/{id}/host-result` with `seq`, `token` and outcome
+   `ok`, `declined` or `error`, plus numeric HTTP status if available. It never
+   forwards host response text. A wrong token yields HTTP 409
+   `host_token_mismatch` without changing state.
+4. The backend rereads the config. No revision change after claimed success is
+   `host_no_write`, not success. Changed configs require semantic readback and a
+   foreign-diff check: only paths the selected host route is known to write may
+   differ. An unrelated edit yields `recovery_required` / `external_edit`, never
+   silent success or blind snapshot restoration over that edit. Other failed or
+   declined steps enter the guarded compensation path.
+5. Recovery and restart reconciliation evaluate abandoned `awaiting_host` steps
+   against the actual store. Undo/compensation of either executor restores the
+   saved config through the public backend writer, guarded by the recorded
+   post-write revision. A conflicting edit stops automatic restoration.
+
+**Concurrency limit:** the host write routes do not accept an expected revision.
+The plugin's pre-call check cannot make the SDK request atomic with that check.
+Post-write readback detects foreign edits and requires recovery when they cannot
+be attributed safely; it cannot prove that every concurrent edit was observable.
+A successful HTTP response alone never establishes a committed operation.
+
+Public operation DTOs are allowlists: no raw configs, snapshots, local paths or
+exception strings. Only the current host step's one-time token is exposed.
+See [privacy audit](privacy-audit.md) for snapshot sensitivity and storage limits.
 
 ## Advanced routing
 
-The provider and model dropdowns list Hermes' provider-scoped catalog, keeping
-the exact model ID alongside its provider. IDs are not portable across providers:
-Nous may use `deepseek/deepseek-v4.1-flash` while OpenCode Go uses
-`deepseek-v4.1-flash`. **Refresh catalog** requests live discovery, but failed
-probes and curated/cache fallbacks remain visibly unproven-fresh. Manual entry
-stays available through each dropdown's "Other" entry. A provider the catalog
-does not list falls back to `GET /models` for its model list.
+**Choose a model** assigns a provider and model. On a fallback slot it creates an
+explicit one-entry chain. **Set fallback sequence** accepts ordered
+`provider/model` lines. **Reset to default or inherited routing** removes an
+override; **Turn off fallback** writes an explicit empty chain, not a disabled
+main model. Missing/malformed chains are refused rather than silently cleared.
+Exact-model removal is a separate advanced action. Speech routes bind the backend
+and its native model field together; MoA rows address their aggregator while
+preserving reference models and policy.
 
-**Choose a model** assigns a provider and model. On a fallback slot, that is an
-explicit one-entry chain. **Set fallback sequence** supports several
-`provider/model` lines in order. **Reset to default or inherited routing** removes
-the override; **Turn off fallback** writes an explicit empty chain, not a disabled
-main model. These actions are distinct, and a malformed/missing chain is rejected
-instead of silently cleared. Exact-model removal is a separate advanced action.
-Speech routes bind the selected backend and its native model field together;
-MoA preset rows address their aggregator, preserving reference models and policy.
+Vision is an auxiliary task, not a speech backend. Pinning it while
+`agent.image_input_mode` is `auto` gives the main agent a text interpretation even
+if its model supports images. Explicit native/text modes are unchanged. The
+separate OpenRouter fallback override affects auxiliary auto-routing across tasks.
 
-Auxiliary tasks are derived from the installed Hermes defaults and registered
-plugin tasks. Plugin task registration is resolved against **each profile's own
-Hermes home** (a context-local Hermes instance, not one machine-global
-registry), so two profiles can legitimately show different plugin task rows.
-Vision is an auxiliary task, not a specialist speech backend.
-Pinning its backend while `agent.image_input_mode` is `auto` makes the main agent
-receive a text interpretation even if its main model supports images. Explicit
-native/text image modes are unchanged. The separate OpenRouter fallback override
-affects auxiliary auto-routing across tasks; it is not a per-task route.
-Unset speech backends follow the runtime defaults (local STT / Edge TTS in the
-tested runtime). The current Edge TTS backend carries **no configurable model
-field**, so its model slot shows no editable key — but the row still supports an
-**explicit switch to a supported model-bearing backend**, which then binds that
-backend's native model field. "No model key today" is scoped to that model slot;
-it is not a claim that every writable field on the row is uneditable.
+Unset speech backends follow runtime defaults (local STT / Edge TTS in the tested
+runtime). Edge TTS has no configurable model field; the row can still explicitly
+switch to a supported model-bearing backend. No editable model key does not mean
+that every field on that row is uneditable.
 
-Apply and Undo refresh configured state automatically; **Refresh state** reloads
-external edits. **Last observed** shows **No recorded usage** until actual runtime usage
-evidence is available—it is never fabricated from configuration. Saved presets
-retain their exact reviewed slots, profiles and billing approval; an apply request
-cannot silently broaden that saved policy.
+Apply/Undo refresh configured state; **Refresh state** reloads external edits.
+**Last observed** remains **No recorded usage** without actual usage evidence.
+Presets retain their reviewed slots, profiles and billing approval; applying one
+cannot silently broaden its policy. Host assignments apply to new sessions, not
+hot-swaps of an in-flight chat.
 
-Status and failures are shown beside the action controls as well as announced
-through the screen-reader status region. A refused apply preserves the server's
-reason, including FastAPI's nested `detail.error` and `detail.reasons`, rather
-than displaying only `HTTP 409`. A missing provider connection is a real refusal,
-not a successful model switch; connect that provider through Hermes or choose a
-connected route. A state-loading authentication failure is separate from a layout
-problem: the tab must use the host SDK transport even if the bundle renders.
+Failures appear beside the controls and in the screen-reader status region.
+Sanitized plugin refusals preserve actionable nested `detail.error` /
+`detail.reasons`; host response text is not forwarded into the operation journal.
+A missing provider connection is a refusal, not a successful model switch.
 
+## Runtime and configuration
 
-## Configuration
+`probe_runtime()` is capability-based: required public config, home/profile and
+secret-scope seams must import and be callable. The best-effort package version is
+informational only; neither a version string nor an install stamp gates writes.
+Missing capabilities degrade to read-only. Hosted isolation remains read-only;
+the host gates plugin requests, not a duplicate plugin-side backend gate.
 
-`HERMES_MODEL_SWITCHER_HERMES_REPO` selects the read-only Hermes source checkout for registry scans (default `~/.hermes/hermes-agent`). `HERMES_MODEL_SWITCHER_PLUGINS_DIR` can expose plugin coverage gaps; it does not grant write access.
+The tested reference is Hermes **v0.22.2+canary.20261020T065957Z**, commit
+`c5a3c0f8767a72203363d249add14142dbcf3cc7`. This is a reproducibility pin, not a
+minimum or exclusive supported version. Final 0.3.0 verification is recorded
+separately in [release readiness](release-readiness.md).
+
+Profiles use public `hermes_constants` identity/home helpers. Config and secret
+access enter `set_hermes_home_override` and `agent.secret_scope` together; the
+plugin does not open another profile's environment file. Configured key-variable
+names are checked for presence through scoped `get_secret`; otherwise credential
+evidence comes from the host options' authentication flags, with unknown failing
+closed. A configured custom endpoint retains its existing credential policy.
+
+`HERMES_MODEL_SWITCHER_HERMES_REPO` selects the read-only reference source checkout
+for source scans and tests (default `~/.hermes/hermes-agent`).
+`HERMES_MODEL_SWITCHER_PLUGINS_DIR` exposes coverage gaps, not write access.
+
+Persistent state lives **only** at
+`get_hermes_home()/state/hermes-model-switcher/`. There is no alternate state-dir
+setting or fallback. If this location resolves inside plugin source or a Git
+worktree, or cannot meet privacy checks, the plugin is read-only.
 
 ## Disposable lab helpers
 
 `install-local.sh` and `uninstall-local.sh` require GNU/Linux, Bash and GNU
-`readlink -m`; native Windows and macOS are not supported. They always refuse
-the native live home and its ancestors or descendants; there is no live override.
-`--replace` is accepted anywhere among the install arguments, including
-`bash scripts/install-local.sh /path/to/lab --replace` with the default package.
+`readlink -m`; native Windows and macOS are not supported. They refuse the native
+live home and its ancestors/descendants. `--replace` is accepted anywhere in the
+install arguments.
 
-Replacement and removal preserve complete plugin trees, including private recovery
-data, under the lab home as `.model-switcher-backup.*/plugin` and
-`.model-switcher-removed.*/plugin`. These directories are outside `plugins/` so
-Hermes plugin discovery cannot load them. Applied model choices remain in effect.
-After confirming recovery is no longer needed, inspect the printed backup path
-and remove that exact backup directory manually. Backups are never pruned
-automatically; deleting one permanently removes its retained journals/snapshots.
+Replacement/removal preserve complete plugin trees under the lab home's
+`.model-switcher-backup.*/plugin` and `.model-switcher-removed.*/plugin`, outside
+plugin discovery. The current journal remains separately in the home-owned state
+directory; moving a plugin tree does not move or erase that journal. Old plugin
+trees may also contain sensitive legacy recovery data. Applied model choices stay
+in effect. Inspect exact paths before manually deleting retained data; backups
+are never pruned automatically, and deleting journals removes recovery evidence.

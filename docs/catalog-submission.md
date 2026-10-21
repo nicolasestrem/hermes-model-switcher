@@ -1,37 +1,53 @@
 # Catalog submission readiness
 
-Status: **ready-for-submission — NOT submitted.** No entry has been opened against
-`NousResearch/hermes-agent`; recording readiness is not a claim of review, approval,
-or listing.
+Status: **0.3.0 entry draft; final-candidate checks pending.** This refactor addresses
+the review of plugin commit `02703e37` in
+[NousResearch/hermes-agent#141744](https://github.com/NousResearch/hermes-agent/pull/141744).
+This page is not evidence that an updated entry has been submitted, approved or
+listed.
 
 ## Procedure (authoritative)
 
 Per the Hermes developer guide, *Submitting to the Plugin Catalog*
 (`website/docs/developer-guide/plugins/catalog-submission.md`, mirrored from
-`plugin-catalog/README.md`), a listing is added by a **pull request that adds one file**,
-`plugin-catalog/<name>.yaml`, to `NousResearch/hermes-agent`. There is no self-serve
-registry. The pinned `sha` is a full 40-character commit; a maintainer reviews the pinned
-tree and merges, requests changes, or declines.
+`plugin-catalog/README.md`), a listing is added by a pull request that adds
+`plugin-catalog/<name>.yaml` to `NousResearch/hermes-agent`. There is no self-serve
+registry. The pinned `sha` is a full 40-character commit; a maintainer reviews that
+tree and merges, requests changes or declines.
 
-Local pre-check (the same check catalog CI runs), against a checkout at the commit to be
-pinned:
+Local pre-check, against the exact plugin commit to be pinned:
 
 ```sh
 hermes plugins validate /path/to/hermes-model-switcher --install-deps
 ```
 
-## Local readiness evidence
+## 0.3.0 readiness and disclosures
 
-- `hermes plugins validate .` → **Validation passed** (manifest, loadable entry point,
-  capability probe, security scan `safe`, no core override).
-- One warning remains, from catalog rule 9: **private core imports** in
-  `dashboard/model_catalog.py`, `dashboard/plugin_api.py`, and `hermes_adapter.py`.
-  Validation passes, but a reviewer reads these; they are the main reason the plugin is
-  not yet a clean submission. See [release readiness](release-readiness.md).
-- Rule 14 (`requires_hermes` truthful): the adapter's inspected baseline is Hermes
-  `v0.21.7` (`hermes_adapter.py`, `SUPPORTED_BASELINE_VERSION`); the tested release
-  checkout is `v0.22.0+canary.20261014T070054Z`. A `requires_hermes: ">=0.21.7"` floor
-  is consistent with both; confirm before submitting.
+- Runtime integration uses public modules and SDK-authenticated host routes only.
+  Require a clean private-import acceptance check on the shipped code, as documented
+  in CLAUDE.md and [release readiness](release-readiness.md). A prior validation pass
+  is not evidence that the refactored candidate passed.
+- Compatibility is capability-based, not a version comparison. Do **not** add a
+  `requires_hermes` floor unless the plugin code declares and enforces one. The tested
+  reference is **v0.22.2+canary.20261020T065957Z**, commit
+  `c5a3c0f8767a72203363d249add14142dbcf3cc7`; this is a reproducibility pin, not a
+  minimum release.
+- The plugin needs the public `/api/model/options`, `/api/model/auxiliary`,
+  `/api/model/moa` and `/api/model/set` routes. Missing required capabilities leave
+  it read-only; missing host routes degrade the affected features to unknown/hidden
+  data or unavailable writes, never a private fallback. Main/compatible auxiliary
+  assignments use the host write route, including its expensive-model confirmation;
+  other slots use public config load/save under the target home.
+- The undo journal keeps a copy of **each complete pre-change config**, which can
+  include sensitive fields or embedded credentials. State lives only under
+  `<hermes home>/state/hermes-model-switcher/`; an unsafe plugin-tree or Git-worktree
+  location makes the plugin read-only, with no fallback directory. Do not publish
+  journals, sidecars, backups or raw configs.
+- Public host writes have no expected-revision parameter. Readback checks semantic
+  intent and foreign changes; detected races end in `recovery_required`, not silent
+  success or blind rollback. Main preview shows provider/model intent; the exact
+  persisted diff appears after readback. These are accepted limits, not a fleet-wide
+  transaction or an always-undo promise.
 
 ## Entry template (to add as `plugin-catalog/hermes-model-switcher.yaml`)
 
@@ -40,13 +56,12 @@ name: hermes-model-switcher
 repo: https://github.com/nicolasestrem/hermes-model-switcher
 sha: <40-hex commit pinned at submission>   # fill at submission time
 description: Choose models across Hermes profiles, preview changes, and reuse your
-  setup with presets — one reviewed surface for every model-selection slot.
+  setup with presets — one reviewed surface for every supported model-selection slot.
 maintainer: nicolasestrem
 tier: community
 category: models
-requires_hermes: ">=0.21.7"
 docs_url: https://github.com/nicolasestrem/hermes-model-switcher#readme
-version: "0.2.0"
+version: "0.3.0"
 screenshots:
   - https://raw.githubusercontent.com/nicolasestrem/hermes-model-switcher/<sha>/docs/images/model-switcher-dark-1440.png
 capabilities:
@@ -56,14 +71,14 @@ capabilities:
   requires_env: []
 ```
 
-Update `sha` and every `<sha>`-pinned image URL in the same PR that pins the commit.
+Update `sha` and every `<sha>`-pinned image URL together. Keep `version` aligned
+with the pinned manifests, rerun validation and disclose the storage/compatibility
+limits above in the PR. Historical screenshots do not verify the final 0.3.0 tree.
 
 ## Why `.hermes-catalog.json` is NOT in this repository
 
 `.hermes-catalog.json` is an **installer-generated convenience copy**, not a source
-artifact. The Hermes CLI writes it into an *installed* plugin directory after a catalog
-install, and its authoritative provenance is the `catalog` block of the installer-owned
-`.install-metadata.json` (`hermes_cli/plugins_cmd_catalog.py`). A checkout that ships its
-own `.hermes-catalog.json` is explicitly treated as **not** a reviewed catalog install.
-Committing one would therefore be misleading at best; the file is intentionally absent
-from source.
+artifact. Hermes writes it into an installed plugin directory after a catalog
+install; authoritative provenance is the `catalog` block of installer-owned
+`.install-metadata.json`. A checkout shipping its own copy is not evidence of a
+reviewed catalog install. The file is intentionally absent from source.
