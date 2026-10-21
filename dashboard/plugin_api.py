@@ -1854,22 +1854,7 @@ def _host_provider_authenticated(options_payload: Any, provider: str) -> Optiona
         result = _model_catalog_module().provider_authenticated(options_payload, provider)
     except Exception:
         return None
-    if result is True or result is False:
-        return result
-    # Fall back to the payload's own rows when the transform is unavailable:
-    # the evidence is the same, and None stays None.
-    explicit_false = False
-    for row in _host_option_rows(options_payload):
-        ids = {str(row.get("slug") or "").strip().lower(),
-               str(row.get("provider_id") or "").strip().lower()}
-        if provider not in ids:
-            continue
-        value = row.get("authenticated")
-        if value is True:
-            return True
-        if value is False:
-            explicit_false = True
-    return False if explicit_false else None
+    return result if result is True or result is False else None
 
 
 def _provider_credentials_satisfied(profile: str, ident, cfg: Dict[str, Any],

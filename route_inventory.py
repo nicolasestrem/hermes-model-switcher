@@ -819,8 +819,8 @@ def _build_inventory_impl(cfg: Dict[str, Any],
     # Plugin-registered auxiliary tasks (register_auxiliary_task): the same
     # auxiliary contract, plus optional metadata and declared inheritance.
     for key in sorted(entries_by_key):
-        if key in aux_selector_keys or key in _AUX_DISALLOWED_TASK_KEYS:
-            continue  # a plugin never shadows a built-in selector or a scalar
+        if key in aux_selector_keys:
+            continue  # a plugin never shadows a built-in selector
         entry = entries_by_key[key]
         metadata = {
             "label": str(entry.get("display_name") or key),
