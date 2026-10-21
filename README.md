@@ -29,57 +29,108 @@ what is configured and check a change before writing it.
 
 Built for the Hermes Dashboard, using its themes and authenticated transport. MIT licensed.
 
+## Screenshots
+
+Current **0.3.0** captures, taken 2026-10-21 at 1280x800 (the last one at 390x844).
+Boundary: *Dashboard SDK fixture with the plugin's real backend and Hermes' own
+`/api/model/*` routers over an isolated lab home.* That is not a live Dashboard
+deployment and not provider execution: the plugin's real FastAPI backend performs
+real saves against a throwaway lab home, and no production configuration is
+touched. The lab uses two synthetic profiles (`default`, `research`); no private
+profile data, credentials, host paths or ports appear in the images. Every capture
+is a viewport screenshot at device scale 1, and the run asserts no console errors,
+no failed requests and no page-level horizontal overflow.
+
+![Model Switcher routing matrix and change editor in the host's dark theme](docs/images/model-switcher-0.3.0-dashboard.png)
+
+*Idle workspace in the host's dark theme: the profile filter, the routing matrix
+and the change editor before any target is selected.*
+
+![A reviewed change from anthropic/claude-sonnet-4-6 to zhipu/glm-5.3-flash](docs/images/model-switcher-0.3.0-preview.png)
+
+*Preview before Apply: the exact before → after route for `default/main` plus the
+persisted config diff, with the unknown-cost acknowledgement in place.*
+
+![Operation drawer after Apply showing Applied + read back](docs/images/model-switcher-0.3.0-operation.png)
+
+*After Apply: per-profile `Applied + read back`, the operation reference, the
+revision transition, and the guarded Undo control.*
+
+![Provider-grouped model catalog with per-1M-token price columns](docs/images/model-switcher-0.3.0-catalog.png)
+
+*The bird's-eye catalog, grouped by provider, with input/output price columns and a
+status per row. This offline lab host publishes no pricing fields, so rows read
+"price not published" — unknown is never treated as free. Prices, when a host
+supplies them, come from the public host options payload.*
+
+![The same interface following the host's light theme](docs/images/model-switcher-0.3.0-light.png)
+
+*The plugin follows the host Dashboard theme; the same idle workspace under the
+light host tokens.*
+
+![The routing matrix on a 390px-wide viewport](docs/images/model-switcher-0.3.0-narrow.png)
+
+*At 390x844 the editor stacks above the matrix and the matrix scrolls horizontally
+inside its own region; the page itself does not overflow.*
+
+The images and their digests are recorded in
+[`docs/images/catalog-captures.json`](docs/images/catalog-captures.json); they are
+reproducible with `HMS_WRITE_CATALOG_CAPTURES=1` against the real-router harness.
+
+<details>
+<summary>Earlier captures (pre-0.3.0, kept as history)</summary>
+
+These predate 0.3.0 and are kept unchanged for comparison. Their captions describe
+the older interface.
+
 ![Model Switcher showing synthetic Hermes profiles in a dark theme](docs/images/model-switcher-dark-1440.png)
 
-*The compiled plugin in a Dashboard SDK fixture with synthetic lab profiles. This
-screenshot demonstrates the interface; it is not evidence of live Dashboard
-deployment or provider inference. Captured at commit `02703e3` (pre-0.3.0),
-carried unchanged; current-UI captures are pending.*
+*Pre-0.3.0 capture: the compiled plugin in a Dashboard SDK fixture with synthetic
+lab profiles. This screenshot demonstrates the interface; it is not evidence of live
+Dashboard deployment or provider inference.*
 
 ![The same interface following the host's light theme](docs/images/model-switcher-light-1440.png)
 
-*The plugin follows the host Dashboard's theme; the light theme is shown here.
-Captured at commit `02703e3` (pre-0.3.0), carried unchanged; current-UI captures
-are pending.*
+*Pre-0.3.0 capture: the plugin follows the host Dashboard's theme; the light theme
+is shown here.*
 
 ![Model catalog with list prices per 1M tokens](docs/images/model-switcher-catalog-1440.png)
 
-*The provider-grouped catalog in the Dashboard SDK fixture with synthetic lab profiles.
-Captured at commit `02703e3` (pre-0.3.0), carried unchanged; current-UI captures
-are pending. Current catalog prices come from the public host options payload, not
-direct plugin cache reads, inference or recorded spend.*
+*Pre-0.3.0 capture: the provider-grouped catalog in the Dashboard SDK fixture with
+synthetic lab profiles. Catalog prices come from the public host options payload,
+not direct plugin cache reads, inference or recorded spend.*
 
 ![Model catalog on a narrow screen](docs/images/model-switcher-catalog-375.png)
 
-*The same catalog on a narrow screen; a fixture render of the compiled plugin, not a
-live Dashboard deployment or provider execution. Captured at commit `02703e3`
-(pre-0.3.0), carried unchanged; current-UI captures are pending.*
+*Pre-0.3.0 capture: the same catalog on a narrow screen; a fixture render of the
+compiled plugin, not a live Dashboard deployment or provider execution.*
 
 ![The routing matrix on a narrow screen](docs/images/model-switcher-dark-375.png)
 
-*On a narrow screen the matrix scrolls horizontally inside its own region. Captured
-at commit `02703e3` (pre-0.3.0), carried unchanged; current-UI captures are pending.*
+*Pre-0.3.0 capture: on a narrow screen the matrix scrolls horizontally inside its
+own region.*
 
-### In the real Hermes Dashboard
+#### Isolated lab Dashboard captures (pre-0.3.0)
 
-Captured at commit `02703e3` (pre-0.3.0), carried unchanged; current-UI captures
-are pending. These captures show an isolated lab with two synthetic profiles
-(default and research) and synthetic routes. They are historical evidence, not
-verification of the refactored host-step protocol:
+Captured at commit `02703e3` from an isolated lab Hermes Dashboard with two synthetic
+profiles (default and research) and synthetic routes. They are historical evidence,
+not verification of the current host-step protocol:
 
-![Routing matrix in the real Hermes Dashboard](docs/images/model-switcher-real-dashboard.png)
+![Routing matrix in the lab Hermes Dashboard](docs/images/model-switcher-real-dashboard.png)
 
 *Choose the slots you want to change; filters do not select edit targets.*
 
-![A real preview of one synthetic main-model change](docs/images/model-switcher-real-preview.png)
+![A lab preview of one synthetic main-model change](docs/images/model-switcher-real-preview.png)
 
-*Review provider/model intent before writing. In 0.3.0, the main slot
-shows semantic intent; the exact persisted config diff appears only after readback.*
+*Review provider/model intent before writing. In 0.3.0, the main slot shows semantic
+intent; the exact persisted config diff appears only after readback.*
 
-![A real committed operation with verified readback](docs/images/model-switcher-real-operation.png)
+![A committed lab operation with verified readback](docs/images/model-switcher-real-operation.png)
 
 *Applied and read back. The lab's subsequent Undo restored the original configuration
 bytes exactly. These captures show configuration changes, not provider inference.*
+
+</details>
 
 ## Setup
 
