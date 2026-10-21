@@ -359,10 +359,10 @@ class CanonicalConfigStoreAdapter(YamlFileStoreAdapter):
 
     def write(self, data: Dict[str, Any],
               expected_revision: Optional[str] = None) -> Optional[str]:
-        # Full-document canonical save through Hermes' own seam: explicit
-        # profile scope + adapter save lock + revision/provenance readback live
-        # inside apply_canonical_save. ``expected_revision`` is carried INTO
-        # that lock: the check-then-save race is closed there, not here.
+        # Canonical save through Hermes' public seam: explicit profile scope,
+        # local revision check and provenance readback live in the adapter.
+        # This is NOT a host-wide CAS: see apply_canonical_save's documented
+        # race between our check and Hermes acquiring its own private lock.
         # Raises ReadOnlyRuntime / UnknownProfile / ProfileIdentityChanged on
         # any violation — never a raw file write. StoreConflict is raised ONLY
         # at the guarded fresh-revision check, BEFORE save_config, so it is
@@ -370,6 +370,7 @@ class CanonicalConfigStoreAdapter(YamlFileStoreAdapter):
         # identity/scope violations keep the ordinary (untagged) StoreConflict.
         from hermes_adapter import (
             StoreConflict as _CanonSegmentConflict,
+            PostSaveConflict,
             ProfileIdentityChanged,
             UnknownProfile,
             expected_revision_scope,
@@ -382,6 +383,10 @@ class CanonicalConfigStoreAdapter(YamlFileStoreAdapter):
             with expected_revision_scope(expected_revision):
                 result = self._adapter().apply_canonical_save(
                     self.profile, data, identity=self._identity)
+        except PostSaveConflict as exc:
+            # The save was attempted; never label a failed provenance check as
+            # a known no-write conflict, even when the resulting bytes match.
+            raise StoreWriteAmbiguous(str(exc)) from exc
         except _CanonSegmentConflict as exc:
             # The canonical save raises StoreConflict ONLY at the guarded
             # fresh-revision check, BEFORE config_mod.save_config — provably no
@@ -400,9 +405,8 @@ class CanonicalConfigStoreAdapter(YamlFileStoreAdapter):
 
     def apply_changes_guarded(self, changes: Dict[str, Any],
                               expected_revision: Optional[str] = None) -> WriteOutcome:
-        """Canonical apply: the revision guard is enforced INSIDE the canonical
-        save lock (via ``write(expected_revision=...)``), so a concurrent save
-        cannot slip between the engine's recheck and ours."""
+        """Canonical apply with a local revision check and strict provenance
+        readback; this is not a public host-wide compare-and-save operation."""
         pre = self.revision()
         data = self.read() or {}
         for dotted, value in changes.items():
@@ -448,33 +452,33 @@ class CanonicalConfigStoreAdapter(YamlFileStoreAdapter):
     def intended_write_matches(self, snapshot: Optional[Dict[str, Any]],
                                changes: Dict[str, Any],
                                current_revision: str) -> bool:
-        """Canonical-store crash-window predicate, decided from the documents.
+        """Recognise only our intended changes in one strict, revision-bound read.
 
-        The write landed through Hermes' canonical save seam, so a naive
-        byte-projection never matches; instead this compares the strictly
-        re-read on-disk document against the pre-write snapshot:
-
-        - every intended change must read back (``readback(changes)``), and
-        - every dotted path that DIFFERS between the snapshot and the on-disk
-          document must be covered by a key in *changes* (itself, a descendant
-          or an ancestor of it).
-
-        So a write that only made our changes is recognisable after a crash,
-        while any foreign edit (a path we never planned to touch) makes the
-        comparison False. Undecidable (unreadable store, missing profile) is
-        also False, so the reconcile caller fails closed.
+        Revision, semantic readback and foreign-diff coverage all describe the
+        same loaded document. Added/removed/retyped mappings are examined down
+        to their changed leaves: a narrow change never owns foreign siblings.
+        Unreadable or otherwise undecidable state fails closed to False.
         """
-        if not self.exists() or not self.readback(changes):
-            return False
+        from hermes_adapter import _rev
+
         try:
+            if not self.exists():
+                return False
             on_disk = self._adapter().load_raw_config(self.profile)
+            if not isinstance(on_disk, dict) or _rev(on_disk) != current_revision:
+                return False
+            for dotted, value in changes.items():
+                actual = _get_dotted(on_disk, dotted)
+                if _is_delete_sentinel(value):
+                    if actual is not _MISSING:
+                        return False
+                elif actual != value:
+                    return False
+            base = snapshot if isinstance(snapshot, dict) else {}
+            return all(_covered_by_changes(path, changes)
+                       for path in _differing_paths(base, on_disk))
         except Exception:
             return False  # undecidable -> ambiguous, never guessed
-        base = snapshot if isinstance(snapshot, dict) else {}
-        for path in _differing_paths(base, on_disk):
-            if not _covered_by_changes(path, changes):
-                return False
-        return True
 
 
 def adapter_for(store_kind: str, path: str, profile: Optional[str] = None,
@@ -526,30 +530,34 @@ _MISSING = object()
 
 
 def _differing_paths(left: Any, right: Any, prefix: str = "") -> list:
-    """Dotted paths where two config documents disagree (scalars/lists are leaves).
+    """Changed leaves, including descendants of added/removed/retyped mappings.
 
-    ``{"a": {"b": 1}}`` vs ``{"a": {"b": 2}}`` -> ``["a.b"]``; a key present on
-    one side only -> that path; list values compare as whole leaves (their order
-    and contents are the stored value, not a path space).
+    Mapping structure is covered only when all its changed descendants are
+    covered. Scalars/lists and empty mappings are leaves; list order and
+    contents are compared as a whole value, not as a path space.
     """
-    if isinstance(left, dict) and isinstance(right, dict):
+    if isinstance(left, dict) or isinstance(right, dict):
+        left_map = left if isinstance(left, dict) else {}
+        right_map = right if isinstance(right, dict) else {}
         out: list = []
-        for key in sorted(set(left) | set(right), key=str):
+        for key in sorted(set(left_map) | set(right_map), key=str):
             path = f"{prefix}.{key}" if prefix else str(key)
-            if key not in left or key not in right:
-                out.append(path)
-                continue
-            out.extend(_differing_paths(left[key], right[key], path))
-        return out
+            out.extend(_differing_paths(
+                left_map.get(key, _MISSING), right_map.get(key, _MISSING), path))
+        if out:
+            return out
     return [] if left == right else [prefix]
 
 
 def _covered_by_changes(path: str, changes: Dict[str, Any]) -> bool:
-    """True when *path* is a change key, or a descendant/ancestor of one."""
+    """True only for a change key itself or one of its descendants.
+
+    A structural ancestor is handled by recursing into every changed child,
+    never by granting ownership of foreign siblings to a narrower change.
+    """
     for dotted in changes:
         dotted = str(dotted)
-        if (path == dotted or path.startswith(dotted + ".")
-                or dotted.startswith(path + ".")):
+        if path == dotted or path.startswith(dotted + "."):
             return True
     return False
 

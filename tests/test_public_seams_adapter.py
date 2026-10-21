@@ -27,6 +27,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from model_switcher.adapters import DELETE
+
 REPO = Path(__file__).resolve().parent.parent
 
 CFG = """\
@@ -267,6 +269,7 @@ class _FakeHermesAdapter:
 
 
 def test_intended_write_matches_accepts_only_our_own_change(tmp_path):
+    from hermes_adapter import _rev
     from model_switcher.adapters import CanonicalConfigStoreAdapter
 
     path = tmp_path / "config.yaml"
@@ -279,17 +282,142 @@ def test_intended_write_matches_accepts_only_our_own_change(tmp_path):
 
     ours = _FakeHermesAdapter([written])
     adapter = CanonicalConfigStoreAdapter(str(path), "default", hermes_adapter=ours)
-    assert adapter.intended_write_matches(snapshot, changes, "rev-after") is True
+    assert adapter.intended_write_matches(snapshot, changes, _rev(written)) is True
 
     # A foreign key that we never planned to touch makes it undecidable -> False.
     foreign = dict(written, external={"edit": True})
     adapter2 = CanonicalConfigStoreAdapter(
         str(path), "default", hermes_adapter=_FakeHermesAdapter([foreign]))
-    assert adapter2.intended_write_matches(snapshot, changes, "rev-after") is False
+    assert adapter2.intended_write_matches(snapshot, changes, _rev(foreign)) is False
 
-    # Our change missing on disk -> readback already fails -> False.
+    # Our change missing on disk -> readback fails -> False.
     adapter3 = CanonicalConfigStoreAdapter(
         str(path), "default", hermes_adapter=_FakeHermesAdapter([written]))
     assert adapter3.intended_write_matches(
-        snapshot, {"model.default": "something-else"}, "rev-after") is False
-    assert ours.calls == 1  # the failed readback short-circuits the re-read
+        snapshot, {"model.default": "something-else"}, _rev(written)) is False
+    assert ours.calls == 1
+
+
+@pytest.mark.parametrize("snapshot,written,changes", [
+    ({}, {"auxiliary": {"compression": {"model": "ours"},
+                        "foreign": {"model": "external"}}},
+     {"auxiliary.compression.model": "ours"}),
+    ({"auxiliary": {"compression": {"model": "old"},
+                    "foreign": {"model": "external"}}}, {},
+     {"auxiliary.compression": None}),
+    ({"auxiliary": "legacy"},
+     {"auxiliary": {"compression": {"model": "ours"},
+                    "foreign": {"model": "external"}}},
+     {"auxiliary.compression.model": "ours"}),
+    ({"auxiliary": {"compression": {"model": "old"},
+                    "foreign": {"model": "external"}}},
+     {"auxiliary": "external-scalar"}, {"auxiliary.compression": None}),
+], ids=["added-map", "removed-map", "scalar-to-map", "map-to-scalar"])
+def test_intended_write_matches_rejects_foreign_descendants(
+        tmp_path, snapshot, written, changes):
+    from hermes_adapter import _rev
+    from model_switcher.adapters import CanonicalConfigStoreAdapter
+
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(written))
+    store = CanonicalConfigStoreAdapter(
+        str(path), "default", hermes_adapter=_FakeHermesAdapter([written]))
+    assert store.intended_write_matches(snapshot, changes, _rev(written)) is False
+
+
+def test_intended_write_matches_requires_the_supplied_revision(tmp_path):
+    from hermes_adapter import _rev
+    from model_switcher.adapters import CanonicalConfigStoreAdapter
+
+    snapshot = {"model": {"default": "before"}}
+    written = {"model": {"default": "ours"}}
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(written))
+    source = _FakeHermesAdapter([written])
+    store = CanonicalConfigStoreAdapter(str(path), "default", hermes_adapter=source)
+
+    assert store.intended_write_matches(
+        snapshot, {"model.default": "ours"}, _rev(snapshot)) is False
+    assert source.calls == 1
+
+
+def test_intended_write_matches_uses_one_strict_document(tmp_path, monkeypatch):
+    from hermes_adapter import _rev
+    from model_switcher.adapters import CanonicalConfigStoreAdapter
+
+    snapshot = {"model": {"default": "before"}}
+    written = {"model": {"default": "ours"}}
+    path = tmp_path / "config.yaml"
+    # The raw-file view is deliberately different. Only the strictly loaded
+    # document may decide the revision, semantic readback and foreign diff.
+    path.write_text(yaml.safe_dump(snapshot))
+    source = _FakeHermesAdapter([written])
+    store = CanonicalConfigStoreAdapter(str(path), "default", hermes_adapter=source)
+
+    def second_read_forbidden(*args, **kwargs):
+        raise AssertionError("predicate must not perform a second read")
+
+    monkeypatch.setattr(store, "readback", second_read_forbidden)
+    monkeypatch.setattr(store, "read", second_read_forbidden)
+    monkeypatch.setattr(store, "revision", second_read_forbidden)
+    assert store.intended_write_matches(
+        snapshot, {"model.default": "ours"}, _rev(written)) is True
+    assert source.calls == 1
+
+
+@pytest.mark.parametrize("raw", ["model: [", "- not-a-mapping\n"])
+def test_intended_write_matches_malformed_strict_read_returns_false(
+        hermes_home, adapter, raw):
+    from hermes_adapter import _rev
+    from model_switcher.adapters import CanonicalConfigStoreAdapter
+
+    path = hermes_home.path / "config.yaml"
+    path.write_text(raw)
+    store = CanonicalConfigStoreAdapter(str(path), "default", hermes_adapter=adapter)
+    assert store.intended_write_matches({}, {}, _rev({})) is False
+
+
+@pytest.mark.parametrize("snapshot,written,changes", [
+    ({}, {"auxiliary": {"compression": {"model": "ours"}}},
+     {"auxiliary.compression.model": "ours"}),
+    ({"auxiliary": {"compression": {"model": "old"}}}, {},
+     {"auxiliary.compression": None}),
+    ({"auxiliary": "legacy"},
+     {"auxiliary": {"compression": {"model": "ours"}}},
+     {"auxiliary.compression.model": "ours"}),
+    ({"auxiliary": {"compression": {"model": "old"}}},
+     {"auxiliary": "ours"}, {"auxiliary": "ours"}),
+    ({"auxiliary": {"compression": {"model": "old"}}}, {},
+     {"auxiliary.compression": DELETE}),
+    ({}, {"auxiliary": {}}, {"auxiliary": {}}),
+], ids=["added-map", "removed-map", "scalar-to-map", "map-to-scalar",
+        "explicit-delete", "empty-map"])
+def test_intended_write_matches_accepts_fully_covered_structural_changes(
+        tmp_path, snapshot, written, changes):
+    from hermes_adapter import _rev
+    from model_switcher.adapters import CanonicalConfigStoreAdapter
+
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(written))
+    source = _FakeHermesAdapter([written])
+    store = CanonicalConfigStoreAdapter(str(path), "default", hermes_adapter=source)
+    assert store.intended_write_matches(snapshot, changes, _rev(written)) is True
+    assert source.calls == 1
+
+
+def test_canonical_store_write_maps_post_save_conflict_to_ambiguity(tmp_path):
+    from hermes_adapter import PostSaveConflict
+    from model_switcher.adapters import (
+        CanonicalConfigStoreAdapter, StorePreWriteConflict, StoreWriteAmbiguous,
+    )
+
+    class ConflictingSave:
+        def apply_canonical_save(self, profile, data, identity=None):
+            raise PostSaveConflict("store changed after save")
+
+    store = CanonicalConfigStoreAdapter(
+        str(tmp_path / "config.yaml"), "default", hermes_adapter=ConflictingSave())
+    with pytest.raises(StoreWriteAmbiguous) as raised:
+        store.write({"model": {"default": "ours"}}, expected_revision="before")
+    assert not isinstance(raised.value, StorePreWriteConflict)
+    assert isinstance(raised.value.__cause__, PostSaveConflict)

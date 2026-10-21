@@ -116,7 +116,18 @@ class ProfileIdentityChanged(RuntimeError):
 
 
 class StoreConflict(RuntimeError):
-    """The store's revision changed underneath us — refuse, never force."""
+    """The store's revision changed before saving — no write was attempted."""
+
+
+class PostSaveConflict(RuntimeError):
+    """The strict readback is not the document this save intended to produce.
+
+    A save WAS attempted. Never attach/adopt a post revision, retry the write,
+    or compensate this step blindly. CanonicalConfigStoreAdapter translates
+    this to StoreWriteAmbiguous (NOT StorePreWriteConflict). The engine must
+    persist an ambiguous step and recovery_required, with no post_revision;
+    any public failure category must be a fixed allowlisted value.
+    """
 
 
 def _version_label() -> str:
@@ -382,16 +393,17 @@ class HermesAdapter:
         )
 
         home_token = set_hermes_home_override(home)
-        scope_token = set_secret_scope(
-            build_profile_secret_scope(Path(home)), profile_home=str(home))
         try:
-            if profile is not None:
-                _assert_identity(profile, ident)
-            yield ident
+            scope_token = set_secret_scope(
+                build_profile_secret_scope(Path(home)), profile_home=str(home))
+            try:
+                if profile is not None:
+                    _assert_identity(profile, ident)
+                yield ident
+            finally:
+                reset_secret_scope(scope_token)
         finally:
-            # Reverse order of installation; both resets run even when the
-            # identity assert (or the caller's body) raised.
-            reset_secret_scope(scope_token)
+            # Home is protected immediately: setup AND secret reset may fail.
             reset_hermes_home_override(home_token)
 
     # -- reads -------------------------------------------------------
@@ -420,12 +432,17 @@ class HermesAdapter:
         scope, with an identity recheck against the discovered profile set and
         a post-write readback of the exact target.
 
-        The stale-write guard runs under this adapter's re-entrant write lock
-        immediately before ``save_config``: the revision is re-read and
-        compared there, so a writer that slipped in after the caller's recheck
-        is still refused BEFORE any write (refuse-stale, never overwrite an
-        intervening edit). ``save_config`` then performs Hermes' own atomic
-        replace; the target is re-read and its revision reported back.
+        The revision check uses a plugin-local lock, NOT Hermes' lock. For
+        merge-expressible edits, only changed leaves are sent to public
+        ``save_config(..., merge_existing=True)``: its disk reread and rebase
+        run under Hermes' own lock, preserving unrelated live leaves.
+
+        LIMIT: Hermes exposes no public compare-and-save / locked transform.
+        A same-key writer can still land between this check and the host's
+        lock, then be overwritten undetectably. Deletions (and nested mapping
+        -> null) cannot use its merge API; full-state saves retain that race
+        even for unrelated edits. See _save_patch. Do not treat this lock as
+        a host-wide transaction. Strict readback never adopts foreign edits.
         """
         self._assert_writable()
         if not profile:
@@ -450,16 +467,92 @@ class HermesAdapter:
                         f"was taken (current {fresh_rev!r}, expected "
                         f"{expected_revision!r}) — refusing the save; re-read "
                         "and re-plan the edit")
-                config_mod.save_config(updated)
-                after = config_mod.require_readable_config_before_write()
+                expected = _expected_sparse_document(
+                    updated, fresh, config_mod.DEFAULT_CONFIG)
+                patch = _save_patch(fresh, updated)
+                if patch is None:
+                    # Omissions deliberately remove keys. merge_existing would
+                    # resurrect them; nested dict->None is ignored by its deep
+                    # merge. The public full-state path is save_config (which
+                    # uses atomic_config_replace), NOT atomic_config_write.
+                    config_mod.save_config(updated)
+                else:
+                    config_mod.save_config(patch, merge_existing=True)
+                try:
+                    after = config_mod.require_readable_config_before_write()
+                except Exception as exc:
+                    raise PostSaveConflict(
+                        "canonical save readback is unreadable") from exc
+                if _rev(after) != _rev(expected):
+                    raise PostSaveConflict(
+                        "canonical save readback differs from intended document")
                 return {"ok": True, "profile": profile,
-                        "revision_before": fresh_rev, "revision_after": _rev(after)}
+                        "revision_before": fresh_rev, "revision_after": _rev(expected)}
 
     def _assert_writable(self) -> None:
         if self.runtime.read_only:
             raise ReadOnlyRuntime(
                 "unsupported Hermes runtime; adapter is read-only: "
                 + "; ".join(self.runtime.reasons))
+
+
+def _save_patch(before: Dict[str, Any], desired: Dict[str, Any]) -> Optional[dict]:
+    """Smallest merge payload, or None when a full-state save is required.
+
+    A full stale document is NOT a partial payload: it overwrites unchanged
+    siblings with their old values. Omission cannot delete through merge;
+    replacing a mapping can erase concurrently added descendants, so use the
+    explicit replacement path for those cases and report the public-CAS gap.
+    """
+    import copy
+
+    if set(before) - set(desired):
+        return None
+    patch = {}
+    for key, value in desired.items():
+        if key in before and _rev({"v": value}) == _rev({"v": before[key]}):
+            continue
+        if key in before and isinstance(before[key], dict):
+            if not isinstance(value, dict):
+                return None
+            nested = _save_patch(before[key], value)
+            if nested is None:
+                return None
+            patch[key] = nested
+        else:
+            patch[key] = copy.deepcopy(value)
+    return patch
+
+
+def _expected_sparse_document(desired: dict, before: dict, defaults: dict) -> dict:
+    """Predict default stripping using public DEFAULT_CONFIG and raw authorship.
+
+    This is NOT a canonicalization pipeline. Inputs are raw canonical documents
+    from the store plus edits to canonical slots. Legacy normalization or any
+    other host transformation we cannot predict is conservatively ambiguous,
+    never accepted by borrowing a foreign readback. Preserve authored leaves,
+    including nulls and empty lists, exactly as Hermes' sparse save does.
+    """
+    import copy
+
+    missing = object()
+    dropped = object()
+    def strip(value, old, default, path):
+        if (old is not missing and not isinstance(old, dict)) or path == ("_config_version",):
+            return copy.deepcopy(value)
+        if isinstance(value, dict) and value:
+            old_map = old if isinstance(old, dict) else {}
+            default_map = default if isinstance(default, dict) else {}
+            result = {}
+            for key, child in value.items():
+                kept = strip(child, old_map.get(key, missing),
+                             default_map.get(key), (*path, key))
+                if kept is not dropped:
+                    result[key] = kept
+            return result or dropped
+        return dropped if value == default else copy.deepcopy(value)
+    expected = strip(desired, before, defaults, ())
+    return expected if isinstance(expected, dict) else {}
 
 
 def _rev(cfg: Dict[str, Any]) -> str:
