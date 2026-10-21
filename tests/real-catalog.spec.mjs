@@ -57,7 +57,14 @@ test("real catalog: one on-demand fetch, payload-shaped groups/rows, and honest 
   // Provider groups and per-group row counts mirror the real DTO exactly.
   const groupIds = await page.locator("[data-provider-group]").evaluateAll(
     (nodes) => nodes.map((node) => node.getAttribute("data-provider-group")));
-  expect(groupIds).toEqual(payload.providers.map((p) => p.id));
+  // Provider groups mirror the real DTO; set-up providers lead (current one
+  // first), and every authenticated:false provider sits in the one collapsed
+  // "Not set up" section rendered after the main table.
+  const setUpIds = payload.providers.filter((p) => p.authenticated !== false)
+    .sort((a, b) => Number(Boolean(b.isCurrent)) - Number(Boolean(a.isCurrent)))
+    .map((p) => p.id);
+  const notSetUpIds = payload.providers.filter((p) => p.authenticated === false).map((p) => p.id);
+  expect(groupIds).toEqual([...setUpIds, ...notSetUpIds]);
   expect(await page.locator("[data-model-row]").count()).toBe(totalModels);
   for (const provider of payload.providers) {
     await expect(page.locator(`[data-provider-group="${provider.id}"] [data-model-row]`))
@@ -113,8 +120,12 @@ test("real catalog: one on-demand fetch, payload-shaped groups/rows, and honest 
   }
 
   // Providers with no published models say so; silence is not free access.
+  // An unauthenticated provider's empty row is inside the collapsed section.
   const emptyProvider = payload.providers.find((p) => p.models.length === 0);
   if (emptyProvider) {
+    if (emptyProvider.authenticated === false) {
+      await page.getByTestId("catalog-unsetup-summary").click();
+    }
     const emptyRow = page.locator(`[data-empty-provider="${emptyProvider.id}"]`);
     await expect(emptyRow).toBeVisible();
     await expect(emptyRow).toContainText("not evidence of free access");
@@ -154,13 +165,20 @@ test("real catalog: browsing and Use prefill never change config bytes or send a
 
   await openCatalog(page);
   await page.getByTestId("catalog-search").fill("gpt");
-  await page.getByTestId("catalog-free-only").click();
-  await page.getByTestId("catalog-priced-only").click();
-  await page.getByTestId("catalog-group-toggle").click();
+  // Price filters exist only when the catalog carries a priced/free status; the
+  // lab home commonly has none, and the UI says so instead of offering a dead
+  // filter. Exercise them when present, never assume them.
+  if (await page.getByTestId("catalog-free-only").count()) {
+    await page.getByTestId("catalog-free-only").click();
+    await page.getByTestId("catalog-priced-only").click();
+  }
+  await page.getByTestId("catalog-group-select").selectOption("none");
   await page.getByTestId("catalog-sort").selectOption("name");
   await page.getByTestId("catalog-search").fill("");
-  await page.getByTestId("catalog-priced-only").click();
-  await page.getByTestId("catalog-group-toggle").click();
+  if (await page.getByTestId("catalog-priced-only").count()) {
+    await page.getByTestId("catalog-priced-only").click();
+  }
+  await page.getByTestId("catalog-group-select").selectOption("provider");
 
   // Use pre-fills the editor only; nothing is previewed or applied.
   const enabledUse = page.locator("[data-model-row] [data-column=\"use\"] button:not([disabled])").first();

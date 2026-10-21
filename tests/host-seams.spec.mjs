@@ -450,7 +450,7 @@ test("null numeric prices keep host display text and sort after known numeric pr
   await expect(row.locator('[data-column="input"]')).toHaveText("$10.00");
   const payload = await page.evaluate(() => window.__mockApi.lastCatalog);
   expect(payload.providers.find((p) => p.id === "nous").models.find((m) => m.id === "hermes-4-405b").cost.input).toBeNull();
-  await page.getByTestId("catalog-group-toggle").click();
+  await page.getByTestId("catalog-group-select").selectOption("none");
   for (const sort of ["price-asc", "price-desc"]) {
     await page.getByTestId("catalog-sort").selectOption(sort);
     const models = await page.locator('tr[data-model-id]').evaluateAll((rows) => rows.map((r) => r.dataset.modelId));

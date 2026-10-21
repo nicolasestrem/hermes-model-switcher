@@ -134,9 +134,9 @@ test("scoped polish keeps narrow filters compact and disclosure chrome flat", as
   expect(root.width).toBeLessThanOrEqual(375);
   await page.getByTestId("catalog-toggle").click();
   await expect(page.getByTestId("catalog-table")).toBeVisible();
-  await expect(page.locator(".hms-catalog-scroll")).toHaveCSS("scroll-behavior", "auto");
+  await expect(page.getByTestId("catalog-scroll")).toHaveCSS("scroll-behavior", "auto");
   await expect(page.locator(".hms-catalog-summary > div").first()).toHaveCSS("border-left-width", "0px");
-  await page.getByTestId("catalog-group-toggle").click();
+  await page.getByTestId("catalog-group-select").selectOption("none");
   await expect(page.locator(".hms-catalog-notices")).toHaveCSS("border-left-width", "0px");
 });
 
