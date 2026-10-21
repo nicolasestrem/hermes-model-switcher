@@ -128,12 +128,13 @@ test("applying a custom preview after reviewing a preset sends no stale presetId
   await expect(page.getByTestId("operation-drawer")).toBeVisible();
   await expect(page.getByTestId("live-status")).toContainText("finished");
 
-  // now build a custom preview in the editor on top of that context
+  // Build a genuinely different assignment: an identical host save is a
+  // known no-write, not a verified apply (host_no_write in the real engine).
   await page.getByRole("button", { name: "Close operation drawer" }).click();
   await page.getByLabel("Select default main").check();
   await page.getByLabel("Select research main").check();
   await setProvider(page, "zhipu");
-  await setModel(page, "glm-5.3-flash");
+  await setModel(page, "glm-5.3-flash-custom");
   await page.getByRole("checkbox", { name: /acknowledge unknown-cost/ }).check();
   await page.getByRole("button", { name: "Preview changes" }).click();
   await expect(page.getByTestId("preview-panel")).toContainText("2 changes");
@@ -210,7 +211,7 @@ test("failed read and ok:false are not success", async ({ page }) => {
   // non-success outcome so "finished" alone never reads as success.
   await expect(page.getByTestId("live-status")).toContainText("finished");
   await expect(page.getByTestId("live-status")).toContainText("recovery_required");
-  expect(await statusColor(page)).toBe("rgb(154, 161, 173)"); // THEME.muted fallback
+  expect(await statusColor(page)).toBe("rgb(229, 83, 75)"); // explicit error kind; no regex severity
   // a failed (non-committed) operation is not undoable through the drawer, even
   // once the guard is acknowledged — the backend assembles this via ``undoable``.
   await expect(page.getByTestId("undo-button")).toBeDisabled();
@@ -374,10 +375,14 @@ test("the sticky matrix header stays opaque when the host surface token is trans
   // `var(--surface-color, fallback)` only falls back when the variable is
   // UNDEFINED. A host theme defining it as a transparent value would leave the
   // sticky header see-through, with rows scrolling visibly underneath it.
-  await page.addInitScript(() => {
-    document.documentElement.style.setProperty("--surface-color", "transparent");
+  await page.route("**/fixture.html", async (route) => {
+    const response = await route.fetch();
+    await route.fulfill({ response, body: (await response.text()).replace(
+      "<head>", '<head><style>:root { --surface-color: transparent; }</style>') });
   });
   await page.goto(URL);
+  expect(await page.evaluate(() => getComputedStyle(document.documentElement)
+    .getPropertyValue("--surface-color").trim())).toBe("transparent");
   await expect(page.getByRole("button", { name: /Fast lane/ })).toBeVisible();
 
   const th = page.locator('[data-testid="matrix-scroll"] thead th').first();

@@ -1,6 +1,4 @@
-"""Focused RED regressions for the PR #9 backend review findings.
-
-Owns: route_inventory.py, dashboard/plugin_api.py and backend tests.
+"""Public host-payload regressions for the PR #9 backend review findings.
 
 1.  Codex P1 #4270199726 — the DEFAULT (unset -> edge) TTS row was
     non-selectable, so a user whose TTS resolves to edge could not switch it to
@@ -15,18 +13,16 @@ Owns: route_inventory.py, dashboard/plugin_api.py and backend tests.
 2.  Codex P2 #4270199734 / Claude 1 — the process-global
     ``_inventory_warnings`` accumulation is replaced by per-build warnings (no
     cross-request/next-state contamination; true concurrent builds isolated).
-    A failed discovery warning never leaks raw exception strings.
-3.  Claude 2 — plugin auxiliary-task registry retrieval must be scoped to the
-    profile being inventoried (installed ``hermes_cli.plugins.get_plugin_manager``
-    keys its manager on the context-local Hermes home), never the process-active
-    home.
+    Missing/malformed host evidence produces fixed, sanitized warnings.
+3.  Claude 2 — plugin auxiliary tasks and warnings must come from the host
+    payload for the profile being inventoried, never another profile's rows.
 4.  Claude smaller — a plugin ``inherit_from`` cycle (A->B->A) fails closed with
     a truthful warning instead of recursing forever.
 """
 from __future__ import annotations
 
 import threading
-from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -103,9 +99,8 @@ def test_embedding_row_is_neither_selectable_nor_writable():
 
 def test_dto_default_tts_row_exposes_selectable_and_requires_model_backend(
         hermes_home):
-    from dashboard import plugin_api as pa
     hermes_home.make_profile("default")
-    inv = pa._profile_inventory()
+    inv = _state(_client(), default={"tasks": []})
     row = next(s for s in inv["default"]["slots"] if s["slotId"] == "specialist.tts")
     assert row["writable"] is False
     assert row["selectable"] is True
@@ -129,6 +124,14 @@ def _client():
     return TestClient(app)
 
 
+def _state(tc, **auxiliary):
+    response = tc.post("/state", json={"host": {"profiles": {
+        name: {"auxiliary": payload} for name, payload in auxiliary.items()
+    }}})
+    assert response.status_code == 200, response.text
+    return {p["id"]: p for p in response.json()["profiles"]}
+
+
 _BASE = ("model:\n  provider: openai\n  default: gpt-4o-mini\n"
          # a declared custom-endpoint row so the switch needs no hosted credential
          "providers:\n  openai:\n    base_url: http://127.0.0.1:8087/v1\n")
@@ -140,14 +143,12 @@ def test_default_tts_switch_saves_and_undoes_on_isolated_profile(hermes_home):
     import yaml
     home = hermes_home.path
     (home / "config.yaml").write_text(_BASE)
-    from dashboard import plugin_api as pa
-
-    row = next(s for s in pa._profile_inventory()["default"]["slots"]
+    tc = _client()
+    row = next(s for s in _state(tc, default={"tasks": []})["default"]["slots"]
                if s["slotId"] == "specialist.tts")
     assert row["writable"] is False and row["selectable"] is True
     assert row["requiresModelBackend"] is True and row["storagePath"] == "tts.edge"
 
-    tc = _client()
     changes = [{"profileId": "default", "slotId": "specialist.tts", "action": "set",
                 "to": {"provider": "openai", "model": "tts-1"}}]
 
@@ -176,113 +177,82 @@ def test_default_tts_switch_saves_and_undoes_on_isolated_profile(hermes_home):
 # 2 — per-build warnings, no process-global accumulation
 
 
-def test_build_inventory_result_is_list_compatible_and_carries_warnings(monkeypatch):
-    import hermes_cli.plugins as plugins
-
-    def boom():
-        raise RuntimeError("registry scan exploded")
-
-    monkeypatch.setattr(plugins, "get_plugin_auxiliary_tasks", boom)
-    first = ri.build_inventory({})
+@pytest.mark.parametrize("host_aux, reason", [
+    (None, "not supplied"), ({"tasks": "not a list"}, "malformed"),
+])
+def test_build_inventory_result_is_list_compatible_and_carries_warnings(host_aux, reason):
+    first = ri.build_inventory({}, host_aux=host_aux)
     assert first.warnings, first
-    assert any("plugin" in w and "failed" in w for w in first.warnings), first.warnings
+    assert any("plugin" in w and reason in w for w in first.warnings), first.warnings
     # still a list: existing list-compatible callers keep working
     assert isinstance(first, list)
     assert any(o.descriptor.slot_id == "main.default" for o in first)
 
-    monkeypatch.setattr(plugins, "get_plugin_auxiliary_tasks", lambda: [])
-    second = ri.build_inventory({})
+    second = ri.build_inventory({}, host_aux={"tasks": []})
     # NO process-global carryover: a prior failed build cannot contaminate the next
     assert second.warnings == [], second.warnings
 
 
-def test_concurrent_inventory_builds_isolate_warnings(monkeypatch):
-    import hermes_cli.plugins as plugins
-
-    local = threading.local()
+def test_concurrent_inventory_builds_isolate_warnings():
     barrier = threading.Barrier(2)
 
-    def fake():
-        barrier.wait(timeout=10)
-        if getattr(local, "fail", False):
-            raise RuntimeError("thread discovery boom")
-        return []
+    class SynchronizedPayload(dict):
+        """Meet inside each inventory build, without patching the inventory."""
+        def get(self, key, default=None):
+            if key == "tasks":
+                barrier.wait(timeout=10)
+            return super().get(key, default)
 
-    monkeypatch.setattr(plugins, "get_plugin_auxiliary_tasks", fake)
-    results = {}
-
-    def worker(name, fail):
-        local.fail = fail
-        results[name] = ri.build_inventory({})
-
-    t1 = threading.Thread(target=worker, args=("fail", True))
-    t2 = threading.Thread(target=worker, args=("ok", False))
-    t1.start(); t2.start(); t1.join(); t2.join()
-    assert results["fail"].warnings, results["fail"].warnings
-    assert results["ok"].warnings == [], results["ok"].warnings
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        failed = pool.submit(ri.build_inventory, {}, host_aux=SynchronizedPayload(tasks="bad"))
+        clean = pool.submit(ri.build_inventory, {}, host_aux=SynchronizedPayload(tasks=[]))
+        bad_result, good_result = failed.result(timeout=15), clean.result(timeout=15)
+    assert any("malformed" in w for w in bad_result.warnings), bad_result.warnings
+    assert good_result.warnings == [], good_result.warnings
 
 
-def test_discovery_failure_warning_is_sanitized(monkeypatch, tmp_path):
-    import hermes_cli.plugins as plugins
+def test_discovery_failure_warning_is_sanitized(hermes_home):
     secret = "sk-" + "synthetic-canary-" * 3
-    private_path = str(tmp_path / "credentials.yaml")
-
-    def boom():
-        raise RuntimeError(f"cred {secret} in {private_path}")
-
-    monkeypatch.setattr(plugins, "get_plugin_auxiliary_tasks", boom)
-    res = ri.build_inventory({})
+    private_path = str(hermes_home.path / "credentials.yaml")
+    res = ri.build_inventory({}, host_aux={"tasks": f"cred {secret} in {private_path}"})
     blob = " ".join(res.warnings)
     assert res.warnings and "plugin" in blob.lower()
     assert secret not in blob, blob
     assert private_path not in blob, blob
 
 
-def test_profile_inventory_warnings_are_scoped_per_profile(hermes_home, monkeypatch):
-    from dashboard import plugin_api as pa
-    import hermes_cli.plugins as plugins
-    from hermes_constants import get_hermes_home
-
+def test_profile_inventory_warnings_are_scoped_per_profile(hermes_home):
     hermes_home.make_profile("alpha")
     hermes_home.make_profile("beta")
 
-    def fake():
-        if Path(get_hermes_home()).name == "alpha":
-            raise RuntimeError("alpha discovery boom")
-        return []
-
-    monkeypatch.setattr(plugins, "get_plugin_auxiliary_tasks", fake)
-    inv = pa._profile_inventory()
+    tc = _client()
+    inv = _state(tc, default={"tasks": []}, alpha={"tasks": "bad"}, beta={"tasks": []})
     assert inv["alpha"].get("inventoryWarnings")            # alpha failed
     assert inv["beta"].get("inventoryWarnings") in (None, [])  # beta clean
+    assert any("malformed" in w for w in inv["alpha"]["inventoryWarnings"])
+    # A later request with clean evidence cannot inherit the previous warning.
+    clean = _state(tc, default={"tasks": []}, alpha={"tasks": []}, beta={"tasks": []})
+    assert clean["alpha"].get("inventoryWarnings") in (None, [])
 
 
 # ---------------------------------------------------------------------------
-# 3 — plugin registry retrieval scoped to the profile home being inventoried
+# 3 — host plugin task evidence scoped to the profile being inventoried
 
 
-def test_plugin_aux_entries_are_scoped_per_profile_home(hermes_home, monkeypatch):
-    from dashboard import plugin_api as pa
-    import hermes_cli.plugins as plugins
-    from hermes_constants import get_hermes_home
-
+def test_plugin_aux_entries_are_scoped_per_profile_home(hermes_home):
     hermes_home.make_profile("alpha")
     hermes_home.make_profile("beta")
 
-    def fake():
-        home = Path(get_hermes_home())
-        if home.name == "alpha" and home.parent.name == "profiles":
-            return [{"key": "alpha_task", "display_name": "Alpha task",
-                     "description": "demo", "plugin": "alpha", "defaults": {},
-                     "inherit_from": None}]
-        return []
-
-    monkeypatch.setattr(plugins, "get_plugin_auxiliary_tasks", fake)
-    inv = pa._profile_inventory()
+    inv = _state(_client(), default={"tasks": []}, alpha={"tasks": [{
+        "task": "alpha_task", "label": "Alpha task", "hint": "demo", "plugin": "alpha",
+        "provider": "", "model": "", "base_url": "", "reasoning_effort": "",
+        "local_endpoint": False,
+    }]}, beta={"tasks": []})
     ids_a = {s["slotId"] for s in inv["alpha"]["slots"]}
     ids_b = {s["slotId"] for s in inv["beta"]["slots"]}
     assert "auxiliary.alpha_task" in ids_a, ids_a
     assert "auxiliary.alpha_task" not in ids_b, ids_b
+    assert "auxiliary.alpha_task" not in {s["slotId"] for s in inv["default"]["slots"]}
 
 
 # ---------------------------------------------------------------------------
@@ -290,13 +260,13 @@ def test_plugin_aux_entries_are_scoped_per_profile_home(hermes_home, monkeypatch
 
 
 def _entry(key, base):
-    return {"key": key, "display_name": key, "description": "", "plugin": "cyc",
-            "defaults": {}, "inherit_from": base}
+    return {"task": key, "label": key, "hint": "", "plugin": "cyc",
+            "provider": "", "model": "", "base_url": "", "reasoning_effort": "",
+            "local_endpoint": False, "inherit_from": base}
 
 
 def test_plugin_aux_inherit_cycle_fails_closed_with_warning():
-    res = ri.build_inventory({}, plugin_aux_entries=[_entry("a", "b"),
-                                                     _entry("b", "a")])
+    res = ri.build_inventory({}, host_aux={"tasks": [_entry("a", "b"), _entry("b", "a")]})
     ids = {o.descriptor.slot_id for o in res}
     assert {"auxiliary.a", "auxiliary.b"} <= ids, ids  # survived, no RecursionError
     assert any("cycle" in w.lower() or "circular" in w.lower() for w in res.warnings), \
@@ -304,7 +274,7 @@ def test_plugin_aux_inherit_cycle_fails_closed_with_warning():
 
 
 def test_plugin_aux_self_referential_inherit_is_harmless():
-    res = ri.build_inventory({}, plugin_aux_entries=[_entry("solo", "solo")])
+    res = ri.build_inventory({}, host_aux={"tasks": [_entry("solo", "solo")]})
     assert "auxiliary.solo" in {o.descriptor.slot_id for o in res}
 
 
@@ -313,9 +283,8 @@ def test_plugin_aux_self_referential_inherit_is_harmless():
 
 
 def test_empty_notes_is_falsy_and_safe_for_ui_truthiness(hermes_home):
-    from dashboard import plugin_api as pa
     hermes_home.make_profile("default")
-    main = next(s for s in pa._profile_inventory()["default"]["slots"]
+    main = next(s for s in _state(_client(), default={"tasks": []})["default"]["slots"]
                 if s["slotId"] == "main")
     assert main["note"] in ("", None)
     assert not main["note"]  # UI `{note && ...}` renders nothing, never a crash

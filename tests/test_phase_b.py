@@ -1,6 +1,11 @@
-"""Phase B acceptance tests (PLAN T2+T3). Every test runs against a throwaway
-isolated Hermes home created in tmp_path; the live Hermes checkout is used
-read-only as the reference implementation. No writes outside tmp_path."""
+"""Phase B acceptance tests (plan T2+T3), public-seams only.
+
+Every test runs against a throwaway isolated Hermes home; the tested Hermes
+checkout is used read-only as the reference implementation. No writes outside
+the lab home. Nothing here exercises a private Hermes core module: profile
+scoping, config reads and the canonical save all go through
+``hermes_adapter``'s public seams.
+"""
 from __future__ import annotations
 
 import copy
@@ -27,19 +32,6 @@ def _cfg_from_yaml(path):
 
 
 # ------------------------------------------------------------------ T2 tests
-
-def test_plugin_auth_and_enablement(hermes_home, adapter):
-    """Adapter mirrors web_server.py:650-688's gate: disabled plugins and
-    never-enabled user plugins are refused; empty/unknown names fail closed."""
-    home = hermes_home.path
-    (home / "config.yaml").write_text(
-        RAW_MAIN + "plugins:\n  enabled:\n    - alpha\n  disabled:\n    - beta\n")
-    # Plugin enablement is read from the (default home) config in scope.
-    assert adapter.plugin_backend_allowed("alpha") is True      # explicitly enabled
-    assert adapter.plugin_backend_allowed("beta") is False      # explicitly disabled
-    assert adapter.plugin_backend_allowed("never-seen") is False  # unknown => user => blocked
-    assert adapter.plugin_backend_allowed("") is False          # no name, no access
-
 
 def test_explicit_profile_and_secret_scope(hermes_home, adapter):
     """Explicit profile scoping: config reads land in the named profile's home
@@ -80,65 +72,53 @@ def test_explicit_profile_and_secret_scope(hermes_home, adapter):
         reset_multiplex_context(token)
 
 
-def test_canonical_route_protocol(hermes_home, adapter):
-    """Main-slot assignment goes through Hermes' canonical preparation seam
-    (web_server_config._prepare_main_assignment) and the canonical save path
-    (config.save_config), preserving unrelated sections and writing only the
-    named profile's home."""
-    pdir = hermes_home.path
-    (pdir / "config.yaml").write_text(RAW_MAIN)
+def test_canonical_save_round_trip(hermes_home, adapter):
+    """The canonical save path is Hermes' public ``config.save_config`` inside
+    the profile scope: it preserves unrelated sections, writes only the named
+    profile's home, and reports the revision domain the guard compares."""
+    home = hermes_home.path
+    (home / "config.yaml").write_text(RAW_MAIN)
     raw = adapter.load_raw_config("default")
     assert raw["providers"]["lablocal"]["base_url"] == "http://127.0.0.1:8080/v1"
+    reviewed = adapter.config_revision("default")
 
-    prepared = adapter.prepare_main_assignment(
-        raw, provider="custom", model="lab-model",
-        base_url="http://127.0.0.1:8080/v1", api_key="sk-lab")
-    result = prepared["result"]
-    assert result.success, getattr(result, "error_message", None)
-    # switch_model resolves a bare custom endpoint onto the known provider row
-    # (custom:lablocal) — the canonical aliasing, not a new anonymous provider.
-    assert result.target_provider.lower().startswith("custom")
-    assert result.new_model == "lab-model"
-    assert prepared["base_url"] == "http://127.0.0.1:8080/v1"
-
-    # Canonical save: build the updated document the way _apply_main_assignment_sync
-    # does, persist via save_config, then read back and confirm isolation.
-    from hermes_cli.model_switch import apply_model_selection
+    # Build the updated document the way the engine does: the raw document
+    # plus the typed semantic changes.
     model_cfg = dict(raw.get("model") or {})
-    model_cfg = apply_model_selection(model_cfg, result)
-    model_cfg["base_url"] = prepared["base_url"]
-    model_cfg["api_key"] = "sk-lab"
+    model_cfg.update({"provider": "lablocal", "default": "lab-model"})
     updated = copy.deepcopy(raw)
     updated["model"] = model_cfg
-    out = adapter.apply_canonical_save("default", updated)
-    assert out["ok"] is True
-    assert out["revision_before"] != out["revision_after"]
 
-    on_disk = _cfg_from_yaml(str(pdir / "config.yaml"))
+    out = adapter.apply_canonical_save(
+        "default", updated, expected_revision=reviewed)
+    assert out["ok"] is True
+    assert out["profile"] == "default"
+    assert out["revision_before"] == reviewed
+    assert out["revision_before"] != out["revision_after"]
+    # The reported post-write revision IS what a fresh strict read computes.
+    assert adapter.config_revision("default") == out["revision_after"]
+
+    on_disk = _cfg_from_yaml(str(home / "config.yaml"))
     assert on_disk["model"]["default"] == "lab-model"
-    assert on_disk["model"]["api_key"] == "sk-lab"
+    assert on_disk["model"]["provider"] == "lablocal"
     # Unrelated sections survive the canonical round-trip untouched.
     assert on_disk["unrelated"]["keep_me"] is True
     assert on_disk["providers"]["lablocal"]["base_url"] == "http://127.0.0.1:8080/v1"
 
 
 def test_unsupported_runtime_is_read_only(hermes_home, adapter):
-    """A runtime below the tested baseline (or an unimportable Hermes) is
-    read-only: preparation and saves are refused, reads and previews still work."""
-    from hermes_adapter import ReadOnlyRuntime, RuntimeInfo, HermesAdapter
+    """A runtime missing a required public seam is read-only: saves are
+    refused, reads still work and no private path is attempted."""
+    from hermes_adapter import HermesAdapter, ReadOnlyRuntime, RuntimeInfo
 
     ro = HermesAdapter(runtime=RuntimeInfo(
-        importable=False, version_label="v0.19.0", supported=False,
-        read_only=True, reasons=("hermes import failed: simulated",)))
-    # The default throwaway home already carries a minimal config.yaml.
-    with pytest.raises(ReadOnlyRuntime):
-        ro.prepare_main_assignment({}, "openai", "gpt-4o-mini")
+        importable=True, version_label="", supported=False, read_only=True,
+        reasons=("missing public Hermes seams: hermes_cli.config.save_config",)))
     with pytest.raises(ReadOnlyRuntime):
         ro.apply_canonical_save("default", {"model": {"default": "x"}})
-    with pytest.raises(ReadOnlyRuntime):
-        ro.plan_canonical_save("default", {"model": {"default": "x"}})
-    # Reads still work.
+    # Reads and discovery still work on a read-only runtime.
     assert ro.load_raw_config("default")["model"]["provider"] == "openai"
+    assert ro.profile_home("default")
 
 
 # ------------------------------------------------------------------ T3 tests

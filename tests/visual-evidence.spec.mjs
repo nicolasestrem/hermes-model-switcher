@@ -10,7 +10,7 @@ const files = ['ui/src/main.jsx', 'ui/src/api.js', 'ui/src/styles.css', 'dashboa
 const digest = crypto.createHash('sha256');
 for (const file of files) digest.update(fs.readFileSync(file));
 const lineage = { repo: process.cwd(), commit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
-  surfaceDigest: digest.digest('hex'), sourceFiles: files, captureBoundary: 'Compiled UI in Dashboard SDK fixture with real FastAPI/canonical save against isolated home; no production mutation' };
+  surfaceDigest: digest.digest('hex'), sourceFiles: files, captureBoundary: 'Compiled UI in same-origin real-router SDK fixture with real FastAPI/canonical save against isolated home; no production mutation' };
 
 for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
   test(`observed UI captures and interactive layout at ${viewport.width}px`, async ({ page }) => {
@@ -20,13 +20,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     page.on('pageerror', error => consoleErrors.push(error.message));
     page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()); });
     page.on('requestfailed', request => failedRequests.push({ url: request.url(), error: request.failure()?.errorText }));
-    await page.route('**/tests/mock-api.js', route => route.fulfill({ body: '', contentType: 'application/javascript' }));
-    await page.route('**/api/plugins/**', async route => {
-      const url = new URL(route.request().url());
-      url.host = 'localhost:8932';
-      const response = await route.fetch({ url: url.toString() });
-      await route.fulfill({ response });
-    });
+    // Same-origin real SDK transport: no mock API or cross-server route
+    // interception. Public host calls and plugin transforms reach one lab app.
     async function capture(state) {
       const filename = path.join(out, `${viewport.width}-${state}.png`);
       if (state === 'operation') await page.evaluate(() => scrollTo(0, 0));
@@ -35,7 +30,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       captures.push({ state, file: filename, viewport, bounds });
       expect(bounds.documentWidth, `${state} horizontal overflow`).toBeLessThanOrEqual(viewport.width);
     }
-    await page.goto('/fixture-sdk.html');
+    await page.goto('http://localhost:8932/fixture-real.html');
     await expect(page.getByLabel('New provider', { exact: true })).toBeVisible();
     await capture('idle');
     await page.getByLabel('Profile research', { exact: true }).check();
@@ -68,6 +63,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     await expect(page.getByTestId('preview-panel')).toBeVisible();
     await page.getByTestId('apply-custom').click();
     await expect(page.getByTestId('operation-drawer')).toBeVisible();
+    await expect(page.getByTestId('result-default')).toContainText('Applied + read back');
     const drawer = await page.getByTestId('operation-drawer').boundingBox();
     expect(drawer.x).toBeGreaterThanOrEqual(0);
     expect(drawer.x + drawer.width).toBeLessThanOrEqual(viewport.width);
@@ -78,10 +74,15 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     await expect(page.getByTestId('operation-drawer')).toHaveCount(0);
     await page.getByRole('button', { name: 'Show last operation' }).click();
     await page.getByTestId('undo-guard').check();
+    const enriched = page.waitForResponse(response => response.url().endsWith('/state') &&
+      response.request().method() === 'POST');
     await page.getByTestId('undo-button').click();
     await expect(page.getByTestId('result-default')).toContainText('Restored');
     await expect(page.getByTestId('live-status')).toContainText('Undo finished');
-    await page.unrouteAll({ behavior: 'wait' });
+    // Include the out-of-band host enrichment in the observed journey.
+    expect((await (await enriched).json()).ok).toBe(true);
+    expect(await page.evaluate(() => window.__realSdkCalls.some(
+      call => call.url.startsWith('/api/model/options?')))).toBe(true);
     fs.writeFileSync(path.join(out, `${viewport.width}-manifest.json`), JSON.stringify({
       lineage, viewport, captures, consoleErrors, failedRequests, observedAt: new Date().toISOString(),
       journeys: ['profile filter and reset', 'review and edit-invalidation', 'review and apply',

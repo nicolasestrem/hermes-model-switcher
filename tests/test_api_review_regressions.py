@@ -9,9 +9,9 @@ Covered findings:
      ordered ``chain``) to route_inventory — never narrowed to provider/model.
   A2 allowlisted public diff: a route-dict value never leaks protected/
      secret neighbours (threshold, api_key, ...) into a preview diff.
-  A3 preview/apply parity: the preview diff is derived from the SAME prepared
-     mutation an apply runs (one code path), and applying a previewId executes
-     exactly that cached mutation.
+  A3 preview/apply parity: the reviewed main provider/model intent is bound
+     to its host executor and applied through the host-result handshake, not
+     silently replaced with a backend mutation.
   A4 revision- and identity-bound preview with expiry: an apply whose store
      revision or profile identity moved on (or an expired preview) is refused
      with an explicit stale/expired 409 — never replayed.
@@ -27,10 +27,12 @@ Covered findings:
      alpha-only preset, while a truly-new profile still does.
   A9 resource cleanup: the apply path closes its journal connection.
   A10 corrupt preset store is quarantined and surfaced, never silently empty.
-  A11 GET /models: truthful catalog passthrough, no-store, unknown profile is
-      a visible error.
+  A11 POST /models: supplied host catalog passthrough, no-store, unknown
+      profile is a visible error; obsolete GET requires host evidence (410).
 """
 from __future__ import annotations
+
+from host_protocol_helpers import finish_host_main_calls as _finish_host_main_calls
 
 import json
 import os
@@ -76,6 +78,8 @@ def _client():
     return TestClient(app)
 
 
+
+
 def _m(cp, name, *, env=True, config=BASE_CONFIG):
     home = cp.path
     pdir = home if name == "default" else home / "profiles" / name
@@ -106,9 +110,9 @@ def test_preview_forwards_typed_chain_payload_verbatim(hermes_home, monkeypatch)
     captured = {}
     real = plugin_api.preview_changes
 
-    def spy(cfg, edits):
+    def spy(cfg, edits, **host_evidence):
         captured["value"] = dict(edits[0].value)
-        return real(cfg, edits)
+        return real(cfg, edits, **host_evidence)
 
     monkeypatch.setattr(plugin_api, "preview_changes", spy)
     tc = _client()
@@ -162,14 +166,22 @@ def test_preview_then_apply_executes_the_same_prepared_mutation(hermes_home):
     r = tc.post("/preview", json={"changes": [change]})
     assert r.status_code == 200 and r.json()["ok"] is True, r.text
     pid = r.json()["previewId"]
-    # the cached entry is the prepared mutation, not the raw request
+    # The reviewed intent is bound to the host executor and store revision;
+    # main's exact persisted side effects only become known at host readback.
     entry = plugin_api._PREVIEW_CACHE[pid]
     assert entry["targets"], entry
-    assert isinstance(entry["targets"][0]["changes"], dict)
+    assert entry["targets"][0]["changes"] == {
+        "model.provider": "lablocal", "model.default": "lab-7b-instruct",
+    }
+    assert entry["targets"][0]["executor"] == "host"
+    before = _cfg_of(home, "default").read_bytes()
 
     # apply with ONLY the previewId (the UI's non-preset path)
     r = tc.post("/operations", json={"previewId": pid})
-    assert r.status_code == 200 and r.json()["ok"] is True, r.text
+    assert r.status_code == 200, r.text
+    assert _cfg_of(home, "default").read_bytes() == before
+    r = _finish_host_main_calls(tc, r, hermes_home.path)
+    assert r.json()["ok"] is True, r.text
     assert r.json()["operation"]["state"] == "committed", r.json()
     doc = yaml.safe_load(_cfg_of(home, "default").read_text())
     assert doc["model"]["provider"] == "lablocal"
@@ -240,7 +252,9 @@ def test_apply_accepts_matching_preset_and_preview(hermes_home):
     preview_id = r.json()["previewId"]
 
     r = tc.post("/operations", json={"presetId": pid, "previewId": preview_id})
-    assert r.status_code == 200 and r.json()["ok"] is True, r.text
+    assert r.status_code == 200, r.text
+    r = _finish_host_main_calls(tc, r, hermes_home.path)
+    assert r.json()["ok"] is True, r.text
     assert r.json()["operation"]["state"] == "committed"
 
 
@@ -273,7 +287,11 @@ def test_apply_rejects_preview_that_does_not_match_preset_scope(hermes_home):
 # ----------------------------------------------------- A6 inventory fields
 
 def _inv_slots(profile="default"):
-    return plugin_api._profile_inventory()[profile]["slots"]
+    response = _client().post("/state", json={"host": {"profiles": {
+        profile: {"auxiliary": {"tasks": []}},
+    }}})
+    assert response.status_code == 200, response.text
+    return [s for s in response.json()["slots"] if s["profileId"] == profile]
 
 
 def test_scalar_slot_reports_provider_and_model(hermes_home):
@@ -342,7 +360,9 @@ def test_existing_unselected_profile_does_not_block_preset(hermes_home):
     pid = r.json()["preset"]["id"]
 
     r = tc.post("/operations", json={"presetId": pid})
-    assert r.status_code == 200 and r.json()["ok"] is True, r.text
+    assert r.status_code == 200, r.text
+    r = _finish_host_main_calls(tc, r, hermes_home.path)
+    assert r.json()["ok"] is True, r.text
     assert r.json()["operation"]["state"] == "committed"
 
 
@@ -384,6 +404,9 @@ def test_apply_closes_its_journal(hermes_home, monkeypatch):
     r = tc.post("/operations", json={"previewId": pid})
     assert r.status_code == 200, r.text
     assert closed["n"] >= 1
+    r = _finish_host_main_calls(tc, r, hermes_home.path)
+    assert r.json()["ok"] is True
+    assert closed["n"] >= 2
 
 
 # ---------------------------------------------- A10 corrupt preset store
@@ -405,28 +428,37 @@ def test_corrupt_preset_store_is_quarantined_and_surfaced(hermes_home):
 
 # ---------------------------------------------------------- A11 /models
 
-def test_get_models_passthrough_no_store_and_unknown_profile(hermes_home, monkeypatch):
+def test_models_host_payload_passthrough_no_store_and_unknown_profile(hermes_home):
     _m(hermes_home, "default")
-    mod = plugin_api._model_catalog_module()
-    monkeypatch.setattr(mod, "_load_picker_payload", lambda refresh: {
-        "providers": [{"slug": "lablocal", "name": "Lab Local",
-                       "models": ["lab-7b-instruct", "lab-9b"],
-                       "authenticated": True}]})
+    options = {"providers": [{
+        "slug": "lablocal", "name": "Lab Local",
+        "models": ["lab-7b-instruct", "lab-9b"], "authenticated": True,
+    }]}
     tc = _client()
-    r = tc.get("/models", params={"provider": "lablocal", "profileId": "default"})
+    legacy = tc.get("/models")
+    assert legacy.status_code == 410, legacy.text
+    assert legacy.json() == {"ok": False, "reason": "hostCatalogRequired"}
+    assert legacy.headers["cache-control"] == "no-store"
+    request = {"provider": "lablocal", "profileId": "default", "options": options}
+    r = tc.post("/models", json=request)
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["ok"] is True, body
     assert [m["id"] for m in body["models"]] == ["lab-7b-instruct", "lab-9b"]
     assert r.headers.get("cache-control") == "no-store"
 
-    # an unknown provider is a truthful visible failure, not an empty success
-    r = tc.get("/models", params={"provider": "nope", "profileId": "default"})
+    # Missing host evidence is a failure, not an invented empty catalog.
+    missing = tc.post("/models", json={"provider": "lablocal", "profileId": "default"})
+    assert missing.status_code == 200 and missing.json()["ok"] is False
+    assert "hostCatalogUnavailable" in json.dumps(missing.json())
+
+    # An unknown provider is a visible failure, not an empty success.
+    r = tc.post("/models", json={**request, "provider": "nope"})
     assert r.status_code == 200 and r.json()["ok"] is False
     assert r.json()["error"]
 
-    # an unknown profile is refused before any catalog lookup
-    r = tc.get("/models", params={"provider": "lablocal", "profileId": "ghost"})
+    # An unknown profile is refused before any catalog lookup.
+    r = tc.post("/models", json={**request, "profileId": "ghost"})
     assert r.json()["ok"] is False
     assert "unknown profile" in r.json()["error"]
 
@@ -441,10 +473,12 @@ def test_preview_never_echoes_exception_text(hermes_home, monkeypatch):
     """
     _m(hermes_home, "default")
 
-    def boom(cfg, to):
+    def boom(cfg, to, profile, host):
         raise RuntimeError("leaked-secret /etc/passwd token=sk-live-123")
 
-    monkeypatch.setattr(plugin_api, "_canonical_main_changes", boom)
+    # Fault injection stays in the plugin's intent validator, not a removed
+    # private Hermes assignment hook. The caller still exercises public HTTP.
+    monkeypatch.setattr(plugin_api, "_main_host_target", boom)
     tc = _client()
     r = tc.post("/preview", json={"changes": [{
         "profileId": "default", "slotId": "main.default", "action": "set",
@@ -454,7 +488,8 @@ def test_preview_never_echoes_exception_text(hermes_home, monkeypatch):
     assert "leaked-secret" not in r.text
     assert "/etc/passwd" not in r.text
     assert "sk-live-123" not in r.text
-    assert "route rejected (RuntimeError)" in r.text
+    assert r.json()["preview"]["blocked"][0]["reason"] == "route rejected"
+    assert "RuntimeError" not in r.text
 
 
 def test_preview_removal_refusal_uses_a_fixed_reason(hermes_home, monkeypatch):

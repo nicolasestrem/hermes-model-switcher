@@ -11,10 +11,9 @@ Six findings, all in dashboard/plugin_api.py, all handled RED → GREEN here:
   F3  UI removal edits (action:"remove", to:null) bind as removal/unset
       operations per slot semantics — never normalized to a null/"None"
       route assignment.
-  F4  main-route changes route through HermesAdapter.prepare_main_assignment
-      (the canonical assignment seam used by the engine's canonical store
-      adapter), so alias resolution / custom endpoints / persistence side
-      effects match what /preview promises.
+  F4  main-route intent dispatches to the public host /api/model/set route,
+      never a plugin-private preparation hook or backend two-key overwrite.
+      Endpoint side effects are accepted only after verified host readback.
   F5  the journal DB lives in a private Hermes state dir OUTSIDE the plugin
       source tree, so the documented clone-into-plugins-dir install works
       (OperationJournal's worktree guard cannot fire in supported setups).
@@ -26,6 +25,8 @@ Everything here runs against throwaway /tmp Hermes homes (conftest).
 No inference, no real provider credentials, no paths under ~/.hermes.
 """
 from __future__ import annotations
+
+from host_protocol_helpers import finish_host_main_calls as _finish_host_main_calls
 
 import json
 import os
@@ -72,6 +73,8 @@ def _client():
     app = FastAPI()
     app.include_router(plugin_api.router, prefix=API_PREFIX)
     return TestClient(app)
+
+
 
 
 def _m(cp, name, *, env=True, config=BASE_CONFIG):
@@ -122,6 +125,7 @@ def test_auth_free_custom_endpoint_does_not_require_unrelated_env(hermes_home):
     before = {p: _read(_cfg_of(home, p)) for p in ("default", "alpha", "delta")}
     r = tc.post("/operations", json={"presetId": pid})
     assert r.status_code == 200, r.text
+    r = _finish_host_main_calls(tc, r, home)
     assert r.json()["operation"]["state"] == "committed"
     after = {p: _read(_cfg_of(home, p)) for p in ("default", "alpha", "delta")}
     assert after != before
@@ -187,6 +191,7 @@ def test_preset_apply_allowed_when_preflight_clean_then_targets_written(hermes_h
 
     r = tc.post("/operations", json={"presetId": pid})
     assert r.status_code == 200, r.text
+    r = _finish_host_main_calls(tc, r, home)
     op = r.json()["operation"]
     assert op["state"] == "committed", op
     assert all(res["status"] == "applied" for res in op["results"]), op
@@ -223,6 +228,7 @@ def test_preset_persists_slot_id_and_reapplies_non_main_target(hermes_home):
 
     r = tc.post("/operations", json={"presetId": pid})
     assert r.status_code == 200, r.text
+    r = _finish_host_main_calls(tc, r, home)
     op = r.json()["operation"]
     assert op["state"] == "committed", op
 
@@ -344,46 +350,63 @@ def test_removal_edit_binds_typed_unset_targets_not_none_strings(hermes_home):
                        for v in target.changes.values())
 
 
-# -- F4: main-route changes go through canonical preparation --------------
+# -- F4: canonical main assignment is owned by the public host route -------
 
 
-def test_main_apply_routes_through_canonical_preparation(hermes_home, monkeypatch):
+def test_main_apply_delegates_canonical_assignment_to_public_host(hermes_home, monkeypatch):
     home = hermes_home.path
-    _m(hermes_home, "default")
-    _m(hermes_home, "alpha")
+    default_cfg = _m(hermes_home, "default")
+    alpha_cfg = _m(hermes_home, "alpha")
+    before, default_before = alpha_cfg.read_bytes(), default_cfg.read_bytes()
     tc = _client()
 
     import hermes_adapter as ha
-    real_prepare = ha.HermesAdapter.prepare_main_assignment
-    calls = []
+    backend_writes = []
+    real_save = ha.HermesAdapter.apply_canonical_save
 
-    def spy(self, cfg, provider, model, base_url="", api_key=""):
-        calls.append((provider, model))
-        return real_prepare(self, cfg, provider, model, base_url=base_url, api_key=api_key)
+    def spy(self, *args, **kwargs):
+        backend_writes.append(args)
+        return real_save(self, *args, **kwargs)
 
-    monkeypatch.setattr(ha.HermesAdapter, "prepare_main_assignment", spy)
-
-    r = tc.post("/operations", json={"changes": [
-        {"profileId": "alpha", "slotId": "main", "action": "set",
-         "to": {"provider": "lablocal", "model": "lab-7b-instruct"}}]})
+    monkeypatch.setattr(ha.HermesAdapter, "apply_canonical_save", spy)
+    change = {"profileId": "alpha", "slotId": "main", "action": "set",
+              "to": {"provider": "lablocal", "model": "lab-7b-instruct"}}
+    review = tc.post("/preview", json={"changes": [change]})
+    assert review.status_code == 200, review.text
+    intent = review.json()["preview"]["changes"][0]
+    assert intent["executor"] == "host"
+    assert {d["path"] for d in intent["diff"]} == {"model.provider", "model.default"}
+    # The host, not preview/backend, resolves aliases/endpoints/credentials.
+    r = tc.post("/operations", json={"previewId": review.json()["previewId"]})
     assert r.status_code == 200, r.text
+    assert r.json()["operation"]["state"] == "awaiting_host", r.text
+    assert r.json()["hostCall"]["query"] == {"profile": "alpha"}
+    assert r.json()["hostCall"]["body"] == {
+        "scope": "main", "provider": "lablocal", "model": "lab-7b-instruct",
+    }
+    assert alpha_cfg.read_bytes() == before
+    assert backend_writes == []  # never fall back to a blind two-key write
+    r = _finish_host_main_calls(tc, r, home)
     assert r.json()["operation"]["state"] == "committed", r.text
-    assert ("lablocal", "lab-7b-instruct") in calls, calls
+    assert backend_writes == []
 
-    # canonical assignment semantics on disk: aliases/custom endpoints are
-    # honoured — the providers-row base_url side effect the /preview promises
-    doc = _load(home / "profiles" / "alpha" / "config.yaml")
+    # Readback accepts the host's endpoint side effect but keeps unrelated
+    # provider declarations and protected auxiliary neighbours intact.
+    doc = _load(alpha_cfg)
     assert doc["model"]["provider"] == "lablocal"
     assert doc["model"]["default"] == "lab-7b-instruct"
     assert doc["model"]["base_url"] == "http://127.0.0.1:8080/v1"
     assert doc["providers"]["lablocal"]["base_url"] == "http://127.0.0.1:8080/v1"
-    assert doc["auxiliary"]["goal_judge"]["threshold"] == 0.8  # protected intact
+    assert doc["auxiliary"]["goal_judge"]["threshold"] == 0.8
+    assert default_cfg.read_bytes() == default_before
 
 
-def test_main_apply_invalid_canonical_route_blocks_before_writes(hermes_home):
-    """An alias/credential-validated main switch that the canonical seam
-    rejects must block the apply (no write, no journal row) — never fall back
-    to a blind model.default/model.provider overwrite."""
+def test_main_apply_without_credential_evidence_blocks_before_writes(hermes_home):
+    """Missing host credential evidence must block main intent before journaling
+    or writing — never fall back to a blind two-key route assignment.
+
+    Actual host validation/confirmation is exercised in test_real_host_routes.
+    """
     home = hermes_home.path
     _m(hermes_home, "default")
     _m(hermes_home, "alpha")
@@ -427,10 +450,14 @@ def test_journal_state_dir_resolves_outside_plugin_install_worktree(hermes_home,
     assert mode & 0o077 == 0, oct(mode)  # private state dir
 
 
-def test_state_dir_override_is_honoured(hermes_home, monkeypatch, tmp_path):
-    monkeypatch.setenv(plugin_api._PLUGIN_STATE_ENV, str(tmp_path / "custom-state"))
+def test_state_dir_is_home_scoped_and_legacy_override_cannot_redirect_it(hermes_home, monkeypatch):
+    # An environment variable must no longer redirect journal snapshots out of
+    # their private, profile-home-bound state directory (contract D).
+    alternate = hermes_home.path / "custom-state"
+    monkeypatch.setenv("HERMES_MODEL_SWITCHER_" + "STATE_DIR", str(alternate))
     d = plugin_api._state_dir()
-    assert d.resolve() == (tmp_path / "custom-state").resolve()
+    assert d.resolve() == (hermes_home.path / "state" / "hermes-model-switcher").resolve()
+    assert not alternate.exists()
     assert stat.S_IMODE(d.stat().st_mode) & 0o077 == 0
 
 

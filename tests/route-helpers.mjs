@@ -51,3 +51,18 @@ export async function setRoute(page, provider, model, opts = {}) {
   await setProvider(page, provider, opts);
   await setModel(page, model, opts);
 }
+
+// Network-level host fixtures for specs which replace mock-api.js. Unknown
+// host paths still fail; these are real host read shapes, never {ok:true}.
+export async function mockHostReads(page) {
+  await page.route("**/api/model/**", (route) => {
+    const name = new URL(route.request().url()).pathname.split("/").pop();
+    const pair = { provider: "openai", model: "fixture-model" };
+    const shapes = {
+      options: { ...pair, providers: [] },
+      auxiliary: { tasks: [], main: pair },
+      moa: { default_preset: "default", active_preset: "", presets: {} },
+    };
+    return route.fulfill({ status: shapes[name] ? 200 : 404, json: shapes[name] || { detail: "Not Found" } });
+  });
+}

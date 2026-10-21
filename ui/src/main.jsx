@@ -3,7 +3,7 @@
 // (--hms reads Dashboard theme tokens with sane fallbacks).
 import React, { useEffect, useMemo, useRef, useState } from "shims/react.js";
 import { createRoot } from "shims/react-dom-client.js";
-import { api, ApiError } from "./api.js";
+import { api, ApiError, hostFailureText, hostStatusOf, loadHostBundle, validateHostCall } from "./api.js";
 import { resolveOpaqueSurface } from "./theme.js";
 
 const t = (v, fb) => `var(--${v}, ${fb})`;
@@ -12,14 +12,14 @@ const t = (v, fb) => `var(--${v}, ${fb})`;
 // an overlay token and may be fully transparent; do not use it for text.
 // Legacy surface/text aliases remain supported for older hosts and fixtures.
 const THEME = {
-  accent: t("accent-color", "#6f9bff"),
+  accent: "var(--color-ring, var(--accent-color, #6f9bff))",
   bg: "var(--background, var(--surface-color, #16181d))",
   fg: "var(--midground, var(--text-color, #e6e8ee))",
   muted: t("text-muted-color", "#9aa1ad"),
-  border: t("border-color", "#2c3038"),
-  danger: t("danger-color", "#e5534b"),
-  ok: t("success-color", "#3fb950"),
-  warn: t("warning-color", "#d29922"),
+  border: "var(--color-border, var(--border-color, #2c3038))",
+  danger: "var(--danger-color, var(--hms-danger-text, #e5534b))",
+  ok: "var(--success-color, var(--hms-success-text, #3fb950))",
+  warn: "var(--warning-color, var(--hms-warning-text, #d29922))",
 };
 
 // Theme-reactive opaque colour for the sticky matrix header. Never a
@@ -91,7 +91,7 @@ function priceHint(catalogModel) {
 }
 
 function freshnessText(value) {
-  if (!value) return "no timestamp";
+  if (!value) return "from Hermes picker cache";
   return String(value);
 }
 
@@ -159,7 +159,7 @@ function CatalogPriceCell({ model, field, pending }) {
   if (display) return <span>{display}</span>;
   return (
     <span className="hms-catalog-unknown" title={CATALOG_UNKNOWN_TITLE}
-      aria-label={CATALOG_UNKNOWN_TITLE}>—</span>
+      aria-label={CATALOG_UNKNOWN_TITLE}>price not published</span>
   );
 }
 
@@ -418,8 +418,8 @@ function ModelCatalogView({ catalog, profileId, slots, onRefresh, onRetry, onCol
       {data && (
         <details className="hms-catalog-freshness" data-testid="catalog-freshness-details">
           <summary>
-            Catalog freshness by provider — {stats.withFetchTime} with a fetch time ·{" "}
-            {stats.stale} of {stats.providers} marked stale
+            Catalog freshness by provider — {catalog.refreshed ? "refresh requested · " : ""}
+            {stats.withFetchTime ? `${stats.withFetchTime} with a fetch time · ${stats.stale} of ${stats.providers} marked stale` : "from Hermes picker cache"}
           </summary>
           {stats.withFetchTime > 0 ? (
             <ul>
@@ -432,8 +432,8 @@ function ModelCatalogView({ catalog, profileId, slots, onRefresh, onRetry, onCol
             </ul>
           ) : (
             <p className="hms-note">
-              No provider in this catalog reported a fetch timestamp. Prices come from the
-              installed snapshot; no freshness time is invented.
+              From Hermes picker cache. No provider reported a fetch timestamp;
+              no freshness time is invented.
             </p>
           )}
         </details>
@@ -572,7 +572,7 @@ function ModelCatalogView({ catalog, profileId, slots, onRefresh, onRetry, onCol
                                 : "authenticated"}
                               {provider.configured === false ? " · not configured in this profile" : ""}
                             </span>
-                            {provider.stale && (
+                            {provider.stale && provider.fetchedAt && (
                               <span className="hms-catalog-stale">
                                 stale snapshot{provider.fetchedAt ? ` · fetched ${provider.fetchedAt}` : ""}
                               </span>
@@ -794,7 +794,7 @@ function PresetsBar({ presets, onReview, busy }) {
       <h3 style={{ margin: "4px 0" }}>Favorite presets</h3>
       {presets.length === 0 && (
         <p data-testid="presets-empty" style={{ color: THEME.muted, margin: "4px 0" }}>
-          Keep a setup you love. Select slots, preview your changes, then save a preset to reuse them.
+          Select slots, preview your changes, then save a preset to reuse this setup.
         </p>
       )}
       <div role="list" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
@@ -807,6 +807,7 @@ function PresetsBar({ presets, onReview, busy }) {
             onClick={() => onReview(p)}
             title={`Billing policy: ${p.billingPolicy}`}
           >
+            <span className="hms-note">Load preset · </span>
             <strong>{p.name}</strong>
             <span style={{ color: THEME.muted, marginLeft: 8, fontSize: 13 }}>
               {scopeSummary(p)}
@@ -850,7 +851,7 @@ function ProfileFilter({ profiles, value, onChange }) {
             {p.name || p.id}
           </label>
         ))}
-        {visible.length === 0 && <span style={{ color: THEME.muted }}>No profiles match.</span>}
+        {visible.length === 0 && <span style={{ color: THEME.muted }}>No profiles match. Change the search to see other profiles.</span>}
       </div>
     </div>
   );
@@ -934,22 +935,22 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
   const selProfileCount = new Set([...selection.values()].map((s) => s.profileId)).size;
   const inViewKeys = new Set(filtered.map(rowKey));
   const hiddenCount = [...selection.keys()].filter((k) => !inViewKeys.has(k)).length;
-  const summaryText = `${selCount} slot${selCount === 1 ? "" : "s"} on ` +
+  const summaryText = !selCount ? "No slots selected" : `${selCount} slot${selCount === 1 ? "" : "s"} on ` +
     `${selProfileCount} profile${selProfileCount === 1 ? "" : "s"} selected` +
     (hiddenCount > 0 ? ` · ${hiddenCount} hidden by current filters` : "");
 
   return (
     <section aria-label="Profile model matrix">
       <h3 style={{ margin: "4px 0" }}>Select your targets</h3>
-      <p className="hms-section-description">Choose the profile slots you want to change. Filters help you find them; selected targets stay selected.</p>
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "baseline", margin: "4px 0" }}>
+      <p className="hms-section-description">Select profile slots to change. Filters narrow the view; selected targets stay selected.</p>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", margin: "8px 0" }}>
         <p data-testid="selection-summary" aria-live="polite" style={{ margin: 0 }}>{summaryText}</p>
         <button type="button" data-testid="clear-selection" disabled={selection.size === 0}
           title="Deselect every selected target, including ones hidden by the current filters"
           onClick={() => onClearSelection()}>Clear selection</button>
       </div>
       <div role="group" aria-label="Matrix filters"
-        style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+        className="hms-matrix-filters">
         <div className="hms-profile-scope"><strong>Profiles shown</strong>
         <ProfileFilter profiles={profiles} value={filters.profileIds}
           onChange={(profileIds) => setFilter({ profileIds, subfamily: "all" })} />
@@ -984,8 +985,8 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
         </select></label>
         <button type="button" onClick={() => setFilter({ profileIds: [], family: "all", subfamily: "all", provider: "", model: "", state: "all" })}>Reset filters</button>
       </div>
-      <p style={{ color: THEME.muted, fontSize: 13, margin: "4px 0" }}>{filtered.length} matching slots · {filtered.filter(s => !canSelectSlot(s)).length} read-only. Scroll horizontally to inspect routes on narrow screens.</p>
-      <div data-testid="matrix-scroll" role="region" aria-label="Scrollable model slots" tabIndex={0} style={{ maxHeight: "70vh", overflow: "auto" }}>
+      <p style={{ color: THEME.muted, fontSize: 13, margin: "4px 0" }}>{filtered.length} matching slots · {filtered.filter(s => !canSelectSlot(s)).length} read-only. Scroll horizontally to inspect routes.</p>
+      <div data-testid="matrix-scroll" role="region" aria-label="Scrollable model slots" tabIndex={0} style={{ maxHeight: "70vh", overflowY: "auto" }}>
       <table style={{ borderCollapse: "collapse", width: "100%" }}>
         {/* Screen-reader-only caption. The hidden styles are INLINE: the host
             Dashboard does not define `.visually-hidden`, so a class-based hide
@@ -999,7 +1000,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
           <tr>
             <th scope="col" style={{
               textAlign: "left", borderBottom: `1px solid ${THEME.border}`, padding: 4,
-              position: "sticky", top: 0, left: 0, background: stickyBg, zIndex: 3, width: 32, minWidth: 32,
+              position: "sticky", top: 0, left: 0, background: stickyBg, zIndex: 3, width: 40, minWidth: 40,
             }}>
               <input ref={masterRef} type="checkbox" data-testid="select-all"
                 aria-label="Select all matching writable slots" checked={masterChecked}
@@ -1021,9 +1022,9 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
             const checked = selection.has(key);
             return (
               <React.Fragment key={key}>
-                <tr data-row={key} data-selected={checked}
+                <tr data-row={key} data-selected={checked} data-readonly={!canSelectSlot(s)}
                   style={{ borderBottom: `1px solid ${THEME.border}` }}>
-                  <td data-column="select" style={{ position: "sticky", left: 0, background: stickyBg, zIndex: 1, minWidth: 32 }}>
+                  <td data-column="select" style={{ position: "sticky", left: 0, background: checked ? `color-mix(in srgb, ${THEME.accent} 12%, ${stickyBg})` : stickyBg, zIndex: 1, minWidth: 40 }}>
                     <input
                       type="checkbox"
                       aria-label={`Select ${s.profileId} ${s.slotId}`}
@@ -1032,18 +1033,19 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
                       onChange={() => onToggle(key, s)}
                     />
                   </td>
-                  <td data-column="profile" data-profile-id={s.profileId} style={{ position: "sticky", left: 40, background: stickyBg, zIndex: 1 }}>
+                  <td data-column="profile" data-profile-id={s.profileId} style={{ position: "sticky", left: 40, background: checked ? `color-mix(in srgb, ${THEME.accent} 12%, ${stickyBg})` : stickyBg, zIndex: 1 }}>
                     {profiles.find((p) => p.id === s.profileId)?.name || s.profileId}
                     {s.requiresModelBackend && (
                       <span className="hms-note" data-testid="backend-switch-note"> Current backend has no model field; choose a model-bearing backend to switch.</span>
                     )}
                     {!canSelectSlot(s) && (
-                      <span className="hms-note" data-testid="readonly-reason">
-                        {" "}{s.note ? s.note : "Profile is read-only — routing can not be changed on this profile."}
+                      <span className="hms-note hms-readonly" data-testid="readonly-reason">
+                        <strong>Read-only</strong>
+                        {" — "}{s.note ? s.note : "Routing cannot be changed on this profile."}
                       </span>
                     )}
                   </td>
-                  <td><button className="hms-expand" title={s.slotId} aria-label={`Details for ${s.profileId} ${s.slotId}`} aria-expanded={!!expanded[key]} onClick={() => onExpand(key)}>{taskLabel(s)}</button></td>
+                  <td data-column="slot"><button className="hms-expand" title={s.slotId} aria-label={`Details for ${s.profileId} ${s.slotId}`} aria-expanded={!!expanded[key]} onClick={() => onExpand(key)}>{taskLabel(s)}</button></td>
                   <td data-column="family" data-family-id={s.family}>{familyLabel(s.family)}</td>
                   <td data-column="state">
                     <span className="hms-badge" data-state={normalizeState(s.state)}>{stateLabel(s.state)}</span>
@@ -1123,7 +1125,7 @@ export function chainInvalid(entries) {
 
 function ChangeEditor({
   selection, slots, editor, setEditor, onPreview, onApply, preview, previewInvalid,
-  busy, catalog, catalogProfileId, onEnsureCatalog, onRefreshCatalog, onRetryCatalog, announce,
+  busy, host, catalog, catalogProfileId, onEnsureCatalog, onRefreshCatalog, onRetryCatalog, announce,
 }) {
   const selectedSlots = slots.filter((s) => selection.has(s.profileId + "/" + s.slotId));
   const hasSelection = selectedSlots.length > 0;
@@ -1176,7 +1178,7 @@ function ChangeEditor({
     setModelState({ key, data: null, error: null, loading: true });
     try {
       const data = await Promise.race([
-        api.getModels({ provider, profileId: catalogProfileId }),
+        api.getModels({ provider, profileId: catalogProfileId, host }),
         new Promise((_, reject) => setTimeout(
           () => reject(new Error("Model list timed out — retry, or choose Other to type an exact model id.")),
           4000,
@@ -1283,7 +1285,7 @@ function ChangeEditor({
   const assignmentMismatch = assignmentOnly.length > 0 && editor.changeType !== "set";
   const applicability = (() => {
     if (!writableSelected.length) {
-      return "No writable slot selected — select rows in the matrix to build a change.";
+      return "Select writable slots in the table to start.";
     }
     if (assignmentOnly.length > 0) {
       return `${assignmentOnly.length} selected speech slot(s) have no current model field. Choose a model and an explicit model-bearing backend to switch; resetting, removing or disabling an imaginary model field is not supported.`;
@@ -1307,18 +1309,17 @@ function ChangeEditor({
   })();
 
   return (
-    <section aria-label="Custom change editor" data-testid="change-editor"
+    <section aria-label="Custom change editor" data-testid="change-editor" data-empty={!writableSelected.length}
       style={{ marginTop: 0 }}>
       <h3 style={{ margin: "4px 0" }}>Choose your routing</h3>
-      <p className="hms-section-description">Set the route, preview the exact changes, then apply when you’re ready.</p>
-      {!hasSelection && <p style={{ color: THEME.muted }}>Select slots in the matrix to build a change.</p>}
-      <p data-testid="editor-applicability" style={{ color: THEME.muted, margin: "0 0 4px" }}>{applicability}</p>
+      {writableSelected.length > 0 && <p className="hms-section-description">Preview changes before applying.</p>}
+      <p data-testid="editor-applicability" className="hms-editor-guidance">{applicability}</p>
       {selectedSlots.some(s => s.note || s.metadata?.description) && <ul data-testid="selected-route-notes" className="hms-note">
         {[...new Set(selectedSlots.map(s => s.note || s.metadata?.description).filter(Boolean))].map(note => <li key={note}>{note}</li>)}
       </ul>}
       {selectedSlots.some(s => String(s.protocol).replaceAll("-", "_") === "typed_decision") &&
         <p className="hms-note">These targets require a compatible typed-decision route. Preview validates compatibility; a plain chat model is not interchangeable.</p>}
-      <div style={{ display: "grid", gap: 6, maxWidth: "min(640px, 100%)" }}>
+      <div className="hms-editor-fields">
         <label>Change type
           <select data-testid="change-type" aria-label="Change type" value={editor.changeType}
             onChange={(e) => set({ changeType: e.target.value })}>
@@ -1441,7 +1442,7 @@ function ChangeEditor({
 
         {/* Advanced actions are collapsed until requested. */}
         <details data-testid="removal-advanced">
-          <summary style={{ cursor: "pointer" }}>Advanced — remove an exact provider/model</summary>
+          <summary style={{ cursor: "pointer" }}>Advanced: remove a specific route</summary>
           <label>Exact route to remove (<code>provider/model</code>, matches exact identity only)
             <input value={editor.removeExact} onChange={(e) => set({ removeExact: e.target.value })}
               aria-label="Exact provider/model to remove" placeholder="e.g. openai/gpt-4o" /></label>
@@ -1461,9 +1462,11 @@ function ChangeEditor({
               {catalog.data
                 ? `${providerList.length} providers · ${catalogModelCount} models` +
                   (catalog.data.cost?.pending ? " · cost pending" : "") +
-                  (staleProviderCount ? ` · ${staleProviderCount} stale` : " · fresh")
-                : catalog.loading ? "Loading catalog…" : "Catalog not loaded"}
-              {" · scope "}<code>{catalogProfileId}</code>
+                  (providerList.some((p) => p.fetchedAt)
+                    ? (staleProviderCount ? ` · ${staleProviderCount} stale` : " · fresh")
+                    : ` · ${catalog.refreshed ? "refresh requested" : "from Hermes picker cache"}`)
+                : catalog.loading ? "Loading catalog…" : "Catalog not loaded yet"}
+              {catalog.data && <> · Catalog for profile <code>{catalogProfileId}</code></>}
             </span>
             <button type="button" data-testid="refresh-catalog"
               disabled={busy || catalog.loading}
@@ -1478,7 +1481,7 @@ function ChangeEditor({
                 {providerList.map((p) => (
                   <li key={p.id} data-provider-freshness={p.id}>
                     <code>{p.id}</code> — {freshnessText(p.fetchedAt)}
-                    {p.stale ? <strong> · stale</strong> : null}
+                    {p.stale && p.fetchedAt ? <strong> · stale</strong> : null}
                     {p.warning ? <span> · {p.warning}</span> : null}
                   </li>
                 ))}
@@ -1487,10 +1490,12 @@ function ChangeEditor({
           )}
         </div>
 
-        <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <label className="hms-cost-ack">
           <input type="checkbox" checked={editor.ackUnknownCost}
             onChange={(e) => set({ ackUnknownCost: e.target.checked })} />
-          I acknowledge unknown-cost routes are never treated as free
+          <span>I acknowledge unknown-cost routes are never treated as free
+            <span className="hms-note hms-cost-relevance">Required before Apply.</span>
+          </span>
         </label>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <button className="hms-preview" disabled={!writableSelected.length || busy || chainBad || incompatibleChain || mixedScalar || assignmentMismatch || !buildCustomChanges(editor, selectedSlots).length}
@@ -1498,7 +1503,7 @@ function ChangeEditor({
             Preview changes
           </button>
           <button className="hms-apply" data-testid="apply-custom"
-            disabled={!preview || previewInvalid || busy || !editor.ackUnknownCost}
+            aria-disabled={!preview || previewInvalid || busy || !editor.ackUnknownCost}
             onClick={onApply}
             title={preview ? undefined : "Preview is required before apply"}>
             Apply
@@ -1506,7 +1511,7 @@ function ChangeEditor({
           <span style={{ color: THEME.muted, alignSelf: "center" }}>
             {busy ? "Request in progress…" : preview
               ? previewInvalid ? "Preview stale — preview your changes again" : `${preview.changes.length} ${preview.changes.length === 1 ? "change" : "changes"} reviewed`
-              : !hasSelection ? "Select writable targets first" : incompatibleChain || mixedScalar || assignmentMismatch ? "Resolve the selection mismatch first" : "Preview required"}
+              : !hasSelection ? "" : incompatibleChain || mixedScalar || assignmentMismatch ? "Resolve the selection mismatch first" : "Preview required"}
           </span>
           {preview && !editor.ackUnknownCost && <span className="hms-note">Acknowledge the cost policy before applying.</span>}
         </div>
@@ -1543,7 +1548,7 @@ function PreviewPanel({ preview }) {
   if (!preview) return null;
   return (
     <section aria-label="Change preview" data-testid="preview-panel"
-      style={{ marginTop: 8, border: `1px solid ${THEME.border}`, padding: 8 }}>
+      className="hms-preview-panel">
       <h3 style={{ margin: "0 0 6px" }}>Preview ({preview.changes.length} {preview.changes.length === 1 ? "change" : "changes"})</h3>
       <ul>
         {preview.changes.map((c, i) => (
@@ -1611,6 +1616,14 @@ const FAILURE_COPY = {
   blocked: "Apply blocked before any write",
   io_error: "Storage error while writing the change",
   step_failed: "A step failed before it could be verified",
+  // Host-owned steps: the browser performed the host route, the backend
+  // classified the result by re-reading the store. The host's own response
+  // text never reaches this map — only these fixed categories do.
+  host_no_write: "The host reported success but wrote nothing — not applied",
+  host_declined: "Host write declined at the model confirmation",
+  host_error: "The host refused the write",
+  host_token_mismatch: "Host step out of sequence — nothing was changed",
+  external_edit: "The host route was changed by something else during apply",
 };
 const STATE_COPY = {
   compensated: "rolled back after a failed apply",
@@ -1623,6 +1636,76 @@ const STATE_COPY = {
   undone: "undone",
   committed: "committed",
 };
+
+// A guarded Undo that cannot run (or ran and did not restore) must say WHY in
+// plain words and what to do next: a disabled button with no reason is a dead
+// end. Reasons are mapped from the FIXED failure category the backend sends
+// (journal.FAILURE_CATEGORIES) and fall back to the terminal state when the DTO
+// carries no category — an undo conflict carries none today, because
+// engine.undo_operation finishes recovery_required without recording one. The
+// enum never reaches the user; these sentences do.
+const UNDO_FAILURE_COPY = {
+  external_edit: ["the config changed outside this operation", "Review the profile config, then refresh."],
+  revision_conflict: ["the profile changed after the review", "Review the profile config, then refresh."],
+  store_unreadable: ["the stored configuration could not be read", "Check access to the config store, then refresh."],
+  write_verification_failed: ["the last write could not be verified", "Check the profile config before trying again."],
+  io_error: ["a storage error interrupted the write", "Check the profile config, then retry."],
+  host_no_write: ["the host reported success but wrote nothing", "Check the profile config, then refresh."],
+  host_declined: ["the host declined the write at the model confirmation", "Review the profile config, then retry."],
+  host_error: ["the host refused the write", "Review the profile config, then retry."],
+  host_token_mismatch: ["a host step was out of sequence", "Refresh and review the operation again."],
+  step_failed: ["a step failed before it could be verified", "Check the profile config, then retry."],
+  blocked: ["the apply was blocked before any write", "Fix the blocking reason, then review again."],
+  unknown_failure: ["the operation could not be verified", "Check the profile config, then refresh."],
+};
+const UNDO_STATE_COPY = {
+  // recovery_required is handled per-action in undoReason(): only an UNDO
+  // reaches it through a revision conflict (external edit); an apply without a
+  // category must not invent that cause.
+  recovery_required: ["the operation could not be verified", "Review the profile config before trying again."],
+  partial: ["the operation only partly rolled back", "Review the profile config, then refresh."],
+  compensated: ["the failed apply was already rolled back", "Review the profile config before another change."],
+  pending: ["nothing was written, so there is nothing to undo", "Review the change again."],
+  failed: ["the apply did not commit", "Review the profile config, then retry."],
+  undone: ["this operation is already undone", "Refresh to confirm the restored revisions."],
+  awaiting_host: ["a host step is still awaiting a result", "Finish or recover the operation first."],
+  applying: ["the operation is still running", "Wait for it to finish, then refresh."],
+  committed: ["this operation has no applied steps to undo", "Refresh to review its current state."],
+};
+
+// Returns {key, why, next, text} for a blocked/non-restoring Undo, or null when
+// Undo is available. ``key`` is the fixed category (or terminal state) for
+// traceability; ``text`` is the sentence rendered beside the control.
+function undoReason({ action, finalState, failure, undoable }) {
+  const fromFailure = failure ? UNDO_FAILURE_COPY[failure] : null;
+  // An undo conflict means the store moved after the apply — the same fact the
+  // external_edit category carries, and the only way undo reaches this state.
+  const undoConflict = action === "undo" && finalState === "recovery_required";
+  const mapped = fromFailure
+    || (undoConflict ? ["the config changed outside this operation", "Review the profile config, then refresh."] : null)
+    || (finalState ? UNDO_STATE_COPY[finalState] : null);
+  if (!mapped) {
+    if (undoable !== false) return null;
+    return {
+      key: "not_undoable",
+      why: "this operation cannot be undone",
+      next: "Refresh to review its current state.",
+      text: "Undo is unavailable: this operation cannot be undone. Refresh to review its current state.",
+    };
+  }
+  const [why, next] = mapped;
+  // An undo that RAN and ended recovery_required did not restore everything;
+  // "unavailable" there would misdescribe a mutation the user requested.
+  const lead = undoConflict ? "Undo did not restore every profile" : "Undo is unavailable";
+  return { key: fromFailure ? failure : finalState, why, next, text: `${lead}: ${why}. ${next}` };
+}
+
+function nameList(names) {
+  const list = (names || []).filter(Boolean);
+  if (list.length <= 1) return list[0] || "";
+  return `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
+}
+
 
 // Only a scalar is displayable: an object would render as "[object Object]" and
 // the safe failure category / state strings are always scalars.
@@ -1690,20 +1773,28 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
   // THAT profile — even when the whole operation is incomplete (another profile
   // hit a conflict). Per-profile bytes are verified independently of the op.
   const isRestored = (status) => COMPENSATED_STATUSES.includes(status) && undoContext;
-  const appliedCount = results.filter((r) => r.status === "applied").length;
-  const restoredCount = results.filter((r) => isRestored(r.status)).length;
-  const conflictCount = results.filter((r) => r.status === "conflict").length;
+  const profileCount = (rows) => new Set(rows.map((r) => r.profileId)).size;
+  const appliedCount = profileCount(results.filter((r) => r.status === "applied"));
+  const restoredCount = profileCount(results.filter((r) => isRestored(r.status)));
+  const conflictCount = profileCount(results.filter((r) => r.status === "conflict"));
   // Any step that is not a verified ``applied`` needs attention — UNLESS it is a
   // compensated/restored step of a user-requested undo. A fully-compensated
   // failed apply therefore reads "0 applied · N need attention" instead of the
   // old, dangerously clean "0 · 0"; a partial undo counts only the conflicted
   // profile (the restored one is genuinely back); an unrecognised future status
   // is counted too rather than silently ignored.
-  const attentionCount = results.filter((r) =>
+  const attentionCount = profileCount(results.filter((r) =>
     r.status !== "applied" && !isRestored(r.status)
-  ).length;
-  const failure = scalarText(operation.failure) || results.map((r) => scalarText(r.failure)).find(Boolean) || null;
-  const failureCopy = failure ? FAILURE_COPY[failure] || failure : null;
+  ));
+  const category = scalarText(operation.failure) || results.map((r) => scalarText(r.failure)).find(Boolean) || null;
+  const failure = category && Object.hasOwn(FAILURE_COPY, category) ? category : category ? "unknown_failure" : null;
+  const failureCopy = failure ? FAILURE_COPY[failure] || "Operation could not be verified — check recovery" : null;
+  // A disabled Undo needs its reason on screen: an operation the backend marks
+  // non-undoable, or one that is recovery_required, gets one plain sentence
+  // beside the control (never a focusable element, never the raw enum).
+  const undoNote = (operation.undoable === false || finalState === "recovery_required")
+    ? undoReason({ action, finalState, failure, undoable: operation.undoable })
+    : null;
   // A failed apply may carry NO failure category (the rollback itself is the
   // outcome); the terminal state still has to be on screen, so the state line
   // is driven by the state, not by the presence of ``failure``. ``pending`` is
@@ -1743,7 +1834,7 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
         </p>
       )}
       <ul style={{ listStyle: "none", padding: 0 }}>
-        {results.map((r) => {
+        {results.map((r, index) => {
           const isCompensated = COMPENSATED_STATUSES.includes(r.status);
           const label = isCompensated
             ? (undoContext
@@ -1753,7 +1844,7 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
                   : UNKNOWN_RESTORE_LABEL) // no context: never invent "apply"
             : RESULT_LABEL[r.status] || { text: r.status, color: THEME.fg };
           return (
-            <li key={r.profileId} data-testid={`result-${r.profileId}`}
+            <li key={`${r.profileId}-${index}`} data-testid={`result-${r.profileId}`}
               style={{ borderBottom: `1px solid ${THEME.border}`, padding: "6px 0" }}>
               <strong>{r.profileId}</strong>{" "}
               <span role="status" style={{ color: label.color }} data-status={r.status}>
@@ -1774,6 +1865,14 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
         </label>
         <button className="hms-undo" data-testid="undo-button" disabled={!undoGuarded || busy || operation.undoable === false}
           onClick={onUndo}>Undo operation</button>
+        {undoNote && (
+          <p className="hms-note hms-undo-note" data-testid="undo-unavailable"
+            data-reason={undoNote.key}
+            data-tone={finalState === "recovery_required" ? "danger" : "warning"}
+            aria-live="polite">
+            {undoNote.text}
+          </p>
+        )}
       </div>
     </aside>
   );
@@ -1858,6 +1957,101 @@ const EMPTY_EDITOR = {
   removeExact: "", ackUnknownCost: false,
 };
 
+// ---------- host step surfacing ----------
+
+// The host's own cost guard answers a main/aux assignment with
+// `{confirm_required: true, confirm_message}`. That message is backend text:
+// it is rendered as TEXT (React escapes it), never as HTML, and the dialog
+// offers exactly two actions. Cancel resolves the step as `declined` — the
+// plugin backend compensates; the UI never guesses what "no" means.
+function ConfirmDialog({ ask, onConfirm, onCancel }) {
+  const confirmRef = useRef(null);
+  const cancelRef = useRef(null);
+  useEffect(() => {
+    if (!ask) return undefined;
+    confirmRef.current?.focus();
+    const onKey = (event) => {
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onCancel(); }
+      if (event.key === "Tab") {
+        event.preventDefault();
+        (document.activeElement === confirmRef.current ? cancelRef : confirmRef).current?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+  }, [ask]);
+  if (!ask) return null;
+  return (
+    <div className="hms-confirm-backdrop">
+      <div role="dialog" aria-modal="true" aria-labelledby="hms-confirm-title"
+        aria-describedby="hms-confirm-message" data-testid="confirm-dialog" className="hms-confirm">
+        <h3 id="hms-confirm-title">Hermes asks you to confirm this model</h3>
+        <p id="hms-confirm-message" data-testid="confirm-message">
+          {String(ask.message || "Review this model assignment before continuing.")}
+        </p>
+        <div className="hms-confirm-actions">
+          <button ref={cancelRef} type="button" data-testid="confirm-cancel" onClick={onCancel}>Cancel</button>
+          <button type="button" ref={confirmRef} data-testid="confirm-accept"
+            className="hms-apply" onClick={onConfirm}>Confirm</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const PROGRESS_LABEL = {
+  applied: "done", ok: "done", pending: "pending", awaiting_host: "awaiting host",
+  confirm: "confirm", failed: "failed", compensated: "rolled back", conflict: "recovery required",
+  recovery_required: "recovery required",
+};
+
+// Per-step apply progress. A host step is a round trip of its own (and may wait
+// on the user for a cost confirmation), so "request in progress…" alone would
+// hide where the operation actually is. Entries come from the envelope's
+// per-profile results plus the live host call it is currently waiting on.
+function ApplyProgress({ progress }) {
+  if (!progress || !progress.entries || !progress.entries.length) return null;
+  return (
+    <div data-testid="apply-progress" role="status" aria-live="polite"
+      className="hms-apply-progress">
+      <strong style={{ display: "block", marginBottom: 4 }}>
+        Apply progress{progress.note ? ` — ${progress.note}` : ""}
+      </strong>
+      <ol style={{ margin: 0, paddingLeft: 18 }}>
+        {progress.entries.map((entry) => (
+          <li key={entry.key} data-testid={`apply-step-${entry.key}`}
+            data-step-status={entry.status}>
+            {entry.label} — {PROGRESS_LABEL[entry.status] || "pending"}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+// Results are journal steps (several may share a profile). The host sequence
+// is zero-based and indexes the same step list, including backend-only steps.
+function progressEntries(operation, hostCall, profileNameOf) {
+  const entries = ((operation && Array.isArray(operation.results)) ? operation.results : [])
+    .map((result, index) => ({
+      key: `step-${index}`,
+      label: `${profileNameOf(result.profileId)} (${result.profileId}) · step ${index + 1}`,
+      status: result.status,
+    }));
+  if (hostCall) {
+    const profile = (hostCall.query && hostCall.query.profile) || "";
+    const route = String(hostCall.path || "").replace(/^\/api\/model\//, "");
+    const running = {
+      key: `host-${hostCall.seq}`,
+      label: `host ${route || "write"}${profile ? ` → ${profile}` : ""} · step ${hostCall.seq + 1}`,
+      status: "awaiting_host",
+    };
+    if (entries[hostCall.seq]) entries[hostCall.seq] = running;
+    else entries.push(running);
+  }
+  return entries;
+}
+
 function App() {
   const [state, setState] = useState(null);
   const [loadError, setLoadError] = useState(null);
@@ -1896,12 +2090,85 @@ function App() {
   // section is a sibling of the workspace, so toggling it can never unmount
   // or reset selection/editor/preview state.
   const [catalogOpen, setCatalogOpen] = useState(false);
+  // Host data: Hermes' own model routes (/api/model/options|auxiliary|moa) per
+  // profile. Loaded after the config-only /state paint, never blocking it; a
+  // profile whose route is missing keeps `null` parts plus one notice line.
+  const [host, setHost] = useState({ profiles: {} });
+  const [hostNotice, setHostNotice] = useState({ text: "Loading host model data…", kind: "loading" });
+  const mutationLock = useRef(false);
+  const [recoveryNeeded, setRecoveryNeeded] = useState(false);
+  const applyOpener = useRef(null);
+  // Per-step apply progress (host steps included) and the pending host cost
+  // confirmation. `confirmResolve` holds the promise resolver for the loop.
+  const [progress, setProgress] = useState(null);
+  const [confirmAsk, setConfirmAsk] = useState(null);
+  const hostRef = useRef({ profiles: {} });
+  const confirmResolve = useRef(null);
   const reviewSeq = useRef(0);
   const catalogSeq = useRef(0);
   const catalogCache = useRef(new Map());
   const loadSeq = useRef(0);
+  const hostSeq = useRef(0);
 
   const announce = (msg, kind = "info") => setStatus({ text: msg, kind });
+  const profileNameOf = (profileId) => {
+    const found = ((state && state.profiles) || []).find((p) => p.id === profileId);
+    return (found && (found.name || found.id)) || profileId || "profile";
+  };
+  const adoptHost = (bundle) => {
+    hostRef.current = bundle || { profiles: {} };
+    setHost(hostRef.current);
+  };
+  // Host bundle for `profileIds`, refreshed in place. Never throws: an
+  // unreachable route becomes a null part and a fixed-category notice.
+  const refreshHost = async (profileIds, { refresh = false, seq = null } = {}) => {
+    const mine = ++hostSeq.current;
+    setHostNotice({ text: "Loading host model data…", kind: "loading" });
+    const { host: bundle, failures } = await loadHostBundle(profileIds, { refresh });
+    if (mine !== hostSeq.current || (seq !== null && seq !== loadSeq.current)) return null;
+    adoptHost(bundle);
+    const available = Object.values(bundle.profiles).some((parts) => Object.values(parts).some(Boolean));
+    setHostNotice({ text: hostFailureText(failures), kind: available ? "partial" : "unavailable" });
+    // Upgrade the config-only paint with the host-derived rows. Best effort:
+    // a backend that predates POST /state keeps the GET DTO.
+    try {
+      const enriched = await api.loadState(bundle);
+      if (!enriched || !Array.isArray(enriched.slots)) return null;
+      if (mine !== hostSeq.current || (seq !== null && seq !== loadSeq.current)) return null;
+      setState(enriched);
+      setSelection((old) => new Map(enriched.slots.filter((slot) =>
+        old.has(slot.profileId + "/" + slot.slotId)).map((slot) =>
+        [slot.profileId + "/" + slot.slotId, slot])));
+    } catch (e) {
+      setHostNotice({ text: "Host enrichment unavailable. Configuration-only state is shown.", kind: "partial" });
+    }
+    return bundle;
+  };
+  // Host parts for one profile, fetched on demand (catalog / model lists) when
+  // the mount-time load has not reached it yet, or refetched on refresh.
+  const ensureHostFor = async (profileId, { refresh = false } = {}) => {
+    const pid = profileId || "";
+    const current = hostRef.current && hostRef.current.profiles ? hostRef.current.profiles[pid] : null;
+    if (current && !refresh) return current;
+    const { host: bundle, failures } = await loadHostBundle([pid], { refresh });
+    const merged = { profiles: { ...(hostRef.current.profiles || {}), ...bundle.profiles } };
+    adoptHost(merged);
+    if (failures.length) setHostNotice({ text: hostFailureText(failures), kind: "partial" });
+    return merged.profiles[pid];
+  };
+  // Resolve the pending host cost confirmation. `true` = Confirm, `false` =
+  // Cancel; the loop reports `declined` and the backend compensates.
+  const askConfirm = (message) => new Promise((resolve) => {
+    confirmResolve.current = resolve;
+    setConfirmAsk({ message: typeof message === "string" ? message : "" });
+  });
+  const answerConfirm = (accepted) => {
+    const resolve = confirmResolve.current;
+    confirmResolve.current = null;
+    setConfirmAsk(null);
+    applyOpener.current?.focus();
+    if (resolve) resolve(Boolean(accepted));
+  };
   // Keep the preset action mounted for focus return, but consume its preview.
   // Applying or undoing must never leave an old review ready to apply again.
   const refreshSilently = async () => {
@@ -1917,6 +2184,9 @@ function App() {
       setSelection((old) => new Map(s.slots.filter((slot) =>
         old.has(slot.profileId + "/" + slot.slotId)).map((slot) =>
         [slot.profileId + "/" + slot.slotId, slot])));
+      // Host data is refreshed out of band: the paint above is complete on its
+      // own, and a slow or missing host route must never stall a reload.
+      refreshHost((s.profiles || []).map((p) => p.id), { seq });
     } catch (e) {
       if (seq !== loadSeq.current) return;
       setState(null);
@@ -1932,7 +2202,7 @@ function App() {
     // Cancel any review that is still in flight: its response is superseded
     // and will (correctly) leave the busy flag alone, so clearing it here is
     // what keeps "busy" meaning "a review request is actually pending".
-    setBusy(false);
+    if (!mutationLock.current) setBusy(false);
   };
   const editEditor = (next) => {
     const { ackUnknownCost: oldAck, ...oldIntent } = editor;
@@ -1954,6 +2224,9 @@ function App() {
         old.has(slot.profileId + "/" + slot.slotId)).map((slot) =>
         [slot.profileId + "/" + slot.slotId, slot])));
       if (!silent) announce("Model switcher state loaded");
+      // Non-blocking host half: the tab is already usable with config-only
+      // data while these land.
+      refreshHost((s.profiles || []).map((p) => p.id), { seq });
     } catch (e) {
       if (seq !== loadSeq.current) return;
       setState(null);
@@ -1976,16 +2249,16 @@ function App() {
     (reviewedPreset && previewFor === "preset:" + reviewedPreset.id)) ? preview : null;
   const cleanReview = activePreview && activePreview.changes.length > 0 &&
     !(activePreview.blocked && activePreview.blocked.length);
-  const canApply = Boolean(cleanReview && !busy && (reviewedPreset || editor.ackUnknownCost));
+  const canApply = Boolean(cleanReview && !busy && !recoveryNeeded && (reviewedPreset || editor.ackUnknownCost));
 
   const runPreview = async (changes, fingerprint) => {
-    if (!changes.length) return;
+    if (!changes.length || mutationLock.current || recoveryNeeded) return;
     const seq = ++reviewSeq.current;
     setPreview(null);
     setPreviewFor("");
     setBusy(true);
     try {
-      const p = await api.preview(changes);
+      const p = await api.preview(changes, hostRef.current);
       if (seq !== reviewSeq.current) return;
       setPreview(p.preview);
       setPreviewFor(fingerprint);
@@ -2007,6 +2280,7 @@ function App() {
   };
 
   const reviewPreset = async (preset) => {
+    if (mutationLock.current || recoveryNeeded) return;
     invalidateReviews();
     setReviewPreset(preset);
     setPreview(null);
@@ -2030,10 +2304,16 @@ function App() {
       loading: true,
     }));
     try {
-      const data = await api.getCatalog({ profileId: pid, refresh });
+      // The catalog is a pure transform of the host's options payload, so the
+      // host part for this profile is fetched (or refetched with refresh=1 on
+      // an explicit Refresh) BEFORE the plugin route is asked. A missing host
+      // route leaves `options: null`: the backend then answers its truthful
+      // hostCatalogUnavailable DTO instead of an invented catalog.
+      await ensureHostFor(pid, { refresh });
+      const data = await api.getCatalog({ profileId: pid, refresh, host: hostRef.current });
       if (seq !== catalogSeq.current) return;
       catalogCache.current.set(pid, data);
-      setCatalog({ profileId: pid, data, error: null, loading: false });
+      setCatalog({ profileId: pid, data, error: null, loading: false, refreshed: refresh });
       const providers = Array.isArray(data.providers) ? data.providers : [];
       const models = providers.reduce((n, p) => n + (p.models || []).length, 0);
       const priced = providers.reduce((n, p) =>
@@ -2080,31 +2360,126 @@ function App() {
       .reduce((n, p) => n + (Array.isArray(p.models) ? p.models.length : 0), 0)
     : null;
 
-  const applyPreview = async () => {
-    if (!canApply) return;
-    setBusy(true);
+  // One host step of an operation: perform the host route the backend asked
+  // for, honour its cost guard, and report the outcome. `status` is the numeric
+  // HTTP status only — the host's response text is never forwarded anywhere;
+  // the backend turns the number into one of its fixed failure categories.
+  const runHostCall = async (call) => {
+    let res;
     try {
-      const payload = reviewedPreset
-        ? { presetId: reviewedPreset.id, previewId: activePreview.id, allowUnknownCost: editor.ackUnknownCost }
-        : { previewId: activePreview.id, allowUnknownCost: editor.ackUnknownCost };
-      const op = await api.apply(payload);
+      res = await api.hostCall(call);
+    } catch (e) {
+      return { outcome: "error", status: hostStatusOf(e) };
+    }
+    if (res?.ok === false && res.confirm_required === true && typeof res.confirm_message === "string") {
+      setProgress((prev) => (prev ? { ...prev, note: "waiting for your confirmation",
+        entries: prev.entries.map((entry) => entry.key === `host-${call.seq}` ? { ...entry, status: "confirm" } : entry) } : prev));
+      const accepted = await askConfirm(res.confirm_message);
+      // Cancel is a real answer, not an error: the backend compensates and
+      // reports its own fixed category for the declined step.
+      if (!accepted) return { outcome: "declined" };
+      try {
+        res = await api.hostCall(call, { confirmExpensiveModel: true });
+      } catch (e) {
+        return { outcome: "error", status: hostStatusOf(e) };
+      }
+    }
+    if (res && res.ok === true) return { outcome: "ok" };
+    // A 2xx that is not ok: the host refused without an error status. Report
+    // the numeric status; the backend still owns the classification.
+    return { outcome: "error", status: 200 };
+  };
+
+  const applyPreview = async () => {
+    if (!canApply || mutationLock.current) return;
+    mutationLock.current = true;
+    applyOpener.current = document.activeElement;
+    setBusy(true);
+    setProgress({ entries: [{ key: "request", label: "Operation", status: "pending" }], note: "requesting" });
+    const payload = reviewedPreset
+      ? { presetId: reviewedPreset.id, previewId: activePreview.id, allowUnknownCost: editor.ackUnknownCost }
+      : { previewId: activePreview.id, allowUnknownCost: editor.ackUnknownCost };
+    // Consume at dispatch, not only on success: a lost response may hide a write.
+    reviewSeq.current += 1;
+    setPreview(null);
+    setPreviewFor("");
+    let operationId = null;
+    try {
+      let op = await api.apply({ ...payload, host: hostRef.current });
+      operationId = op.operation.id;
       setOperation(op.operation);
       setOpAction("apply");
-      openDrawer();
+      const seen = new Set();
+      let lastSeq = -1;
+      // Bulk operations may contain arbitrarily many valid steps. Detect a
+      // repeated or out-of-order instruction before issuing a second write.
+      while (op.hostCall) {
+        const call = validateHostCall(op.hostCall, operationId);
+        if (seen.has(call.token) || call.seq <= lastSeq) throw new ApiError("Invalid host step");
+        seen.add(call.token);
+        lastSeq = call.seq;
+        setProgress({ entries: progressEntries(op.operation, call, profileNameOf), note: "host step in progress" });
+        const result = await runHostCall(call);
+        op = await api.hostResult(operationId, {
+          seq: call.seq, token: call.token, outcome: result.outcome, status: result.status,
+        });
+        setOperation(op.operation);
+      }
+      const terminal = ["committed", "undone", "partial", "compensated", "recovery_required", "failed"];
+      const finalState = op.operation.final_state || op.operation.state;
+      // A DECIDED no-write host step — the user declined the confirmation,
+      // the host answered an error, or it answered ok but the store revision
+      // did not move — ends the op ``pending`` with a fixed category and every
+      // step failed-or-never-attempted. The store is provably untouched, so
+      // the operation is finished-with-issues and retryable after a fresh
+      // review; it must not fall into the unfinished path below, which would
+      // demand recovery (and lock Preview/Apply until reload) for a store
+      // that never changed. Categories that can follow a real or ambiguous
+      // write (external_edit, store_unreadable, write_verification_failed)
+      // never end ``pending``, so they keep the recovery gate. The
+      // lost-continuation catch below is untouched: there, ``pending`` may
+      // mean a write whose result was lost.
+      const NO_WRITE_FAILURES = new Set(["revision_conflict", "host_no_write", "host_declined", "host_error"]);
+      const noWriteFailure = finalState === "pending" && NO_WRITE_FAILURES.has(op.operation.failure) &&
+        op.operation.results.every((r) => ["failed", "pending"].includes(r.status));
+      if (!terminal.includes(finalState) && !noWriteFailure) throw new ApiError("Operation is unfinished");
+      setRecoveryNeeded(finalState === "recovery_required");
+      setProgress({ entries: progressEntries(op.operation, null, profileNameOf),
+        note: op.ok === true ? "finished" : finalState === "recovery_required" ? "recovery required" : "finished with issues" });
       setUndoGuarded(false);
       await refreshSilently();
-      // ok === true only for committed/undone. A non-success apply still carries
-      // the operation DTO (per-profile statuses + safe failure category +
-      // final_state), so render the drawer either way; the announcement stays
-      // neutral (the per-profile statuses carry the severity) and never claims a
-      // success it did not get.
+      openDrawer(applyOpener.current);
       const statuses = op.operation.results.map((r) => `${r.profileId} ${r.status}`).join(", ");
-      const outcome = op.ok === true ? "" : ` · ${op.operation.final_state || "incomplete"}` +
-        (op.operation.failure ? ` (${op.operation.failure})` : "");
-      announce(`Operation ${op.operation.id} finished: ${statuses}${outcome}`);
+      const outcome = op.ok === true ? "" : ` · ${finalState}`;
+      announce(`Operation ${operationId} finished: ${statuses}${outcome}`, op.ok === true ? "info" : "error");
     } catch (e) {
-      announce("Apply failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
+      // Never retry a host write after a lost continuation response. Read the
+      // exact operation and reconcile the journal before another mutation.
+      if (operationId) {
+        setRecoveryNeeded(true);
+        let reconciled = null;
+        try {
+          let recovered = await api.getOperation(operationId);
+          if (["pending", "awaiting_host"].includes(recovered.operation.state)) recovered = await api.recover(operationId);
+          setOperation(recovered.operation);
+          reconciled = recovered.operation;
+          setRecoveryNeeded(["pending", "awaiting_host", "recovery_required"].includes(recovered.operation.state));
+          await refreshSilently();
+          openDrawer(applyOpener.current);
+        } catch {
+          // Preserve the last known operation and block subsequent mutations.
+          setRecoveryNeeded(true);
+        }
+        setProgress(reconciled ? { entries: progressEntries(reconciled, null, profileNameOf), note: "interrupted · " + reconciled.state }
+          : { entries: [{ key: "recovery", label: `Operation ${operationId}`, status: "recovery_required" }], note: "check operation before continuing" });
+        announce(reconciled ? "Apply interrupted. Operation readback: " + reconciled.state
+          : "Apply interrupted. Check or recover the last operation before continuing.", "error");
+      } else {
+        setProgress({ entries: [{ key: "request", label: "Operation request", status: "failed" }], note: "failed" });
+        announce("Apply failed: " + (e instanceof ApiError ? e.message : "Request failed"), "error");
+      }
     } finally {
+      mutationLock.current = false;
       setBusy(false);
     }
   };
@@ -2125,7 +2500,8 @@ function App() {
   };
 
   const undo = async () => {
-    if (!operation || operation.undoable === false || !undoGuarded || busy) return;
+    if (!operation || operation.undoable === false || !undoGuarded || busy || mutationLock.current) return;
+    mutationLock.current = true;
     setBusy(true);
     try {
       const op = await api.undo(operation.id);
@@ -2135,16 +2511,38 @@ function App() {
       setOpAction("undo");
       setUndoGuarded(false);
       await refreshSilently();
+      setRecoveryNeeded(op.operation.state === "recovery_required");
       // A conflicted undo returns ok:false WITH the operation DTO
-      // (recovery_required); render it and say so plainly instead of "Undo
-      // failed" for an outcome the user can actually see in the drawer.
-      const statuses = op.operation.results.map((r) => `${r.profileId} ${r.status}`).join(", ");
-      const outcome = op.ok === true ? "" : ` · ${op.operation.final_state || "incomplete"}` +
-        (op.operation.failure ? ` (${op.operation.failure})` : "");
-      announce(`Undo finished: ${statuses}${outcome}`);
+      // (recovery_required); render it and say so in plain words instead of
+      // "Undo failed" for an outcome the user can actually see in the drawer.
+      // Raw state tokens ("default compensated, research conflict ·
+      // recovery_required") are for the DTO, not for the person reading it.
+      const results = Array.isArray(op.operation.results) ? op.operation.results : [];
+      const restored = results.filter((r) => COMPENSATED_STATUSES.includes(r.status))
+        .map((r) => profileNameOf(r.profileId));
+      const blocked = results.filter((r) => !COMPENSATED_STATUSES.includes(r.status))
+        .map((r) => profileNameOf(r.profileId));
+      if (op.ok === true) {
+        announce(restored.length
+          ? `Undo finished: previous revisions restored for ${nameList(restored)}.`
+          : "Undo finished: no revisions needed restoring.");
+      } else {
+        const parts = [];
+        if (restored.length) parts.push(`${nameList(restored)} restored`);
+        if (blocked.length) parts.push(`${nameList(blocked)} not restored`);
+        const reason = undoReason({
+          action: "undo",
+          finalState: op.operation.final_state || op.operation.state,
+          failure: op.operation.failure || null,
+          undoable: false,
+        });
+        announce(`Undo finished: ${parts.length ? parts.join(", ") : "no profiles restored"}` +
+          `${reason ? ` — ${reason.why}. ${reason.next}` : "."}`, "error");
+      }
     } catch (e) {
       announce("Undo failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
     } finally {
+      mutationLock.current = false;
       setBusy(false);
     }
   };
@@ -2166,12 +2564,13 @@ function App() {
   // Drawer focus management: remember who opened it so Escape/Close can hand
   // focus back (dialog pattern), and reuse the same entry point for undo.
   const drawerOpener = useRef(null);
-  const openDrawer = () => {
-    drawerOpener.current = document.activeElement;
+  const openDrawer = (opener = document.activeElement) => {
+    drawerOpener.current = opener;
     setShowOperation(true);
   };
   const closeDrawer = () => {
     setShowOperation(false);
+    setProgress(null);
     const el = drawerOpener.current;
     drawerOpener.current = null;
     const target = el?.isConnected && !el.disabled ? el : rootRef.current?.querySelector('[data-testid="refresh-state"]');
@@ -2198,12 +2597,12 @@ function App() {
   );
 
   return (
-    <div ref={rootRef} className="hms-root" style={{ color: THEME.fg, padding: 12, fontFamily: "inherit" }}>
+    <div ref={rootRef} className="hms-root" style={{ color: THEME.fg, fontFamily: "inherit" }}>
       <div aria-live="polite" role="status" data-testid="live-status"
         style={{ position: "absolute", left: -9999 }}>{status.text}</div>
       <header className="hms-page-header">
         <h2>Model Switcher</h2>
-        <p>Choose models across your Hermes profiles. Review every change. Reuse your setup with presets.</p>
+        <p>Choose models across Hermes profiles. Preview changes, then apply or save a preset.</p>
       </header>
       {state.presetsCorrupt && <p role="alert" style={{ color: THEME.warn }}>
         A damaged preset store was saved aside for recovery. Its presets are not loaded; recover them before replacing saved presets.
@@ -2212,10 +2611,15 @@ function App() {
         <strong>Some runtime selectors could not be discovered.</strong>
         <ul>{state.profiles.flatMap(p => (p.inventoryWarnings || []).map((warning, i) => <li key={`${p.id}/${i}`}>{p.name || p.id}: {warning}</li>))}</ul>
       </div>}
+      {/* Host half: Hermes' own model routes. A route that is missing or
+          unreachable is stated once, in fixed words, and never blocks the tab
+          — config-only rows stay usable and the backend degrades truthfully. */}
+      {hostNotice.text && <p role="status" aria-live="polite" data-testid="host-notice"
+        data-state={hostNotice.kind} className="hms-note hms-host-notice">{hostNotice.text}</p>}
       <PresetsBar presets={state.presets} onReview={reviewPreset} busy={busy} />
       <div className="hms-workspace-tools">
         <button data-testid="refresh-state" disabled={busy} onClick={() => load()}>Refresh state</button>
-        {operation && !showOperation && <button onClick={openDrawer}>Show last operation</button>}
+        {operation && !showOperation && <button onClick={() => openDrawer()}>Show last operation</button>}
         <button type="button" data-testid="catalog-toggle" aria-expanded={catalogOpen}
           aria-controls="hms-model-catalog" onClick={toggleCatalog}>
           {catalogTriggerCount === null
@@ -2267,8 +2671,8 @@ function App() {
             seam) or a failed preview used to be silent on screen: the button
             just did nothing. Mirror the same message visibly, next to the
             buttons that trigger it. */}
-        {status.text && (
-          <p data-testid="visible-status"
+        {status.text && status.text !== "Model switcher state loaded" && (
+          <p data-testid="visible-status" data-kind={status.kind}
             style={{
               margin: "0 0 8px", fontSize: 13,
               color: status.kind === "error" ? THEME.danger : THEME.muted,
@@ -2276,9 +2680,25 @@ function App() {
             {status.text}
           </p>
         )}
+        <ApplyProgress progress={progress} />
+        {recoveryNeeded && operation && <button type="button" disabled={busy}
+          data-testid="recover-operation" onClick={async () => {
+            if (mutationLock.current) return;
+            mutationLock.current = true;
+            setBusy(true);
+            try {
+              const result = await api.recover(operation.id);
+              setOperation(result.operation);
+              setRecoveryNeeded(["pending", "awaiting_host", "recovery_required"].includes(result.operation.state));
+              announce("Operation recovery checked: " + result.operation.state);
+              await refreshSilently();
+            } catch { announce("Operation recovery unavailable. Try again before applying changes.", "error"); }
+            finally { mutationLock.current = false; setBusy(false); }
+          }}>Recover last operation</button>}
         <ChangeEditor
           selection={selection} slots={slots}
           editor={editor} setEditor={editEditor}
+          host={host}
           catalog={catalog} catalogProfileId={catalogProfileId}
           onEnsureCatalog={() => loadCatalog()}
           onRefreshCatalog={() => loadCatalog({ refresh: true })}
@@ -2287,7 +2707,7 @@ function App() {
           onPreview={() => runPreview(customChanges, customFingerprint)}
           onApply={applyPreview}
           preview={activePreview && previewFor.startsWith("custom:") ? activePreview : null}
-          previewInvalid={!cleanReview}
+          previewInvalid={!cleanReview || recoveryNeeded}
           busy={busy}
         />
         <PreviewPanel preview={activePreview} />
@@ -2318,8 +2738,9 @@ function App() {
       />
       </div>
 
-      <OperationDrawer open={showOperation} operation={operation} onClose={closeDrawer} onUndo={undo} undoGuarded={undoGuarded}
+      <OperationDrawer open={showOperation && !confirmAsk} operation={operation} onClose={closeDrawer} onUndo={undo} undoGuarded={undoGuarded}
         setUndoGuarded={setUndoGuarded} busy={busy} action={opAction} />
+      <ConfirmDialog ask={confirmAsk} onConfirm={() => answerConfirm(true)} onCancel={() => answerConfirm(false)} />
     </div>
   );
 }

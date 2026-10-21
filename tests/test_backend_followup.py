@@ -43,6 +43,7 @@ from model_switcher.journal import (  # noqa: E402
 )
 
 import dashboard.plugin_api as plugin_api  # noqa: E402
+from host_protocol_helpers import finish_host_main_calls  # noqa: E402
 
 HERMES_REPO = str(Path(
     os.environ.get("HERMES_MODEL_SWITCHER_HERMES_REPO",
@@ -134,6 +135,7 @@ def test_apply_after_a_salvage_read_is_not_unknown_preset(hermes_home):
     assert tc.get("/state").status_code == 200
     r = tc.post("/operations", json={"presetId": pid})
     assert r.status_code == 200, r.text
+    r = finish_host_main_calls(tc, r, hermes_home.path)
     body = r.json()
     assert body["ok"] is True, body
     assert body["operation"]["state"] == "committed", body

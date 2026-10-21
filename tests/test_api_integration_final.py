@@ -32,6 +32,7 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 import dashboard.plugin_api as plugin_api  # noqa: E402
+from host_protocol_helpers import finish_host_main_calls  # noqa: E402
 
 
 BASE_CONFIG = """\
@@ -197,8 +198,12 @@ def test_operation_dto_exposes_revision_before_and_after(hermes_home):
         {"profileId": "default", "slotId": "main", "action": "set",
          "to": {"provider": "lablocal", "model": "lab-7b-instruct"}}]})
     assert r.status_code == 200, r.text
+    pending = r.json()["operation"]["results"][0]
+    assert pending["status"] == "awaiting_host", pending
+    assert pending["revisionBefore"] and pending["revisionAfter"] is None, pending
+    r = finish_host_main_calls(tc, r, hermes_home.path)
     res = r.json()["operation"]["results"][0]
-    assert res["revisionBefore"], res
+    assert res["revisionBefore"] == pending["revisionBefore"], res
     assert res["revisionAfter"], res
     # a real write moves the store revision
     assert res["revisionBefore"] != res["revisionAfter"], res
@@ -409,9 +414,9 @@ def test_scope_signature_ignores_guard_metadata_and_side_effects():
 
 def test_preset_one_click_with_preview_id_matches_scope(hermes_home):
     """The UI one-click flow: preview the preset's own changes, then apply with
-    BOTH presetId and previewId. The canonical seam injects model.base_url /
-    api_mode side effects into the prepared preview, which must not break the
-    scope guard against the frozen preset targets."""
+    BOTH presetId and previewId. The preview binds semantic main intent; host
+    writes add model.base_url / api_mode only at readback, without breaking
+    the scope guard against the frozen preset targets."""
     _m(hermes_home, "default")
     _m(hermes_home, "alpha")
     tc = _client()
@@ -432,4 +437,5 @@ def test_preset_one_click_with_preview_id_matches_scope(hermes_home):
 
     r = tc.post("/operations", json={"presetId": pid, "previewId": preview_id})
     assert r.status_code == 200, r.text
+    r = finish_host_main_calls(tc, r, hermes_home.path)
     assert r.json()["operation"]["state"] == "committed", r.text

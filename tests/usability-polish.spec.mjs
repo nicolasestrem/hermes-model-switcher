@@ -91,7 +91,7 @@ test("header select-all covers matching writable rows, goes indeterminate, and C
   }
   await expect(page.getByTestId("clear-selection")).toBeDisabled();
   await expect(master).not.toBeChecked();
-  await expect(summary(page)).toContainText("0 slots on 0 profiles selected");
+  await expect(summary(page)).toContainText("No slots selected");
 });
 
 test("select-all respects the current filters: only matching writable rows are added", async ({ page }) => {
@@ -155,7 +155,8 @@ test("read-only rows show their reason; slots without observations read 'No reco
 
   // profile-level read-only carries an explicit reason, not just "(read-only)"
   const archived = page.locator('tr[data-row="archived/main"]');
-  await expect(archived.getByTestId("readonly-reason")).toContainText("read-only");
+  await expect(archived.getByTestId("readonly-reason")).toContainText("Read-only");
+  await expect(archived.getByTestId("readonly-reason")).toContainText("Routing cannot be changed on this profile.");
   // slot-level reason comes from the slot's own note
   const specialist = page.locator('tr[data-row="archived/specialist.stt"]');
   await expect(specialist.getByTestId("readonly-reason")).toContainText("voice and language");

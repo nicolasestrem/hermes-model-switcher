@@ -1,8 +1,8 @@
 """Bounded canonical-apply + privacy-API-gate tests.
 
 Evidence required (plan §Mutation/§Privacy, this phase):
-  1. TestClient main apply + undo actually invoke Hermes' canonical save seam
-     (HermesAdapter.apply_canonical_save) — no raw YAML write path.
+  1. Main apply uses the host handshake and public config save; undo invokes
+     HermesAdapter.apply_canonical_save — no raw YAML write path.
   2. Non-main cron change pairs cron.model with cron.model_provider and the
      scheduler key cron.provider is preserved verbatim.
   3. Public operation responses carry only the to_public_operation allowlist:
@@ -14,7 +14,6 @@ Evidence required (plan §Mutation/§Privacy, this phase):
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -27,9 +26,12 @@ from fastapi.testclient import TestClient
 
 from model_switcher.adapters import adapter_for
 from model_switcher.engine import ApplyBlocked, plan_operation
-from model_switcher.journal import OP_COMMITTED
 
 NEW_PROVIDER, NEW_MODEL = "lablocal", "lab-7b-instruct"
+
+
+from host_protocol_helpers import finish_host_main_calls
+
 
 CRON_CONFIG = """\
 model:
@@ -76,6 +78,10 @@ def _canonical_spy(monkeypatch):
 def test_main_apply_and_undo_invoke_canonical_seam(client, monkeypatch):
     tc, home = client
     calls = _canonical_spy(monkeypatch)
+    from unittest.mock import Mock
+    from hermes_cli import config
+    host_save = Mock(wraps=config.save_config)
+    monkeypatch.setattr(config, "save_config", host_save)
     cfg_path = home / "config.yaml"
     pre_doc = yaml.safe_load(cfg_path.read_text())
 
@@ -87,11 +93,14 @@ def test_main_apply_and_undo_invoke_canonical_seam(client, monkeypatch):
 
     r = tc.post("/operations", json={"previewId": preview_id})
     assert r.status_code == 200, r.text
+    assert r.json()["operation"]["state"] == "awaiting_host"
+    assert calls == []  # Main apply belongs to the host, never the backend writer.
+    r = finish_host_main_calls(tc, r, home)
     op = r.json()["operation"]
     assert op["state"] == "committed", op
     assert op["undoable"] is True
-    # the canonical seam was ACTUALLY invoked for the default profile
-    assert any(c["profile"] == "default" for c in calls), calls
+    assert calls == []
+    host_save.assert_called_once()
 
     after = yaml.safe_load(cfg_path.read_text())
     assert after["model"]["provider"] == NEW_PROVIDER
@@ -102,6 +111,7 @@ def test_main_apply_and_undo_invoke_canonical_seam(client, monkeypatch):
     r = tc.post(f"/operations/{op['id']}/undo")
     assert r.status_code == 200, r.text
     assert len(calls) > n_before_undo
+    assert all(c["profile"] == "default" for c in calls)
     assert yaml.safe_load(cfg_path.read_text()) == pre_doc
     undo_op = r.json()["operation"]
     assert undo_op["state"] == "undone"
@@ -134,10 +144,12 @@ def test_cron_pairing_preserves_scheduler(client):
 
 def test_public_dto_exposes_only_allowlisted_fields(client):
     tc, home = client
-    r = tc.post("/operations", json={"changes": [
+    r = tc.post("/preview", json={"changes": [
         {"profileId": "default", "slotId": "main",
          "to": {"provider": NEW_PROVIDER, "model": NEW_MODEL}}]})
     assert r.status_code == 200, r.text
+    r = tc.post("/operations", json={"previewId": r.json()["previewId"]})
+    r = finish_host_main_calls(tc, r, home)
     op = r.json()["operation"]
     # The public DTO allowlist (catalog-promotion plan): the operation surface
     # plus the outcome-derived final_state and a fixed failure category — never
@@ -145,7 +157,7 @@ def test_public_dto_exposes_only_allowlisted_fields(client):
     assert set(op) <= {"id", "state", "results", "undoable",
                        "final_state", "failure"}
     for res in op["results"]:
-        assert set(res) == {"profileId", "status", "store", "revisionBefore", "revisionAfter"}
+        assert set(res) == {"seq", "profileId", "status", "store", "revisionBefore", "revisionAfter"}
     blob = json.dumps(r.json())
     for forbidden in ("snapshot", "providers", "path", "changes",
                       "base_url", "api_key", "OPENAI_API_KEY",

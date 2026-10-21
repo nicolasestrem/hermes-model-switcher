@@ -1,117 +1,95 @@
 # Release readiness
 
-This report records findings and verification for public release preparation. A built package or fixture screenshot does not establish authenticated Dashboard compatibility or provider inference. No publication, deployment, or merge is included.
+This report records the 0.3.0 public-seams contract and release verification
+boundaries. A built package, fixture screenshot or earlier green suite does not
+establish final-candidate compatibility. No publication, deployment or merge is
+included.
 
-## Findings
+## Runtime reference
 
-| Severity | Finding and evidence | Resolution | Verification |
-| --- | --- | --- | --- |
-| Medium | `scripts/build_package.py` deleted its output before checking required assets; an invalid `--out` could target the source checkout. | Check all inputs first, reject source ancestors and symlink paths, and require explicit replacement. | Package regression tests; see raw verification output. |
-| High | Lab helpers compared their destination to the user home rather than `~/.hermes`, and recursively deleted installations/recovery data. | Correct live-root containment, reject symlinked destinations, require explicit replacement, and preserve private backups on replacement/removal. | Linux shell regression tests pending remote verification. |
-| Low | The package README linked to docs and DESIGN.md that were absent from `COPY_FILES`. | Ship Markdown documentation and DESIGN.md with the package. | Package regression test checks local README links. |
-| Low | README contained old test counts and runtime snapshots presented as current verification. | Replace with capability-focused copy and explicit verification boundaries. | Documentation review. |
+The tested Hermes reference is **v0.22.2+canary.20261020T065957Z**, commit
+`c5a3c0f8767a72203363d249add14142dbcf3cc7`. See CONTRIBUTING.md for checkout and
+suite setup. This pin makes tests reproducible; it is not a version gate.
+`probe_runtime()` requires callable public config, home/profile and secret-scope
+capabilities. Package version is informational, and no install stamp is required.
+Missing capabilities and hosted isolation remain read-only.
 
-## Verification boundaries
+The reference pin and this documentation update are not fresh integrated 0.3.0
+verification. Record final commands, environment, exit codes and unresolved
+failures in the release handoff; no new suite result is asserted here.
 
-Linux with the user's existing Hermes checkout is the intended runtime target. Record the exact revision, Python environment, command output, and exit codes in the final verification handoff. macOS, native Windows, hosted-isolation writes, provider inference, and live switching of in-flight sessions are unverified.
+## 0.3.0 integration boundaries
 
-Screenshots must show the real compiled plugin with synthetic isolated profile data. Sanitized captures of the compiled plugin in the Dashboard SDK fixture are included in `docs/images/`, with synthetic lab profiles; see that directory's README for provenance. These captures do not establish authenticated live deployment.
+- Catalog, authentication and pricing evidence come from authenticated SDK reads
+  of `/api/model/options`; auxiliary inheritance/plugin tasks and MoA presets
+  come from `/api/model/auxiliary` and `/api/model/moa`. The plugin transforms
+  supplied host payloads without private catalog imports or disk-cache readers.
+  Missing payloads degrade truthfully, not to empty success or invented free cost.
+- Main and compatible auxiliary assignments use public `/api/model/set` host
+  steps. Other slots use public `hermes_cli.config` load/read-guard/save under
+  scoped public home and secret helpers. Request gating belongs to the host.
+- Operations persist `awaiting_host`, issue one-time host-call tokens, and verify
+  the config after `/host-result`. Expensive-model confirmation is displayed as
+  text and only explicit approval resends `confirm_expensive_model: true`.
+- Main preview is semantic provider/model intent; an exact persisted diff is
+  available only after host readback. Host routes have no expected-revision
+  parameter: a pre-call revision check cannot prevent an intervening write.
+  Foreign changes found at readback require `recovery_required` / `external_edit`,
+  not silent success or blind rollback. Readback is not a global concurrency lock.
+- Undo/compensation restores snapshots through the public backend writer and
+  refuses revision conflicts. The journal copies every pre-change config and
+  may therefore retain sensitive data even when the edited fields are harmless.
+- State lives only at `get_hermes_home()/state/hermes-model-switcher/`. An unsafe
+  source/worktree location or failed privacy check makes the plugin read-only;
+  there is no alternate state location or fallback.
 
-## Required release evidence
+## Required final-candidate evidence
 
-- Python and browser suites, frontend build, package assembly, plugin validation, and privacy scans pass against the final candidate.
-- Real isolated backend Apply/readback and byte-exact guarded Undo pass.
-- Light and dark layouts at 1440, 768, and 375px, keyboard navigation, long identifiers, loading/error states, and browser errors are checked.
-- A fresh lab installation contains working assets and documentation links.
-- Any serious unresolved finding or blocked material check remains explicitly listed; readiness is not inferred from partial checks.
+- Run backend and browser suites, frontend build, package assembly and plugin
+  validation against the exact candidate and reference checkout. Run the host's
+  `private_import_findings` acceptance check against shipped plugin code and
+  require `[]`; a generic validation pass alone is insufficient.
+- Exercise real isolated main/auxiliary host writes, SDK expensive-confirmation
+  approval/cancellation, and backend slot writes with persisted readback.
+- Exercise no-write and error responses, bad tokens, abandoned `awaiting_host`
+  recovery, restart reconciliation, foreign edits and revision-guarded Undo.
+  A host HTTP success alone must not mark an operation committed.
+- Verify missing/malformed options, auxiliary and MoA payloads, unknown pricing,
+  profile-scoped credential checks, capability failures and unsafe state paths.
+- Check journal schema migration, private database/sidecar modes and public DTO
+  redaction. Run the privacy guard against final sources and packaged files.
+- Check light/dark layouts at 1440, 768 and 375px, keyboard navigation, long IDs,
+  loading/error states and browser errors. Exercise the compiled plugin through
+  the Dashboard SDK, not only a permissive standalone fixture.
+- Install a fresh lab package and check its declared assets and documentation
+  links. Retain serious unresolved findings and blocked checks explicitly.
 
-## Verified candidate — 2026-10-14
+Use isolated lab homes and fake credentials only; never inference or live-profile
+writes. macOS, native Windows, hosted-isolation writes, provider inference and
+hot-switching in-flight sessions remain unverified. Host assignments target new
+sessions. Sanitized captures in `docs/images/` are fixture evidence with synthetic
+profiles; they are not evidence of final 0.3.0 assets or live deployment.
 
-Linux reference: Hermes `v0.22.0+canary.20261014T070054Z`, Python 3.13.15, FastAPI 0.133.1, pytest 9.1.1, Node 26.8.1. The active Dashboard uses a separate bundled Python 3.14.7; tests used the existing checkout environment. The reference checkout remained clean. The installed plugin was inspected read-only in an authenticated Dashboard; the candidate was not deployed there.
+## Historical findings and evidence
 
-Raw command result lines, with checked exit codes:
+Earlier release preparation and PR #10 addressed these issues. These are
+historical resolutions, not a claim that the refactored candidate has been rerun:
 
-```text
-402 passed, 2 warnings in 30.53s
-FINAL_PYTHON_EXIT=0
-69 passed (31.3s)
-FINAL_BROWSER_EXIT=0
-BUILD_EXIT=0
-PACKAGE_EXIT=0
-INSTALL_EXIT=0
-Validation passed.
-VALIDATE_EXIT=0
-UNINSTALL_EXIT=0
-privacy guard: clean (109 files scanned)
-PRIVACY_EXIT=0
-```
+| Severity | Finding | Resolution retained for regression checks |
+| --- | --- | --- |
+| Medium | Package output could be removed before asset validation. | Validate inputs first, reject source ancestors/symlink aliases, and require explicit replacement. |
+| High | Lab helper containment and deletion could endanger installations/recovery data. | Refuse live-root containment and symlink destinations; preserve replacement/removal backups outside plugin discovery. |
+| Low | Packaged README links pointed at omitted documentation. | Ship only the explicit `DOC_FILES` manifest and validate every approved file before replacement. |
+| Low | Old suite totals and runtime snapshots implied current verification. | Remove obsolete green totals; require candidate-specific receipts. |
+| High | Scanner and journal privacy gaps could conceal staged credentials or weaken snapshot permissions. | Scan index blobs independently, fail closed on read/permission errors and check symlinks before permission changes. See [privacy audit](privacy-audit.md). |
 
-The Python warnings originate in Hermes manifest parsing. Tests include real isolated Apply/readback/byte-exact Undo and six light/dark viewport combinations. No inference was performed. The original baseline passed 378 Python tests with one environment-dependent harness assertion, now fixed with an explicit sandbox native home. Its browser suite passed 69 tests after building fixture assets and setting TMPDIR.
+Earlier Python/browser results, package/lab checks and performance measurements
+applied to the pre-refactor candidate only and are not carried forward as 0.3.0
+acceptance. The old private-import compatibility warning is superseded by the
+public-seams acceptance gate, not by an exemption or a claim of catalog approval.
+Official catalog eligibility still requires the venue's review.
 
-### Remaining compatibility risk
-
-Hermes validation warns about private core imports (catalog rule 9), including model catalog, profile scope and canonical writer seams. Validation passes, but these integrations can break on later releases. Official catalog eligibility is not established. Public API migration requires supported upstream equivalents; no substitute writer was introduced. Hosted isolation remains read-only. See [privacy audit](privacy-audit.md) for scanner, journal and URL-sanitization findings and fixes.
-
-### Measured performance
-
-Three real isolated state requests per profile count, milliseconds:
-
-| Profiles | First request | Subsequent requests | Median |
-| --- | --- | --- | --- |
-| 2 | 540.51 | 11.25, 10.84 | 11.25 |
-| 10 | 1179.63 | 63.60, 57.59 | 63.60 |
-| 50 | 7201.91 | 1014.94, 947.32 | 1014.94 |
-
-First requests after adding profiles include cold discovery. Fifty profiles expose a scalability limit. No additional cache was added because invalidation must preserve profile/runtime freshness.
-
-Local Chromium SDK fixture navigation through rendered rows plus two animation frames, three fresh pages per size: 40 slots median 80ms; 200 slots 111ms; 1,000 slots 275ms. A synthetic 2,000-model catalog rendered in 21ms and search to one result took 9ms (single samples). These measurements do not establish provider discovery latency. No frontend optimization was justified by this sample.
-
-## PR #10 review follow-up
-
-Fixed recursive output containment and canonical output parent aliases, journal symlink-check ordering, nonblank redacted URL previews, Git-index scanning for deleted working files, flexible replacement flags, and backup placement outside plugin discovery. Shell files are pinned to LF. Permission failures intentionally remain fail-closed on every platform; native Windows runtime remains unverified. The README passes the privacy guard, committed bundles support fresh checkout package tests, and package versions remain 0.1.0 with Unreleased changelog entries.
-
-Remote Linux raw verification:
-
-```text
-412 passed, 2 warnings in 33.55s
-TEST_EXIT=0
-```
-
-Local privacy verification:
-
-```text
-Ran 13 tests in 1.623s
-OK (skipped=1)
-privacy guard: clean (110 files scanned)
-```
-
-Linux suite covers the symlink and permission checks skipped locally. Browser behavior was unchanged by this follow-up; previous 69-browser-test evidence remains scoped to the original candidate.
-
-## PR #10 documentation publication boundary
-
-The package builder now copies only DOC_FILES, an explicit manifest of public documentation and sanitized screenshots. Every approved file is validated before existing output can be replaced. Adding a local or ignored file below docs does not grant publication permission. Update the manifest deliberately when adding release documentation. Regression coverage adds synthetic private notes, nested configuration exports and raw images to a disposable checkout and checks the exact packaged file set and absence of their contents.
-
-Raw focused verification on Windows:
-
-```text
-......sss.                                                               [100%]
-```
-
-Exit code 0. Three existing symlink tests skip on Windows; the new publication-boundary regression passes. No runtime/UI changes were made.
-
-## PR #10 latest-head verification
-
-Checked both inline findings and the full Claude review against `601011c`. Both inline findings have code fixes and regression coverage. Re-ran the complete Linux backend suite including the approved-document manifest test and all symlink cases:
-
-```text
-413 passed, 2 warnings in 32.10s
-TEST_EXIT=0
-```
-
-Local guard output:
-
-```text
-privacy guard: clean (110 files scanned)
-```
-
-No additional review comments were present at this check. The automated review of `601011c` was still running, so this does not assert its eventual outcome. Existing private-Hermes-API and platform limitations remain documented.
+The documentation publication boundary remains an exact allowlist: a local or
+ignored file under `docs/` does not become publishable just by existing. Update
+`DOC_FILES` deliberately for new public files; never package private notes,
+configuration exports or raw screenshots by directory recursion.

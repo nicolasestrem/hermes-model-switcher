@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolvePython } from "./real-server.mjs";
+import { setProvider, setModel } from "./route-helpers.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // Seeded by tests/real-server.mjs before the run; removed at teardown.
@@ -55,14 +56,29 @@ test("real router: preset select → preview → apply writes configs on disk �
   await expect(panel).toBeVisible();
   await expect(panel).toContainText("zhipu/glm-5.3-flash");
   await expect(page.getByTestId("apply-preset")).toBeEnabled();
-  // Capture the REAL POST /operations DTO the drawer renders from — assert the
-  // actual status contract rather than trusting the mock's shape.
+  // Trace every real continuation. The initial operation is NOT committed:
+  // the browser must execute hostCall, then report only seq/token/outcome/status.
+  const hostWrites = [];
+  const hostResults = [];
+  const trace = [];
+  page.on("response", (response) => {
+    if (response.request().method() !== "POST") return;
+    if (response.url().includes("/api/model/set?")) { hostWrites.push(response); trace.push("host"); }
+    if (response.url().endsWith("/host-result")) { hostResults.push(response); trace.push("result"); }
+  });
   const opsResponse = page.waitForResponse(
     (r) => r.url().endsWith("/api/plugins/hermes-model-switcher/operations")
       && r.request().method() === "POST");
   await page.getByTestId("apply-preset").click();
   const opEnvelope = await (await opsResponse).json();
-  const opBody = opEnvelope.operation;
+  expect(opEnvelope.ok).toBe(false);
+  expect(opEnvelope.operation.state).toBe("awaiting_host");
+  expect(opEnvelope.operation.results[0].seq).toBe(0);
+  expect(opEnvelope.hostCall).toMatchObject({
+    opId: opEnvelope.operation.id, seq: 0, method: "POST", path: "/api/model/set",
+    query: { profile: "default" },
+    body: { scope: "main", provider: "zhipu", model: "glm-5.3-flash" },
+  });
 
   const drawer = page.getByTestId("operation-drawer");
   await expect(drawer).toBeVisible();
@@ -73,7 +89,27 @@ test("real router: preset select → preview → apply writes configs on disk �
   // the overall outcome from ``operation.state``. A real response carries NO
   // per-step ``readback`` (nor raw error text) — the UI must render without them.
   await expect(page.getByTestId("operation-summary")).toContainText("2 profiles applied · 0 need attention");
-  expect(opEnvelope.ok).toBe(true); // top-level ok: true iff committed/undone
+  expect(trace).toEqual(["host", "result", "host", "result"]);
+  expect(hostWrites).toHaveLength(2);
+  expect(hostResults).toHaveLength(2);
+  for (const [seq, response] of hostWrites.entries()) {
+    expect(response.status()).toBe(200);
+    expect((await response.json()).ok).toBe(true);
+    expect(new globalThis.URL(response.url()).searchParams.get("profile"))
+      .toBe(seq === 0 ? "default" : "research");
+    expect(response.request().postDataJSON()).toEqual(opEnvelope.hostCall.body);
+    const report = hostResults[seq].request().postDataJSON();
+    expect(report).toMatchObject({ seq, outcome: "ok" });
+    expect(Object.keys(report).sort()).toEqual(["outcome", "seq", "token"]);
+  }
+  const firstResult = await hostResults[0].json();
+  expect(firstResult.operation.state).toBe("awaiting_host");
+  expect(firstResult.hostCall).toMatchObject({ seq: 1, query: { profile: "research" } });
+  const committed = await hostResults[1].json();
+  const opBody = committed.operation;
+  expect(committed.ok).toBe(true);
+  expect(opBody.results.map((r) => r.seq)).toEqual([0, 1]);
+  expect(opBody.results.every((r) => r.store === "canonical_config")).toBe(true);
   expect(opBody.state).toBe("committed");
   expect(opBody.final_state).toBe("committed");
   expect(opBody.failure).toBeNull();
@@ -121,6 +157,38 @@ test("real router: preset select → preview → apply writes configs on disk �
       expect(u.startsWith("http://localhost:8932"), u).toBe(true);
     }
   }
+});
+
+test("real router: backend delegation apply reads back lab config and undoes without a host write", async ({ page }) => {
+  const requests = [];
+  page.on("request", (request) => requests.push(request));
+  await page.goto(URL);
+  await expect(page.getByTestId("live-status")).toContainText("state loaded");
+  const before = { default: cfg("default"), research: cfg("research") };
+  await page.getByLabel("Profile research", { exact: true }).check();
+  await page.getByLabel("Select research delegation.model", { exact: true }).check();
+  await setProvider(page, "zhipu");
+  await setModel(page, "glm-5.3-flash");
+  await page.getByLabel("I acknowledge unknown-cost routes").check();
+  await page.getByRole("button", { name: "Preview changes", exact: true }).click();
+  await expect(page.getByTestId("apply-custom")).toBeEnabled();
+  const responsePromise = page.waitForResponse((r) => r.url().endsWith("/operations") && r.request().method() === "POST");
+  await page.getByTestId("apply-custom").click();
+  const envelope = await (await responsePromise).json();
+  expect(envelope.ok).toBe(true);
+  expect(envelope.operation.state).toBe("committed");
+  expect(envelope.hostCall).toBeUndefined();
+  expect(envelope.operation.results).toMatchObject([{ seq: 0, profileId: "research", store: "canonical_config", status: "applied" }]);
+  await expect(page.getByTestId("result-research")).toContainText("Applied + read back");
+  expect(cfg("research")).toMatch(/delegation:\n\s+model: glm-5.3-flash\n\s+provider: zhipu/);
+  expect(cfg("default")).toBe(before.default);
+  await expect(page.locator('tr[data-row="research/delegation.model"] [data-column="configured"]')).toContainText("zhipu/glm-5.3-flash");
+  expect(requests.filter((r) => r.url().includes("/api/model/set"))).toHaveLength(0);
+  await page.getByTestId("undo-guard").check();
+  await page.getByTestId("undo-button").click();
+  await expect(page.getByTestId("result-research")).toContainText("Restored (undo verified)");
+  expect(cfg("research")).toBe(before.research);
+  expect(cfg("default")).toBe(before.default);
 });
 
 test("real router: the /probe route is GONE (no inference affordance survives)", async ({ page }) => {

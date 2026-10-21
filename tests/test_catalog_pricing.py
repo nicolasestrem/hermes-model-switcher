@@ -1,837 +1,367 @@
-"""Aggregate provider -> models -> cost catalog: pricing truthfulness.
-
-Owns ``dashboard/model_catalog.py``'s ``get_model_catalog_all`` surface. Every
-test runs against a throwaway /tmp Hermes home and a fake adapter/pricing probe:
-no live config, no network, no inference, no writes.
-
-Pricing rules pinned here:
-  * display strings are the picker's verbatim strings; numerics come ONLY from
-    raw cached per-token rates (never parsed out of ``$`` strings),
-  * ``free`` only on an explicit free flag (both-zero rule); "free input +
-    paid output" is priced, not free,
-  * a missing rate is ``cost: null`` + ``pricingStatus: "unknown"`` — NEVER
-    ``free`` and never ``$0.00``,
-  * model ids join by exact id, so the same id under two providers keeps each
-    provider's price.
-"""
+"""Host display prices parse to per-million rates; unknown is never zero."""
 from __future__ import annotations
 
-import contextlib
 import json
-import sys
-import time
-from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parent.parent
-if str(REPO) not in sys.path:
-    sys.path.insert(0, str(REPO))
-
-# Built at runtime: the repo carries no baked-in ``/home/<user>`` literal (the
-# skeleton scan forbids host-specific strings in tracked files), while this
-# test still proves a real absolute host path never reaches a surfaced error.
-LAB_HOST_PATH = str(Path("/home") / "lab" / "config.yaml")
-
-import dashboard.model_catalog as mc  # noqa: E402
-
-TOP_KEYS = {"ok", "profileId", "providers", "cost", "error"}
-PROVIDER_KEYS = {"id", "label", "authenticated", "configured", "isCurrent",
-                 "modelCount", "fetchedAt", "stale", "warning", "models"}
-MODEL_KEYS = {"id", "label", "pricingStatus", "cost"}
-COST_KEYS = {"unit", "input", "output", "cacheRead", "display", "free",
-             "source", "pricingVersion"}
+import dashboard.model_catalog as mc
 
 
-@pytest.fixture(autouse=True)
-def isolated_catalog_home(hermes_home):
-    return hermes_home
+# -- host-payload fixtures ---------------------------------------------------
 
 
-def make_row(slug, name=None, models=(), source="built-in", pricing=None, **extra):
-    row = {
+def row(slug: str, models=(), **extra) -> dict:
+    base = {
         "slug": slug,
-        "name": name if name is not None else slug.replace("-", " ").title(),
+        "name": slug.upper(),
         "models": list(models),
-        "total_models": len(models),
-        "source": source,
+        "total_models": len(list(models)),
+        "source": "hermes",
         "is_current": False,
         "is_user_defined": False,
         "authenticated": True,
     }
-    if pricing is not None:
-        row["pricing"] = pricing
-    row.update(extra)
-    return row
-
-
-def make_payload(*rows):
-    return {"providers": list(rows), "model": "", "provider": ""}
-
-
-class FakeProbe:
-    """Canned offline pricing sources; records every lookup."""
-
-    def __init__(self, *, picker=None, routes=None, entries=None,
-                 models_dev=None, available=True, explode=()):
-        self.picker = picker or {}
-        self.routes = routes or {}
-        self.entries = entries or {}
-        self.models_dev = models_dev or {}
-        self.available = available
-        self.unavailable = () if available else ("pricing",)
-        self.explode = set(explode)
-        self.calls = []
-
-    def picker_pricing(self, provider):
-        self.calls.append(("picker", provider))
-        if provider in self.explode:
-            raise RuntimeError("Authorization: Bearer secret-test-token")
-        return dict(self.picker.get(provider) or {})
-
-    def billing_mode(self, model, provider):
-        self.calls.append(("route", model, provider))
-        return self.routes.get((provider, model))
-
-    def pricing_entry(self, model, provider):
-        self.calls.append(("entry", model, provider))
-        return self.entries.get((provider, model))
-
-    def models_dev_cost(self, provider, model):
-        self.calls.append(("models_dev", provider, model))
-        return self.models_dev.get((provider, model))
-
-
-class FakeAdapter:
-    def __init__(self, payload, probe=None, *, raise_on_payload=None):
-        self.payload = payload
-        self.probe = probe or FakeProbe()
-        self.scopes = []
-        self.refresh_calls = []
-        self.raise_on_payload = raise_on_payload
-
-    @contextlib.contextmanager
-    def scoped(self, profile):
-        self.scopes.append(profile)
-        yield type("Ident", (), {"name": profile or "default"})()
-
-    def catalog_payload(self, refresh):
-        self.refresh_calls.append(refresh)
-        if self.raise_on_payload is not None:
-            raise self.raise_on_payload
-        return self.payload
-
-    def pricing_probe(self):
-        return self.probe
-
-
-def _model(provider, model_id):
-    for item in provider["models"]:
-        if item["id"] == model_id:
-            return item
-    raise AssertionError(f"{model_id!r} not in provider {provider['id']!r}")
-
-
-# -- enumeration -----------------------------------------------------------
-
-def test_every_provider_row_once_in_native_order_with_exact_ids():
-    payload = make_payload(
-        make_row("nous", "Nous", models=["hermes-4-405b", "deepseek/deepseek-v4.1-flash"]),
-        make_row("openrouter", "OpenRouter", models=["vendor/model-x"]),
-        make_row("opencode-go", "OpenCode Go", models=["deepseek-v4.1-flash"]),
-    )
-    res = mc.get_model_catalog_all(FakeAdapter(payload), None)
-    assert res["ok"] is True and res["error"] is None
-    assert [p["id"] for p in res["providers"]] == ["nous", "openrouter", "opencode-go"]
-    assert [p["label"] for p in res["providers"]] == ["Nous", "OpenRouter", "OpenCode Go"]
-    assert [m["id"] for m in res["providers"][0]["models"]] == [
-        "hermes-4-405b", "deepseek/deepseek-v4.1-flash"]
-    assert [m["label"] for m in res["providers"][0]["models"]] == [
-        "hermes-4-405b", "deepseek/deepseek-v4.1-flash"]
-
-
-def test_duplicate_slug_keeps_the_authenticated_row_in_native_position():
-    payload = make_payload(
-        make_row("nous", "Nous skeleton", models=[], source="canonical",
-                 authenticated=False, warning="paste NOUS_API_KEY to activate"),
-        make_row("openrouter", "OpenRouter", models=["m"]),
-        make_row("nous", "Nous", models=["hermes-4-405b"]),
-    )
-    res = mc.get_model_catalog_all(FakeAdapter(payload), None)
-    assert [p["id"] for p in res["providers"]] == ["nous", "openrouter"]
-    nous = res["providers"][0]
-    assert nous["label"] == "Nous"
-    assert nous["authenticated"] is True
-    assert nous["modelCount"] == 1
-    assert [m["id"] for m in nous["models"]] == ["hermes-4-405b"]
-    assert nous["warning"] is None
-
-
-def test_skeleton_row_is_not_configured():
-    payload = make_payload(make_row(
-        "opencode-go", "OpenCode Go", models=[], source="canonical",
-        authenticated=False, warning="paste OPENCODE_GO_API_KEY to activate"))
-    res = mc.get_model_catalog_all(FakeAdapter(payload), None)
-    provider = res["providers"][0]
-    assert provider["authenticated"] is False
-    assert provider["configured"] is False
-    assert provider["modelCount"] == 0
-    assert provider["warning"] == "paste OPENCODE_GO_API_KEY to activate"
-
-
-def test_dict_shaped_model_entries_normalize_to_exact_ids_and_drop_empties():
-    payload = make_payload(make_row(
-        "nous", "Nous",
-        models=[{"id": "hermes-4-405b"}, "plain-id", {"name": "no id"}, "", None]))
-    res = mc.get_model_catalog_all(FakeAdapter(payload), None)
-    provider = res["providers"][0]
-    assert [m["id"] for m in provider["models"]] == ["hermes-4-405b", "plain-id"]
-    assert provider["modelCount"] == 2
-
-
-# -- picker pricing --------------------------------------------------------
-
-def test_picker_display_verbatim_and_numerics_from_raw_token_rates_only():
-    """Display strings pass through byte-exact; numerics never parse '$' text."""
-    payload = make_payload(make_row(
-        "nous", "Nous", models=["hermes-4-405b"],
-        pricing={"hermes-4-405b": {
-            "input": "$10.00", "output": "$50.00", "cache": "$0.25", "free": False}}))
-    probe = FakeProbe(picker={"nous": {"hermes-4-405b": {
-        # Deliberately NOT 10/50/0.25: proves numerics come from raw rates.
-        "prompt": "0.00002", "completion": "0.00004",
-        "input_cache_read": "0.0000005"}}})
-    res = mc.get_model_catalog_all(FakeAdapter(payload, probe), None)
-    model = _model(res["providers"][0], "hermes-4-405b")
-    assert model["pricingStatus"] == "priced"
-    cost = model["cost"]
-    assert set(cost) == COST_KEYS
-    assert cost["unit"] == "USD_per_1M_tokens"
-    assert cost["input"] == 20.0
-    assert cost["output"] == 40.0
-    assert cost["cacheRead"] == 0.5
-    assert cost["display"] == {"input": "$10.00", "output": "$50.00", "cache": "$0.25"}
-    assert cost["free"] is False
-    assert cost["source"] == "picker"
-    assert cost["pricingVersion"] is None
-
-
-def test_sub_cent_picker_display_is_passed_through_and_formatted_from_raw():
-    payload = make_payload(make_row(
-        "nous", "Nous", models=["cheap"],
-        pricing={"cheap": {"input": "$0.0046", "output": "free", "cache": None, "free": False}}))
-    probe = FakeProbe(picker={"nous": {"cheap": {
-        "prompt": "0.0000000046", "completion": "0"}}})
-    model = _model(mc.get_model_catalog_all(FakeAdapter(payload, probe), None)["providers"][0], "cheap")
-    assert model["pricingStatus"] == "priced"
-    assert model["cost"]["input"] == 0.0046
-    assert model["cost"]["display"] == {
-        "input": "$0.0046", "output": "free", "cache": None}
-
-
-def test_free_only_on_explicit_flag_and_both_zero():
-    payload = make_payload(make_row(
-        "nous", "Nous", models=["free-model"],
-        pricing={"free-model": {"input": "free", "output": "free", "cache": None, "free": True}}))
-    probe = FakeProbe(picker={"nous": {"free-model": {"prompt": "0", "completion": "0"}}})
-    model = _model(mc.get_model_catalog_all(FakeAdapter(payload, probe), None)["providers"][0],
-                   "free-model")
-    assert model["pricingStatus"] == "free"
-    assert model["cost"]["free"] is True
-    assert model["cost"]["input"] == 0.0
-    assert model["cost"]["output"] == 0.0
-    assert model["cost"]["display"] == {"input": "free", "output": "free", "cache": None}
-
-
-def test_free_input_but_paid_output_is_not_free():
-    payload = make_payload(make_row(
-        "nous", "Nous", models=["hybrid"],
-        pricing={"hybrid": {"input": "free", "output": "$5.00", "cache": None, "free": False}}))
-    probe = FakeProbe(picker={"nous": {"hybrid": {"prompt": "0", "completion": "0.000005"}}})
-    model = _model(mc.get_model_catalog_all(FakeAdapter(payload, probe), None)["providers"][0],
-                   "hybrid")
-    assert model["pricingStatus"] == "priced"
-    assert model["cost"]["free"] is False
-    assert model["cost"]["input"] == 0.0
-    assert model["cost"]["output"] == 5.0
-
-
-def test_missing_pricing_is_unknown_never_zero_dollars_or_free():
-    payload = make_payload(make_row("nous", "Nous", models=["mystery"], pricing={}))
-    model = _model(mc.get_model_catalog_all(FakeAdapter(payload), None)["providers"][0], "mystery")
-    assert model["pricingStatus"] == "unknown"
-    assert model["cost"] is None
-    assert model["pricingStatus"] != "free"
-    serialized = json.dumps(model)
-    assert "$0.00" not in serialized and "$0" not in serialized
-
-
-def test_zero_numeric_rates_without_free_flag_are_unknown_not_free():
-    """0.0 cannot distinguish free from no-data; only an explicit flag may."""
-    payload = make_payload(make_row(
-        "openai", "OpenAI", models=["gpt-zero"],
-        pricing={"gpt-zero": {"input": "$0.00", "output": "$0.00", "cache": None, "free": False}}))
-    probe = FakeProbe(picker={"openai": {"gpt-zero": {"prompt": "0", "completion": "0"}}})
-    model = _model(mc.get_model_catalog_all(FakeAdapter(payload, probe), None)["providers"][0],
-                   "gpt-zero")
-    assert model["pricingStatus"] == "unknown"
-    assert model["cost"] is None
-
-
-def test_picker_display_survives_a_cold_raw_pricing_cache():
-    """The row's display price is not discarded when raw rates are cached out."""
-    payload = make_payload(make_row(
-        "nous", "Nous", models=["hermes-4-405b"],
-        pricing={"hermes-4-405b": {
-            "input": "$3.00", "output": "$15.00", "cache": "$0.30", "free": False}}))
-    res = mc.get_model_catalog_all(FakeAdapter(payload, FakeProbe()), None)
-    model = _model(res["providers"][0], "hermes-4-405b")
-    assert model["pricingStatus"] == "priced"
-    cost = model["cost"]
-    assert set(cost) == COST_KEYS
-    assert cost["display"] == {"input": "$3.00", "output": "$15.00", "cache": "$0.30"}
-    # Display text is never parsed into numbers: no raw rate, no numeric claim.
-    assert cost["input"] is None and cost["output"] is None and cost["cacheRead"] is None
-    assert cost["free"] is False
-    assert cost["source"] == "picker"
-    assert cost["pricingVersion"] is None
-    json.dumps(res, allow_nan=False)
-
-
-def test_picker_display_only_free_honours_the_explicit_flag():
-    payload = make_payload(make_row(
-        "nous", "Nous", models=["free-model"],
-        pricing={"free-model": {"input": "free", "output": "free", "cache": None, "free": True}}))
-    model = _model(mc.get_model_catalog_all(FakeAdapter(payload, FakeProbe()), None)["providers"][0],
-                   "free-model")
-    assert model["pricingStatus"] == "free"
-    cost = model["cost"]
-    assert cost["free"] is True
-    assert cost["display"] == {"input": "free", "output": "free", "cache": None}
-    assert cost["input"] is None and cost["output"] is None
-
-
-def test_picker_display_only_one_direction_free_is_not_a_free_model():
-    payload = make_payload(make_row(
-        "nous", "Nous", models=["hybrid"],
-        pricing={"hybrid": {"input": "free", "output": "$5.00", "cache": None, "free": False}}))
-    model = _model(mc.get_model_catalog_all(FakeAdapter(payload, FakeProbe()), None)["providers"][0],
-                   "hybrid")
-    assert model["pricingStatus"] == "priced"
-    assert model["cost"]["free"] is False
-    assert model["cost"]["display"] == {"input": "free", "output": "$5.00", "cache": None}
-    assert model["cost"]["input"] is None and model["cost"]["output"] is None
-
-
-def test_picker_all_free_display_without_flag_is_unknown_not_free():
-    """Zero display strings cannot prove a free model any more than 0.0 can."""
-    payload = make_payload(make_row(
-        "nous", "Nous", models=["zero-display"],
-        pricing={"zero-display": {"input": "free", "output": "free",
-                                  "cache": None, "free": False}}))
-    model = _model(mc.get_model_catalog_all(FakeAdapter(payload, FakeProbe()), None)["providers"][0],
-                   "zero-display")
-    assert model["pricingStatus"] == "unknown"
-    assert model["cost"] is None
-
-
-# -- billing-route / models.dev fallbacks ----------------------------------
-
-def test_subscription_route_is_included_not_free():
-    payload = make_payload(make_row("openai-codex", "OpenAI Codex",
-                                    models=["gpt-5.6-sol"]))
-    probe = FakeProbe(routes={("openai-codex", "gpt-5.6-sol"): "subscription_included"})
-    model = _model(mc.get_model_catalog_all(FakeAdapter(payload, probe), None)["providers"][0],
-                   "gpt-5.6-sol")
-    assert model["pricingStatus"] == "included"
-    cost = model["cost"]
-    assert cost["source"] == "subscription_route"
-    assert cost["pricingVersion"] == "included-route"
-    assert cost["input"] == 0.0 and cost["output"] == 0.0
-    assert cost["free"] is False
-    assert cost["display"] == {"input": "$0.00", "output": "$0.00", "cache": "$0.00"}
-
-
-def test_official_docs_snapshot_preserves_version_and_rates():
-    payload = make_payload(make_row("openai", "OpenAI", models=["gpt-4o-mini"]))
-    probe = FakeProbe(
-        routes={("openai", "gpt-4o-mini"): "official_docs_snapshot"},
-        entries={("openai", "gpt-4o-mini"): {
-            "input": 0.15, "output": 0.6, "cache_read": 0.075,
-            "source": "official_docs_snapshot",
-            "pricing_version": "openai-pricing-2026-03-16"}},
-    )
-    model = _model(mc.get_model_catalog_all(FakeAdapter(payload, probe), None)["providers"][0],
-                   "gpt-4o-mini")
-    assert model["pricingStatus"] == "priced"
-    cost = model["cost"]
-    assert cost["source"] == "official_docs_snapshot"
-    assert cost["pricingVersion"] == "openai-pricing-2026-03-16"
-    assert (cost["input"], cost["output"], cost["cacheRead"]) == (0.15, 0.6, 0.075)
-    assert cost["display"] == {"input": "$0.15", "output": "$0.60", "cache": "$0.075"}
-
-
-def test_models_dev_fallback_is_labelled_models_dev_not_snapshot():
-    payload = make_payload(make_row("google", "Google", models=["gemini-lite"]))
-    probe = FakeProbe(
-        routes={("google", "gemini-lite"): "official_docs_snapshot"},
-        # get_pricing_entry can fall back to models.dev internally; that data
-        # must NOT be claimed as an official-docs snapshot.
-        entries={("google", "gemini-lite"): {
-            "input": 9.9, "output": 9.9, "cache_read": None,
-            "source": "provider_models_api", "pricing_version": "models.dev"}},
-        models_dev={("google", "gemini-lite"): {
-            "input": 0.1, "output": 0.4, "cache_read": None}},
-    )
-    model = _model(mc.get_model_catalog_all(FakeAdapter(payload, probe), None)["providers"][0],
-                   "gemini-lite")
-    assert model["pricingStatus"] == "priced"
-    assert model["cost"]["source"] == "models_dev"
-    assert model["cost"]["input"] == 0.1
-    assert model["cost"]["display"] == {"input": "$0.10", "output": "$0.40", "cache": None}
-    assert model["cost"]["pricingVersion"] is None
-
-
-def test_models_dev_zero_cost_dict_is_unknown_not_free():
-    payload = make_payload(make_row("openai", "OpenAI", models=["zero-model"]))
-    probe = FakeProbe(models_dev={("openai", "zero-model"): {
-        "input": 0.0, "output": 0.0, "cache_read": None}})
-    model = _model(mc.get_model_catalog_all(FakeAdapter(payload, probe), None)["providers"][0],
-                   "zero-model")
-    assert model["pricingStatus"] == "unknown"
-    assert model["cost"] is None
-
-
-# -- numeric guard: non-finite / negative / bool rates ---------------------
-
-@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"),
-                                 -0.5, True])
-def test_snapshot_cost_rejects_non_finite_negative_and_bool_rates(bad):
-    entry = {"source": "official_docs_snapshot", "pricing_version": "v",
-             "input": bad, "output": bad, "cache_read": bad}
-    assert mc._snapshot_cost(entry) == {"pricingStatus": "unknown", "cost": None}
-
-
-@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"),
-                                 -1.0, True])
-def test_models_dev_cost_rejects_non_finite_negative_and_bool_rates(bad):
-    assert mc._models_dev_cost(
-        {"input": bad, "output": bad, "cache_read": bad}) == {
-            "pricingStatus": "unknown", "cost": None}
-
-
-def test_a_bad_rate_only_nulls_that_field_and_keeps_the_rest_priced():
-    resolved = mc._models_dev_cost(
-        {"input": float("inf"), "output": 4.0, "cache_read": float("nan")})
-    assert resolved["pricingStatus"] == "priced"
-    cost = resolved["cost"]
-    assert cost["input"] is None and cost["cacheRead"] is None
-    assert cost["output"] == 4.0
-    assert cost["display"] == {"input": None, "output": "$4.00", "cache": None}
-    json.dumps(resolved, allow_nan=False)
-
-
-@pytest.mark.parametrize("bad_rate", ["nan", "inf", "-inf", "-0.000001", "1e999"])
-def test_picker_raw_bad_rates_degrade_to_unknown_and_serialize_as_valid_json(bad_rate):
-    payload = make_payload(make_row(
-        "nous", "Nous", models=["bad-rate"], pricing={"bad-rate": {}}))
-    probe = FakeProbe(picker={"nous": {"bad-rate": {
-        "prompt": bad_rate, "completion": bad_rate,
-        "input_cache_read": bad_rate}}})
-    res = mc.get_model_catalog_all(FakeAdapter(payload, probe), None)
-    model = _model(res["providers"][0], "bad-rate")
-    assert model["pricingStatus"] == "unknown"
-    assert model["cost"] is None
-    # NaN/Infinity would make this raise (and are invalid JSON on the wire).
-    json.dumps(res, allow_nan=False)
-
-
-# -- exact-id join across providers ---------------------------------------
-
-def test_same_model_id_under_two_providers_keeps_each_provider_price():
-    payload = make_payload(
-        make_row("provider-a", "A", models=["shared"], pricing={"shared": {
-            "input": "$1.00", "output": "$2.00", "cache": None, "free": False}}),
-        make_row("provider-b", "B", models=["shared"], pricing={"shared": {
-            "input": "$7.00", "output": "$8.00", "cache": None, "free": False}}),
-    )
-    probe = FakeProbe(picker={
-        "provider-a": {"shared": {"prompt": "0.000001", "completion": "0.000002"}},
-        "provider-b": {"shared": {"prompt": "0.000007", "completion": "0.000008"}},
+    base.update(extra)
+    return base
+
+
+def payload(*rows, **extra) -> dict:
+    body = {"providers": list(rows), "model": "", "provider": ""}
+    body.update(extra)
+    return body
+
+
+def entry(inp=None, out=None, cache=None, free=False) -> dict:
+    """One host pricing entry (already formatted per 1M tokens)."""
+    return {"input": inp, "output": out, "cache": cache, "free": free}
+
+
+def one_provider(row_obj, provider="alpha"):
+    res = mc.catalog_response(payload(row_obj), provider)
+    assert res["ok"] is True, res
+    assert len(res["providers"]) == 1, res["providers"]
+    return res, res["providers"][0]
+
+
+def model_of(provider_dto, model_id):
+    return next(m for m in provider_dto["models"] if m["id"] == model_id)
+
+
+# -- display text is the only price evidence --------------------------------
+
+
+def test_priced_model_keeps_host_display_and_numeric_per_million_rates():
+    r = row("alpha", ["m1"], pricing={"m1": entry("$3.00", "$15.00", "$0.30")})
+    _, dto = one_provider(r)
+    m = model_of(dto, "m1")
+    assert m["pricingStatus"] == "priced"
+    assert m["cost"]["display"] == {"input": "$3.00", "output": "$15.00", "cache": "$0.30"}
+    assert m["cost"]["input"] == 3.0
+    assert m["cost"]["output"] == 15.0
+    assert m["cost"]["cacheRead"] == 0.3
+    assert m["cost"]["free"] is False
+    assert m["cost"]["unit"] == mc.COST_UNIT == "USD_per_1M_tokens"
+    assert m["cost"]["source"] == "picker"
+    assert m["cost"]["pricingVersion"] is None
+
+
+def test_sub_cent_display_retains_precision_in_the_numeric_rate():
+    r = row("alpha", ["m1"], pricing={"m1": entry("$0.00009", "$0.30", None)})
+    _, dto = one_provider(r)
+    m = model_of(dto, "m1")
+    assert m["cost"]["display"]["input"] == "$0.00009"
+    assert m["cost"]["display"]["cache"] is None
+    assert m["cost"]["input"] == 0.00009
+
+
+def test_numeric_rates_use_the_ui_cost_fields():
+    r = row("alpha", ["m1"], pricing={"m1": entry("$3.00", "$15.00", "$0.30")})
+    _, dto = one_provider(r)
+    cost = model_of(dto, "m1")["cost"]
+    assert cost["input"] == 3.0
+    assert cost["output"] == 15.0
+    assert cost["cacheRead"] == 0.3
+    assert cost["display"]["input"] == "$3.00"
+
+
+def test_explicit_free_flag_is_the_only_free_evidence():
+    r = row("alpha", ["freebie"], pricing={"freebie": entry("free", "free", None, free=True)})
+    _, dto = one_provider(r)
+    m = model_of(dto, "freebie")
+    assert m["pricingStatus"] == "free"
+    assert m["cost"]["free"] is True
+    assert m["cost"]["input"] == 0.0
+    assert m["cost"]["output"] == 0.0
+    assert m["cost"]["cacheRead"] is None
+    assert m["cost"]["display"] == {"input": "free", "output": "free", "cache": None}
+
+
+def test_per_direction_free_is_a_priced_model_not_a_free_one():
+    r = row("alpha", ["cheap"], pricing={"cheap": entry("free", "$5.00", None, free=False)})
+    _, dto = one_provider(r)
+    m = model_of(dto, "cheap")
+    assert m["pricingStatus"] == "priced"
+    assert m["cost"]["free"] is False
+    assert m["cost"]["display"]["input"] == "free"       # verbatim, that direction only
+    assert m["cost"]["display"]["output"] == "$5.00"
+    assert m["cost"]["input"] == 0.0
+    assert m["cost"]["output"] == 5.0
+    assert m["cost"]["cacheRead"] is None
+
+
+def test_all_free_display_without_the_host_flag_stays_unknown():
+    r = row("alpha", ["m1"], pricing={"m1": {"input": "free", "output": "free", "cache": None}})
+    _, dto = one_provider(r)
+    m = model_of(dto, "m1")
+    assert m["pricingStatus"] == "unknown"
+    assert m["cost"] is None
+
+
+def test_included_status_is_unreachable_from_a_host_payload():
+    r = row("alpha", ["m1"], pricing={"m1": entry("$1.00", "$2.00", None)})
+    _, dto = one_provider(r)
+    assert model_of(dto, "m1")["pricingStatus"] != "included"
+
+
+# -- unknown stays unknown ---------------------------------------------------
+
+
+def test_missing_pricing_entry_is_unknown_not_free():
+    r = row("alpha", ["m1", "m2"], pricing={"m1": entry("$1.00", "$2.00", None)})
+    _, dto = one_provider(r)
+    m2 = model_of(dto, "m2")
+    assert m2["pricingStatus"] == "unknown"
+    assert m2["cost"] is None
+
+
+def test_empty_pricing_entry_is_unknown():
+    r = row("alpha", ["m1"], pricing={"m1": {}})
+    _, dto = one_provider(r)
+    assert model_of(dto, "m1")["pricingStatus"] == "unknown"
+    assert model_of(dto, "m1")["cost"] is None
+
+
+@pytest.mark.parametrize("bad_pricing", ["$3.00", ["m1"], 7, {"m1": "$3.00"}, {"m1": None}])
+def test_malformed_pricing_shapes_are_unknown(bad_pricing):
+    r = row("alpha", ["m1"], pricing=bad_pricing)
+    res = mc.catalog_response(payload(r), "alpha")
+    assert res["ok"] is True
+    assert model_of(res["providers"][0], "m1")["cost"] is None
+
+
+def test_pricing_join_is_exact_id_never_fuzzy():
+    r = row("alpha", ["m1", "M2"], pricing={
+        "m1:free": entry("$1.00", "$2.00", None),
+        "m2": entry("$3.00", "$4.00", None),
     })
-    res = mc.get_model_catalog_all(FakeAdapter(payload, probe), None)
-    a = _model(res["providers"][0], "shared")
-    b = _model(res["providers"][1], "shared")
-    assert (a["cost"]["input"], a["cost"]["output"]) == (1.0, 2.0)
-    assert (b["cost"]["input"], b["cost"]["output"]) == (7.0, 8.0)
-    assert ("picker", "provider-a") in probe.calls
-    assert ("picker", "provider-b") in probe.calls
+    _, dto = one_provider(r)
+    assert model_of(dto, "m1")["pricingStatus"] == "unknown"
+    assert model_of(dto, "M2")["pricingStatus"] == "unknown"
 
 
-def test_exact_ids_are_not_fuzzy_normalized_across_case():
-    payload = make_payload(make_row(
-        "provider-a", "A", models=["Vendor/Model-X"], pricing={"Vendor/Model-X": {
-            "input": "$3.00", "output": "$3.00", "cache": None, "free": False}}))
-    probe = FakeProbe(picker={"provider-a": {"Vendor/Model-X": {
-        "prompt": "0.000003", "completion": "0.000003"}}})
-    model = _model(mc.get_model_catalog_all(FakeAdapter(payload, probe), None)["providers"][0],
-                   "Vendor/Model-X")
-    assert model["pricingStatus"] == "priced"
-    assert probe.calls == [("picker", "provider-a")]  # no lookup for another case variant
+def test_pricing_for_models_the_row_does_not_offer_is_not_emitted():
+    r = row("alpha", ["m1"], pricing={
+        "m1": entry("$1.00", "$2.00", None),
+        "ghost": entry("$9.00", "$9.00", None),
+    })
+    _, dto = one_provider(r)
+    assert [m["id"] for m in dto["models"]] == ["m1"]
+    assert "ghost" not in json.dumps(dto)
 
 
-# -- per-request cost memoization -----------------------------------------
-
-def test_cost_lookups_are_memoized_per_provider_and_model_within_a_request():
-    """A repeated id must not re-run billing/models.dev seam lookups."""
-    payload = make_payload(make_row("nous", "Nous", models=["dup", "dup"]))
-    adapter = FakeAdapter(payload)
-    res = mc.get_model_catalog_all(adapter, None)
-    assert adapter.probe.calls.count(("route", "dup", "nous")) == 1
-    assert adapter.probe.calls.count(("models_dev", "nous", "dup")) == 1
-    assert [m["pricingStatus"] for m in res["providers"][0]["models"]] == [
-        "unknown", "unknown"]
+# -- pending vs unavailable --------------------------------------------------
 
 
-def test_cost_memo_does_not_outlive_the_request():
-    payload = make_payload(make_row("nous", "Nous", models=["dup", "dup"]))
-    adapter = FakeAdapter(payload)
-    mc.get_model_catalog_all(adapter, None)
-    mc.get_model_catalog_all(adapter, None)
-    # One lookup per request: the cache is per-request, never a module global.
-    assert adapter.probe.calls.count(("route", "dup", "nous")) == 2
-    assert adapter.probe.calls.count(("models_dev", "nous", "dup")) == 2
-
-
-# -- failures / isolation --------------------------------------------------
-
-def test_one_provider_failure_does_not_suppress_others():
-    payload = make_payload(
-        make_row("broken", "Broken", models=["m"], pricing={"m": {
-            "input": "$1.00", "output": "$1.00", "cache": None, "free": False}}),
-        make_row("healthy", "Healthy", models=["ok"], pricing={"ok": {
-            "input": "$2.00", "output": "$2.00", "cache": None, "free": False}}),
-    )
-    probe = FakeProbe(picker={"healthy": {"ok": {"prompt": "0.000002", "completion": "0.000002"}}},
-                      explode={"broken"})
-    res = mc.get_model_catalog_all(FakeAdapter(payload, probe), None)
-    assert res["ok"] is True
-    assert [p["id"] for p in res["providers"]] == ["broken", "healthy"]
-    broken, healthy = res["providers"]
-    assert broken["modelCount"] == 0 and broken["models"] == []
-    assert broken["stale"] is True and broken["fetchedAt"] is None
-    assert broken["warning"] == "provider catalog unavailable: RuntimeError"
-    assert "secret-test-token" not in json.dumps(res)
-    assert _model(healthy, "ok")["pricingStatus"] == "priced"
-    assert res["cost"]["unavailableProviders"] == ["broken"]
-
-
-def test_zero_provider_rows_is_a_failure_not_empty_success():
-    res = mc.get_model_catalog_all(FakeAdapter(make_payload()), None)
-    assert res["ok"] is False
-    assert res["providers"] == []
-    assert res["error"] == "no providers in this profile's catalog"
-
-
-def test_unknown_provider_filter_is_truthful_failure():
-    payload = make_payload(make_row("nous", "Nous", models=["m"]))
-    res = mc.get_model_catalog_all(FakeAdapter(payload), None, "does-not-exist")
-    assert res["ok"] is False
-    assert res["providers"] == []
-    assert "does-not-exist" in res["error"]
-
-
-def test_provider_filter_matches_alias_and_prefers_authenticated_duplicate():
-    payload = make_payload(
-        make_row("gemini", "Gemini", models=["a"], provider_id="google"),
-        make_row("google", "Google skeleton", models=[], source="canonical",
-                 authenticated=False, provider_id="google"),
-    )
-    res = mc.get_model_catalog_all(FakeAdapter(payload), None, "google")
-    assert res["ok"] is True
-    assert [p["id"] for p in res["providers"]] == ["gemini"]
-
-
-def test_catalog_exception_is_sanitized():
-    adapter = FakeAdapter({}, raise_on_payload=RuntimeError(
-        f"Authorization: Bearer secret-test-token at {LAB_HOST_PATH}"))
-    res = mc.get_model_catalog_all(adapter, "work")
-    assert res["ok"] is False
-    assert "RuntimeError" in res["error"]
-    assert "secret-test-token" not in res["error"]
-    assert "Bearer" not in res["error"]
-    assert "/home/" not in res["error"]
-    assert LAB_HOST_PATH not in res["error"]
-
-
-def test_unavailable_pricing_seam_marks_providers_and_keeps_prices_unknown():
-    payload = make_payload(make_row("nous", "Nous", models=["hermes-4-405b"]))
-    probe = FakeProbe(available=False)
-    res = mc.get_model_catalog_all(FakeAdapter(payload, probe), None)
-    assert res["ok"] is True
-    model = _model(res["providers"][0], "hermes-4-405b")
-    assert model["pricingStatus"] == "unknown"
-    assert model["cost"] is None
-    assert res["cost"]["unavailableProviders"] == ["nous"]
-
-
-# -- scoping / refresh / read-only ----------------------------------------
-
-def test_exactly_one_scoped_call_and_refresh_forwarded():
-    adapter = FakeAdapter(make_payload(make_row("nous", "Nous", models=["m"])))
-    mc.get_model_catalog_all(adapter, "work", refresh=True)
-    assert adapter.scopes == ["work"]
-    assert adapter.refresh_calls == [True]
-
-
-def test_profile_id_is_echoed_and_none_stays_null():
-    adapter = FakeAdapter(make_payload(make_row("nous", "Nous", models=["m"])))
-    assert mc.get_model_catalog_all(adapter, "work")["profileId"] == "work"
-    assert mc.get_model_catalog_all(adapter, None)["profileId"] is None
-
-
-def test_pricing_probe_is_offline_and_provider_scoped_only():
-    payload = make_payload(make_row(
-        "nous", "Nous", models=["m"],
-        pricing={"m": {"input": "$1.00", "output": "$1.00", "cache": None, "free": False}}))
-    probe = FakeProbe(picker={"nous": {"m": {"prompt": "0.000001", "completion": "0.000001"}}})
-    mc.get_model_catalog_all(FakeAdapter(payload, probe), None)
-    assert probe.calls == [("picker", "nous")]
-    # No URL/api-key material in any lookup argument.
-    assert not any("http" in str(part) or "key" in str(part).lower()
-                   for call in probe.calls for part in call)
-
-
-def test_dto_allowlist_never_leaks_paths_urls_secrets_or_raw_rows():
-    payload = make_payload(make_row(
-        "nous", "Nous", models=["m"],
-        pricing={"m": {"input": "$1.00", "output": "$1.00", "cache": None, "free": False}},
-        api_url="http://127.0.0.1:8080/v1", key_env="NOUS_API_KEY",
-        headers={"Authorization": "Bearer sk-live-secret"},
-        base_url="http://internal.example/v1", raw_config={"model": {"provider": "nous"}},
-        snapshot={"journal": "row"}))
-    probe = FakeProbe(picker={"nous": {"m": {"prompt": "0.000001", "completion": "0.000001"}}})
-    res = mc.get_model_catalog_all(FakeAdapter(payload, probe), None)
-    assert set(res) == TOP_KEYS
-    assert set(res["cost"]) == {"pending", "unavailableProviders"}
-    provider = res["providers"][0]
-    assert set(provider) == PROVIDER_KEYS
-    assert set(provider["models"][0]) == MODEL_KEYS
-    assert set(provider["models"][0]["cost"]) == COST_KEYS
-    assert set(provider["models"][0]["cost"]["display"]) == {"input", "output", "cache"}
-    serialized = json.dumps(res)
-    for needle in ("http://", "https://", "sk-live-secret", "Bearer",
-                   "/home/", "api_url", "base_url", "key_env", "headers",
-                   "raw_config", "snapshot"):
-        assert needle not in serialized
-
-
-# -- freshness / pending ---------------------------------------------------
-
-def test_freshness_is_per_provider_and_pending_is_surfaced(hermes_home):
-    from hermes_constants import get_hermes_home
-
-    now = time.time()
-    (get_hermes_home() / "provider_models_cache.json").write_text(json.dumps({
-        "nous": {"fp": "fp", "at": now, "models": ["m"]},
-        "old": {"fp": "fp", "at": now - 7200, "models": ["m"]},
-    }))
-    payload = make_payload(
-        make_row("nous", "Nous", models=["m"], pricing_pending=True),
-        make_row("old", "Old", models=["m"]),
-    )
-    res = mc.get_model_catalog_all(FakeAdapter(payload), None)
-    fresh, stale = res["providers"]
-    assert fresh["stale"] is False and fresh["fetchedAt"]
-    assert stale["stale"] is True and stale["fetchedAt"]
+def test_pricing_pending_makes_every_model_unknown_and_the_catalog_pending():
+    r = row("nous", ["m1"], pricing_pending=True,
+            pricing={"m1": entry("$3.00", "$15.00", None)})  # stale map must not be trusted
+    res, dto = one_provider(r, "nous")
+    assert model_of(dto, "m1")["pricingStatus"] == "unknown"
+    assert model_of(dto, "m1")["cost"] is None
     assert res["cost"]["pending"] is True
+    assert res["cost"]["unavailableProviders"] == []
 
 
-def test_provider_filter_scopes_pending_to_the_filtered_provider():
-    """One unrelated provider's pending flag must not taint a clean request."""
-    payload = make_payload(
-        make_row("pending-one", "Pending", models=["m"], pricing_pending=True),
-        make_row("clean", "Clean", models=["m"]),
-    )
-    filtered = mc.get_model_catalog_all(FakeAdapter(payload), None, "clean")
-    assert filtered["ok"] is True
-    assert [p["id"] for p in filtered["providers"]] == ["clean"]
-    assert filtered["cost"]["pending"] is False
-
-    # A payload-level (global) pending flag is likewise not attributable to the
-    # single provider this response describes.
-    payload_with_global = dict(payload, pricing_pending=True)
-    filtered_global = mc.get_model_catalog_all(
-        FakeAdapter(payload_with_global), None, "clean")
-    assert filtered_global["cost"]["pending"] is False
-
-    # Unfiltered, the same payload still reports the pending work.
-    unfiltered = mc.get_model_catalog_all(FakeAdapter(payload), None)
-    assert unfiltered["cost"]["pending"] is True
+def test_free_tier_pending_is_pending_and_locks_every_model():
+    r = row("nous", ["m1", "m2"], free_tier_pending=True,
+            unavailable_models=["m1", "m2"], warning="Checking Nous plan entitlement…")
+    res, dto = one_provider(r, "nous")
+    assert {m["pricingStatus"] for m in dto["models"]} == {"unknown"}
+    assert res["cost"]["pending"] is True
+    assert res["cost"]["unavailableProviders"] == []
 
 
-def test_provider_filter_scopes_unavailable_providers_to_the_response():
-    payload = make_payload(
-        make_row("nous", "Nous", models=["m"]),
-        make_row("openrouter", "OpenRouter", models=["m"]),
-    )
-    probe = FakeProbe(available=False)
-    filtered = mc.get_model_catalog_all(FakeAdapter(payload, probe), None, "openrouter")
-    assert filtered["cost"]["unavailableProviders"] == ["openrouter"]
+def test_provider_with_no_pricing_at_all_is_listed_as_unavailable():
+    res = mc.catalog_response(payload(row("alpha", ["m1"]), row("beta", ["m9"])), "alpha")
+    assert res["cost"]["unavailableProviders"] == ["alpha"]   # this response's provider
+    both = mc.catalog_response(payload(row("alpha", ["m1"]), row("beta", ["m9"])))
+    assert both["cost"]["unavailableProviders"] == ["alpha", "beta"]
+    assert all(p["models"][0]["cost"] is None for p in both["providers"])
 
 
-def test_no_cache_entry_reports_stale_and_null_fetched_at(hermes_home):
-    payload = make_payload(make_row("nous", "Nous", models=["m"]))
-    provider = mc.get_model_catalog_all(FakeAdapter(payload), None)["providers"][0]
-    assert provider["stale"] is True
-    assert provider["fetchedAt"] is None
+def test_partially_priced_provider_is_not_unavailable():
+    r = row("alpha", ["m1", "m2"], pricing={"m1": entry("$1.00", "$2.00", None)})
+    res, _ = one_provider(r)
+    assert res["cost"]["unavailableProviders"] == []
 
 
-# -- adapter seam: import probe + graceful degradation ---------------------
-
-def test_adapter_pricing_probe_uses_offline_calls_only(monkeypatch):
-    """The probe must pass cached_only / allow_network=False and never base_url."""
-    from types import SimpleNamespace
-    import hermes_adapter
-
-    seen = {}
-
-    def fake_picker(provider, **kwargs):
-        seen["picker"] = (provider, kwargs)
-        return {}
-
-    def fake_route(model, provider=None, **kwargs):
-        seen["route"] = (model, provider, kwargs)
-        return SimpleNamespace(billing_mode="unknown")
-
-    def fake_entry(model, provider=None, **kwargs):
-        seen["entry"] = (model, provider, kwargs)
-        return None
-
-    def fake_info(provider, model, **kwargs):
-        seen["info"] = (provider, model, kwargs)
-        return None
-
-    monkeypatch.setattr(hermes_adapter, "_load_pricing_seams", lambda: {
-        "get_pricing_for_provider": fake_picker,
-        "resolve_billing_route": fake_route,
-        "get_pricing_entry": fake_entry,
-        "get_model_info": fake_info,
-    })
-    probe = hermes_adapter.HermesAdapter().pricing_probe()
-    assert probe.available is True
-    probe.picker_pricing("nous")
-    probe.billing_mode("m", "nous")
-    probe.pricing_entry("m", "nous")
-    probe.models_dev_cost("nous", "m")
-    assert seen["picker"] == ("nous", {"cached_only": True})
-    assert seen["route"] == ("m", "nous", {})   # no base_url/api_key
-    assert seen["entry"] == ("m", "nous", {})   # no base_url/api_key
-    assert seen["info"] == ("nous", "m", {"allow_network": False})
+def test_virtual_free_tier_row_without_pricing_is_not_unavailable():
+    r = row("nous-free", ["m1"], free_tier_row=True)
+    res, _ = one_provider(r, "nous-free")
+    assert res["cost"]["unavailableProviders"] == []
 
 
-def test_adapter_pricing_probe_degrades_on_import_error(monkeypatch):
-    import hermes_adapter
+def test_pending_on_another_provider_does_not_leak_into_a_filtered_response():
+    body = payload(row("nous", ["m1"], pricing_pending=True), row("alpha", ["m2"]))
+    res = mc.catalog_response(body, "alpha")
+    assert res["cost"] == {"pending": False, "unavailableProviders": ["alpha"]}
 
-    def boom():
-        raise ImportError("No module named 'hermes_cli.models_pricing'")
 
-    monkeypatch.setattr(hermes_adapter, "_load_pricing_seams", boom)
-    probe = hermes_adapter.HermesAdapter().pricing_probe()
-    assert probe.available is False
-    assert probe.unavailable == ("pricing",)
-    assert probe.reason == "ImportError"
-    assert probe.picker_pricing("nous") == {}
-    assert probe.billing_mode("m", "nous") is None
-    assert probe.pricing_entry("m", "nous") is None
-    assert probe.models_dev_cost("nous", "m") is None
+def test_payload_level_pricing_pending_flag_applies_only_to_the_unfiltered_catalog():
+    body = payload(row("alpha", ["m1"], pricing={"m1": entry("$1.00", "$2.00")}),
+                   pricing_pending=True)
+    assert mc.catalog_response(body)["cost"]["pending"] is True
+    assert mc.catalog_response(body, "alpha")["cost"]["pending"] is False
 
-    payload = make_payload(make_row("nous", "Nous", models=["hermes-4-405b"]))
-    res = mc.get_model_catalog_all(FakeAdapter(payload, probe), None)
+
+# -- isolation and shape -----------------------------------------------------
+
+
+def test_one_broken_row_never_hides_the_other_providers():
+    class Boom:
+        def __str__(self):
+            raise RuntimeError("Authorization: Bearer secret-test-token")
+
+    body = payload(row("broken", [Boom()]), row("alpha", ["m1"]))
+    res = mc.catalog_response(body)
     assert res["ok"] is True
-    model = _model(res["providers"][0], "hermes-4-405b")
-    assert model["pricingStatus"] == "unknown"
-    assert model["cost"] is None
-    assert res["cost"]["unavailableProviders"] == ["nous"]
+    assert res["error"] is None
+    broken = res["providers"][0]
+    assert broken["id"] == "broken"
+    assert broken["models"] == []
+    assert broken["warning"] == "provider catalog unavailable: RuntimeError"
+    assert res["providers"][1]["models"][0]["id"] == "m1"
+    assert res["cost"]["unavailableProviders"] == ["alpha", "broken"]
+    dumped = json.dumps(res)
+    assert "secret-test-token" not in dumped and "Bearer" not in dumped
 
 
-def test_adapter_catalog_payload_raises_sanitized_seam_error(monkeypatch):
-    import hermes_adapter
-
-    def boom():
-        raise ImportError("No module named 'hermes_cli.inventory'")
-
-    monkeypatch.setattr(hermes_adapter, "_load_inventory", boom)
-    adapter = hermes_adapter.HermesAdapter()
-    with pytest.raises(hermes_adapter.CatalogSeamUnavailable):
-        adapter.catalog_payload(False)
-    res = mc.get_model_catalog_all(adapter, None)
-    assert res["ok"] is False
-    assert res["error"] == "catalog lookup failed: CatalogSeamUnavailable"
+def test_cost_and_model_and_provider_shapes_are_the_frozen_allowlist():
+    r = row("alpha", ["m1"], pricing={"m1": entry("$1.00", "$2.00", "$0.10")})
+    res, dto = one_provider(r)
+    assert set(dto) == set(mc.PROVIDER_KEYS)
+    m = dto["models"][0]
+    assert set(m) == set(mc.MODEL_KEYS)
+    assert set(m["cost"]) == set(mc.COST_KEYS)
+    assert set(m["cost"]["display"]) == set(mc.COST_DISPLAY_KEYS)
+    assert m["pricingStatus"] in mc.PRICING_STATUSES
+    assert res["cost"]["pending"] is False
+    assert set(res) == set(mc.CATALOG_RESULT_KEYS)
 
 
-def test_adapter_models_dev_probe_requires_raw_cost_dict_presence(monkeypatch):
-    """ModelInfo zero-fills costs; 0.0 alone must not prove a price exists."""
-    from types import SimpleNamespace
-    import hermes_adapter
-
-    info = SimpleNamespace(cost_input=0.0, cost_output=0.0, cost_cache_read=None,
-                           has_cost_data=lambda: False)
-    monkeypatch.setattr(hermes_adapter, "_load_pricing_seams", lambda: {
-        "get_pricing_for_provider": lambda provider, **kw: {},
-        "resolve_billing_route": lambda model, provider=None, **kw: None,
-        "get_pricing_entry": lambda model, provider=None, **kw: None,
-        "get_model_info": lambda provider, model, **kw: info,
-    })
-    probe = hermes_adapter.HermesAdapter().pricing_probe()
-    monkeypatch.setattr(hermes_adapter, "_raw_models_dev_cost", lambda p, m: None)
-    assert probe.models_dev_cost("nous", "m") is None
-    monkeypatch.setattr(hermes_adapter, "_raw_models_dev_cost",
-                        lambda p, m: {"input": 0, "output": 0})
-    assert probe.models_dev_cost("nous", "m") == {
-        "input": 0.0, "output": 0.0, "cache_read": None}
+def test_sale_chrome_from_the_host_is_not_turned_into_rates():
+    r = row("nous", ["m1"], pricing={"m1": {
+        "input": "$1.50", "output": "$7.50", "cache": None, "free": False,
+        "discount_percent": 50, "was_input": "$3.00", "was_output": "$15.00",
+    }})
+    _, dto = one_provider(r, "nous")
+    cost = model_of(dto, "m1")["cost"]
+    assert cost["display"] == {"input": "$1.50", "output": "$7.50", "cache": None}
+    assert cost["input"] == 1.5
+    assert "discount_percent" not in cost and "was_input" not in cost
 
 
-def test_models_dev_private_helper_skew_degrades_to_unknown(monkeypatch):
-    """Missing models.dev registry helpers must yield unknown, never a 500."""
-    from types import SimpleNamespace
-    import agent.models_dev as models_dev
-    import hermes_adapter
-
-    for name in ("_models_dev_id", "_registry_models", "_iter_model_entries"):
-        monkeypatch.delattr(models_dev, name, raising=False)
-    info = SimpleNamespace(cost_input=0.0, cost_output=0.0, cost_cache_read=None,
-                           has_cost_data=lambda: False)
-    monkeypatch.setattr(hermes_adapter, "_load_pricing_seams", lambda: {
-        "get_pricing_for_provider": lambda provider, **kw: {},
-        "resolve_billing_route": lambda model, provider=None, **kw: None,
-        "get_pricing_entry": lambda model, provider=None, **kw: None,
-        "get_model_info": lambda provider, model, **kw: info,
-    })
-    assert hermes_adapter._raw_models_dev_cost("nous", "m") is None
-    probe = hermes_adapter.HermesAdapter().pricing_probe()
-    assert probe.models_dev_cost("nous", "m") is None
-
-    payload = make_payload(make_row("nous", "Nous", models=["m"]))
-    res = mc.get_model_catalog_all(FakeAdapter(payload, probe), None)
-    assert res["ok"] is True
-    model = _model(res["providers"][0], "m")
-    assert model["pricingStatus"] == "unknown"
-    assert model["cost"] is None
-    json.dumps(res, allow_nan=False)
+def test_provider_dto_reports_authentication_and_catalog_identity():
+    r = row("alpha", ["m1", "m2"], is_current=True, source="canonical")
+    _, dto = one_provider(r)
+    assert dto["id"] == "alpha"
+    assert dto["label"] == "ALPHA"
+    assert dto["authenticated"] is True
+    assert dto["configured"] is True
+    assert dto["isCurrent"] is True
+    assert dto["modelCount"] == 2
+    assert dto["warning"] is None
+    assert dto["fetchedAt"] is None and dto["stale"] is True
 
 
-def test_models_dev_helper_raising_at_call_time_degrades_to_unknown(monkeypatch):
-    import agent.models_dev as models_dev
-    import hermes_adapter
+def test_explicitly_unauthenticated_skeleton_row_is_not_configured():
+    r = row("openai", [], authenticated=False, warning="paste OPENAI_API_KEY to activate")
+    _, dto = one_provider(r, "openai")
+    assert dto["authenticated"] is False
+    assert dto["configured"] is False
+    assert dto["modelCount"] == 0
+    assert dto["warning"] == "paste OPENAI_API_KEY to activate"
 
-    def boom(*args, **kwargs):
-        raise AttributeError("_iter_model_entries moved in this Hermes version")
 
-    monkeypatch.setattr(models_dev, "_models_dev_id",
-                        lambda provider: provider, raising=False)
-    monkeypatch.setattr(models_dev, "_registry_models",
-                        lambda *args, **kwargs: {"m": {}}, raising=False)
-    monkeypatch.setattr(models_dev, "_iter_model_entries", boom, raising=False)
-    assert hermes_adapter._raw_models_dev_cost("nous", "m") is None
+def test_catalog_label_falls_back_to_the_slug_when_the_host_omits_a_name():
+    r = {"slug": "lab", "models": ["m1"], "authenticated": True}
+    _, dto = one_provider(r, "lab")
+    assert dto["label"] == "lab"
 
+
+def test_duplicate_slug_rows_are_merged_keeping_the_authenticated_pricing():
+    body = payload(
+        row("nous", [], authenticated=False, warning="paste NOUS_API_KEY to activate"),
+        row("nous", ["m1"], pricing={"m1": entry("$3.00", "$15.00", None)}),
+    )
+    res = mc.catalog_response(body)
+    assert len(res["providers"]) == 1
+    dto = res["providers"][0]
+    assert dto["authenticated"] is True
+    assert dto["warning"] is None
+    assert model_of(dto, "m1")["pricingStatus"] == "priced"
+
+
+def test_provider_filter_picks_the_authenticated_duplicate_row():
+    body = payload(
+        row("nous", [], authenticated=False),
+        row("nous", ["m1"], pricing={"m1": entry("$3.00", "$15.00", None)}),
+    )
+    res = mc.catalog_response(body, "nous")
+    assert res["providers"][0]["modelCount"] == 1
+    assert model_of(res["providers"][0], "m1")["pricingStatus"] == "priced"
+
+
+def test_refresh_never_manufactures_freshness():
+    body = payload(row("alpha", ["m1"], pricing={"m1": entry("$1.00", "$2.00")}))
+    for refresh in (False, True):
+        res = mc.catalog_response(body, "alpha", refresh=refresh)
+        assert res["providers"][0]["fetchedAt"] is None
+        assert res["providers"][0]["stale"] is True
+
+
+@pytest.mark.parametrize("per_token, display, expected", [
+    ("1e-9", "$0.001", 0.001),
+    ("3e-6", "$3.00", 3.0),
+    ("1.5e-5", "$15.00", 15.0),
+    ("0", "free", 0.0),
+    ("garbage", "?", None),
+])
+def test_real_host_formatter_round_trips(per_token, display, expected):
+    from hermes_cli.models_pricing import _format_price_per_mtok
+
+    formatted = _format_price_per_mtok(per_token)
+    assert formatted == display
+    assert mc._parse_price_per_mtok(formatted) == expected
+
+
+@pytest.mark.parametrize("token", [
+    "?", "", None, "garbage", "$", "$1.", "$.5", "$-1", "$+1", "$1e3",
+    "$1,000.00", "USD 3.00", "$3.00 sale", "$3.00\n", " $3.00", "$3.00 ",
+    "free ", "FREE", "0", 0, True, [], {}, "$NaN", "$inf", "$" + "9" * 400,
+])
+def test_unknown_or_malformed_prices_never_become_zero(token):
+    assert mc._parse_price_per_mtok(token) is None
+    _, dto = one_provider(row("alpha", ["m1"], pricing={
+        "m1": entry(token, "$5.00", token),
+    }))
+    cost = model_of(dto, "m1")["cost"]
+    assert cost["input"] is None
+    assert cost["cacheRead"] is None
+    assert cost["output"] == 5.0
+
+
+@pytest.mark.parametrize("token, expected", [("$0.00", 0.0), ("$12", 12.0), ("free", 0.0)])
+def test_exact_price_tokens_are_numeric(token, expected):
+    assert mc._parse_price_per_mtok(token) == expected

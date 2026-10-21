@@ -1,29 +1,16 @@
-"""Typed route inventory + deterministic change preview (plan T3).
+"""Typed route inventory and deterministic preview from raw config and host data.
 
-Builds a typed descriptor inventory of every supported model-selection slot
-family — main, delegation, auxiliary, judge, fallback, MoA, cron, plugin,
-specialist — from a raw profile config, and produces a deterministic
-before/after preview for explicitly selected edits.
+Only selected slots enter a preview; protected policy fields never enter an
+edit. The same inputs yield the same sorted, timestamp-free preview.
+Judge/reviewer slots reject plain chat replacements. cron.model pairs with
+cron.model_provider (inference), never cron.provider (scheduler). Fallback
+chains preserve order and null-versus-empty semantics. Invalid MoA removals
+are rejected before writing.
 
-Determinism contract: previews are sorted lists of plain dataclasses, carry no
-timestamps, no random IDs and no process state; the same (config, edits) pair
-always yields the same preview. Only explicitly selected slots appear; protected
-fields (thresholds, identity, enforcement, etc.) can never enter an edit.
-
-Protocol discipline (PLAN.md slot registry): judge/reviewer slots speak a typed
-decision protocol and reject plain chat-model replacements; cron's
-``cron.model`` pairs with ``cron.model_provider`` (the inference provider) and
-never touches ``cron.provider`` (the scheduler); delegation fallback chains
-preserve order and the null-vs-[] semantics (config_defaults.py:1327-1343);
-invalid MoA removals are rejected before any write (models.py:323-338's
-reject-don't-repair rule).
-
-Runtime-path discipline: every writable storage path must be a key the runtime
-actually reads (``hermes_cli/config_defaults.py`` / the registry descriptors).
-Chains live at ``fallback_providers`` and ``delegation.fallback_providers``;
-specialist routes live at the backend-specific ``stt.<provider>.model`` /
-``tts.<provider>.model``. A path with no runtime consumer is exposed explicitly
-read-only (``writable=False``), never as a fake editable route.
+Writable paths must have runtime consumers. Speech routes use the backend's
+stt/tts storage key; model-less backends are read-only but may allow an explicit
+backend switch. Auxiliary defaults come from public DEFAULT_CONFIG, while
+plugin registrations and MoA names can be supplied by public host payloads.
 """
 from __future__ import annotations
 
@@ -54,8 +41,7 @@ PROTOCOL_EMBEDDING = "embedding"
 PROTOCOL_SPEECH = "speech"
 PROTOCOL_IMAGE = "image"
 
-# Fields that are protected by default (PLAN.md "Protected by default") — an
-# edit touching any of these paths is rejected, never silently applied.
+# Edits touching these policy paths are rejected, never silently applied.
 _PROTECTED_PATHS = {
     "auxiliary.goal_judge.threshold",
     "auxiliary.goal_judge.enforcement",
@@ -178,11 +164,12 @@ _CHAIN_SLOTS = {
 }
 
 # Auxiliary selectors are DERIVED from the installed runtime, never frozen:
-# built-ins from DEFAULT_CONFIG['auxiliary'] (hermes_cli/config_defaults.py),
-# plugin-registered tasks from hermes_cli.plugins.get_plugin_auxiliary_tasks()
-# (PluginContext.register_auxiliary_task). Keep goal_judge out of the selector
-# set: judge.goal_judge.route below owns the auxiliary.goal_judge storage path,
-# so a second row here would duplicate one selectable slot.
+# built-ins from DEFAULT_CONFIG['auxiliary'] (public `hermes_cli.config`),
+# plugin-registered tasks from the HOST auxiliary payload — the JSON body of
+# `GET /api/model/auxiliary?profile=<p>` (the host owns plugin discovery and
+# profile scoping). Keep goal_judge out of the selector set: judge.goal_judge.route
+# below owns the auxiliary.goal_judge storage path, so a second row here would
+# duplicate one selectable slot.
 _JUDGE_OWNED_AUX_KEY = "goal_judge"
 
 # Policy/scalar keys of the auxiliary section — settings, not model slots.
@@ -238,27 +225,33 @@ def _record_inventory_warning(message: str) -> None:
 
 
 class InventoryResult(list):
-    """List-compatible inventory result (existing ``for x in build_inventory``
-    callers, ``len``, ``next`` and set-comprehensions all keep working) that also
-    carries the per-build ``warnings`` recorded while it was constructed."""
+    """List of observations with isolated per-build warnings."""
 
     def __init__(self, observations: Iterable[SlotObservation], warnings: List[str]):
         super().__init__(observations)
         self.warnings: List[str] = list(warnings)
 
 
+def _installed_default_config() -> Dict[str, Any]:
+    """Public runtime defaults, or an empty map when unavailable."""
+    try:
+        from hermes_cli.config import DEFAULT_CONFIG as _installed
+    except Exception:
+        return {}
+    return _installed if isinstance(_installed, dict) else {}
+
+
 def _installed_aux_defaults() -> Dict[str, Any]:
     """The installed DEFAULT_CONFIG['auxiliary'] section, or {} when the Hermes
     runtime is unavailable (degrades to no derivable aux selectors)."""
-    try:
-        from hermes_cli.config_defaults import DEFAULT_CONFIG as _installed
-        aux = _installed.get("auxiliary", {})
-    except Exception:
+    defaults = _installed_default_config()
+    aux = defaults.get("auxiliary", {}) if defaults else {}
+    if not isinstance(aux, dict) or not aux:
         _record_inventory_warning(
             "installed auxiliary task defaults unavailable; built-in auxiliary "
             "slots are hidden until the runtime defaults import succeeds")
         return {}
-    return aux if isinstance(aux, dict) else {}
+    return aux
 
 
 def _aux_placeholder_route() -> Dict[str, Any]:
@@ -293,23 +286,14 @@ def _mirror_layer_route_over_inherited(inherited: Dict[str, Any],
 
 def _layer_route_over_inherited(inherited: Dict[str, Any],
                                 user: Dict[str, Any]) -> Dict[str, Any]:
-    """Read-time layering of a task block over its inherit base — the REAL
-    runtime helper (agent.auxiliary_task_config._layer_over_inherited) whenever
-    it is importable, with the exact-shape mirror as fallback."""
+    """Layer locally; test_inventory_host_data checks parity with Hermes."""
     try:
-        from agent.auxiliary_task_config import _layer_over_inherited as resolved
-    except Exception:
-        _record_inventory_warning(
-            "agent.auxiliary_task_config is unavailable; auxiliary "
-            "inheritance layering uses the exact-shape local mirror")
-        resolved = _mirror_layer_route_over_inherited
-    try:
-        return resolved(inherited, user)
+        return _mirror_layer_route_over_inherited(inherited, user)
     except Exception:
         _record_inventory_warning(
             "runtime auxiliary inheritance layering failed; the exact-shape "
             "local mirror was used for this task")
-        return _mirror_layer_route_over_inherited(inherited, user)
+        return dict(user) if isinstance(user, dict) else {}
 
 
 def _aux_effective_route(cfg: Dict[str, Any], task_key: str,
@@ -357,26 +341,106 @@ def _aux_effective_route(cfg: Dict[str, Any], task_key: str,
     return {**_aux_placeholder_route(), **base, **copy.deepcopy(user_block)}
 
 
-def _plugin_aux_entries_from_runtime() -> Dict[str, Dict[str, Any]]:
-    """Plugin-registered auxiliary task entries for the Hermes home active in
-    the current context (hermes_cli.plugins.get_plugin_auxiliary_tasks, whose
-    manager keys on the context-local home). Callers that inventory a specific
-    profile MUST scope that profile's home so profile B's rows come from B's
-    plugins, never the process-active profile's. Fail-closed on unreadable
-    state: the failure is RECORDED as a per-build warning (sanitized — no raw
-    exception text); the DTO reports it rather than rendering a false
-    'no plugins registered'."""
-    try:
-        from hermes_cli.plugins import get_plugin_auxiliary_tasks
-        entries = list(get_plugin_auxiliary_tasks())
-    except Exception:
-        _record_inventory_warning(
-            "plugin auxiliary task discovery failed; plugin-registered "
-            "auxiliary rows are hidden until discovery succeeds")
+_HOST_AUX_MISSING_WARNING = (
+    "host auxiliary data was not supplied; plugin-registered auxiliary rows "
+    "are hidden")
+_HOST_AUX_MALFORMED_WARNING = (
+    "host auxiliary payload was malformed; plugin-registered auxiliary rows "
+    "are hidden")
+_HOST_AUX_ROW_MALFORMED_WARNING = (
+    "host auxiliary payload contained a malformed row; that plugin-registered "
+    "auxiliary row is hidden")
+
+# Fields of the host's ``effective`` route that may enrich a row's display.
+_HOST_EFFECTIVE_FIELDS = ("provider", "model", "base_url")
+
+
+def _host_aux_entries(host_aux: Any) -> Dict[str, Dict[str, Any]]:
+    """Plugin-registered auxiliary task entries derived from the HOST auxiliary
+    payload — the JSON body of ``GET /api/model/auxiliary?profile=<p>``:
+
+        {"tasks": [{task, provider, model, base_url, reasoning_effort,
+                    local_endpoint, label?, hint?, plugin?, inherit_from?,
+                    effective?}], "main": {provider, model}}
+
+    The host owns plugin discovery and profile scoping (its router resolves
+    both inside the request's profile scope), so a row with a non-empty
+    ``plugin`` IS a plugin-registered task for that profile. Rows are mapped to
+    the entry shape the old in-process registry returned (``key`` = task,
+    ``display_name`` = label, ``description`` = hint, ``plugin``,
+    ``inherit_from``), plus the host's ``effective`` route as a DISPLAY
+    enrichment — stored values still come from the raw config.
+
+    Fail-closed, never silent: a missing payload (``None``) means plugin rows
+    are HIDDEN with a warning; a malformed one hides them with a different
+    warning. Neither ever renders as a truthful-looking "no plugins
+    registered".
+    """
+    if host_aux is None:
+        _record_inventory_warning(_HOST_AUX_MISSING_WARNING)
         return {}
-    return {e.get("key"): dict(e) for e in entries
-            if isinstance(e, dict) and isinstance(e.get("key"), str) and e.get("key")
-            and e.get("key") != _JUDGE_OWNED_AUX_KEY}
+    tasks = host_aux.get("tasks") if isinstance(host_aux, dict) else None
+    if not isinstance(tasks, list):
+        _record_inventory_warning(_HOST_AUX_MALFORMED_WARNING)
+        return {}
+    entries: Dict[str, Dict[str, Any]] = {}
+    for row in tasks:
+        if not isinstance(row, dict):
+            _record_inventory_warning(_HOST_AUX_ROW_MALFORMED_WARNING)
+            continue
+        key = row.get("task")
+        # Match Hermes' register_auxiliary_task grammar exactly: a task is one
+        # config key, never a dotted path. Do not repair/strip invalid input;
+        # str.isalnum() intentionally allows the host's Unicode alphanumerics.
+        if not (isinstance(key, str) and key
+                and all(c.isalnum() or c == "_" for c in key)):
+            _record_inventory_warning(_HOST_AUX_ROW_MALFORMED_WARNING)
+            continue
+        plugin = row.get("plugin")
+        if plugin is None or plugin == "":
+            # A built-in row: already derived from the installed defaults (the
+            # host labels those client-side), so it is never a plugin slot.
+            continue
+        if not isinstance(plugin, str):
+            _record_inventory_warning(_HOST_AUX_ROW_MALFORMED_WARNING)
+            continue
+        # Only plugin-owned rows become plugin slots.
+        if not plugin.strip():
+            continue
+        entry: Dict[str, Any] = {
+            "key": key,
+            "display_name": str(row.get("label") or "").strip() or key,
+            "description": str(row.get("hint") or ""),
+            "plugin": plugin.strip(),
+        }
+        inherit = row.get("inherit_from")
+        if isinstance(inherit, str) and inherit.strip():
+            entry["inherit_from"] = inherit.strip()
+        effective = row.get("effective")
+        if isinstance(effective, dict):
+            fields = {name: effective[name] for name in _HOST_EFFECTIVE_FIELDS
+                      if isinstance(effective.get(name), str)}
+            if fields:
+                entry["effective"] = fields
+        entries[entry["key"]] = entry
+    return entries
+
+
+def _host_effective_overlay(effective: Any,
+                            entry: Optional[Dict[str, Any]]) -> Any:
+    """Enrich a computed effective route with the host's resolved ``effective``
+    route (an inheriting plugin row carries it). Display-only enrichment: the
+    STORED values still come from the raw config, and an empty host field (the
+    host's "unset" placeholder) never erases a resolved value."""
+    if not isinstance(effective, dict) or not isinstance(entry, dict):
+        return effective
+    host_effective = entry.get("effective")
+    if not isinstance(host_effective, dict):
+        return effective
+    overlay = {name: value for name, value in host_effective.items()
+               if name in _HOST_EFFECTIVE_FIELDS
+               and isinstance(value, str) and value}
+    return {**effective, **overlay} if overlay else effective
 
 
 def _entries_by_key_map(entries: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -441,8 +505,7 @@ def _aux_inherit_cycle(task: str, inherit: str,
 
 
 def _aux_observation_source(cfg: Dict[str, Any], task: str,
-                            entries_by_key: Mapping[str, Dict[str, Any]],
-                            obs_source: str) -> Optional[str]:
+                            entries_by_key: Mapping[str, Dict[str, Any]]) -> Optional[str]:
     """Return ``"inherited"`` when an UNPINNED plugin task resolves through its
     declared ``inherit_from`` base; else ``None`` (keep the stored source).
 
@@ -488,14 +551,13 @@ def _aux_observation(cfg: Dict[str, Any], desc: SlotDescriptor,
     unpinned task following a declared base reports source 'inherited' so the UI
     shows the provider/model the runtime uses."""
     obs = _obs(cfg, desc)
-    # Only auxiliary SELECTOR rows (built-in or plugin-registered) reach here;
-    # the openrouter scalar row is added directly by build_inventory, so no
-    # dead "is this the scalar?" comparison exists.
+    # Only auxiliary selector rows reach here.
     task = desc.slot_id.split(".", 1)[1]
     if task not in selector_keys and task not in entries_by_key:
         return obs  # rows without selector semantics
     effective = _aux_effective_route(cfg, task, entries_by_key)
-    source = _aux_observation_source(cfg, task, entries_by_key, obs.source)
+    effective = _host_effective_overlay(effective, entries_by_key.get(task))
+    source = _aux_observation_source(cfg, task, entries_by_key)
     if source is None:
         return replace(obs, effective=effective)
     return replace(obs, effective=effective, source=source)
@@ -531,7 +593,9 @@ _SPEECH_FALLBACK_BACKEND = {"stt": "local", "tts": "edge"}
 
 def _speech_default_backend(cfg: Dict[str, Any], section: str) -> str:
     """How the runtime resolves section.provider when unset (a stored pick
-    wins; unset = autodetect that defaults to 'local' STT / 'edge' TTS)."""
+    wins; unset = the runtime default backend: autodetect -> 'local' STT,
+    'edge' TTS). Read from the public DEFAULT_CONFIG seam, with the local
+    fallback constants as the floor."""
     settings = cfg.get(section) if isinstance(cfg, dict) else None
     if isinstance(settings, dict):
         stored = settings.get("provider")
@@ -539,16 +603,11 @@ def _speech_default_backend(cfg: Dict[str, Any], section: str) -> str:
             return stored.strip()
     fallback = _SPEECH_FALLBACK_BACKEND.get(section, "")
     if section == "stt":
-        try:
-            from tools.transcription_common import DEFAULT_PROVIDER as resolved
-            return str(resolved)
-        except Exception:
-            return fallback
-    try:
-        from hermes_cli.config_defaults import DEFAULT_CONFIG as _installed
-        resolved = _installed.get("tts", {}).get("provider")
-    except Exception:
-        resolved = None
+        # tools/transcription_common.DEFAULT_PROVIDER == 'local' (private
+        # module): the local constant is the whole contract we need.
+        return fallback
+    tts = _installed_default_config().get("tts")
+    resolved = tts.get("provider") if isinstance(tts, dict) else None
     return str(resolved or fallback)
 
 
@@ -665,15 +724,20 @@ _UNSUPPORTED_SPECIALIST_SLOTS = (
 
 
 def _build_inventory_impl(cfg: Dict[str, Any],
-                          plugin_aux_entries: Optional[Iterable[Dict[str, Any]]] = None
+                          plugin_aux_entries: Optional[Iterable[Dict[str, Any]]] = None,
+                          *, host_aux: Optional[dict] = None
                           ) -> List[SlotObservation]:
     """Typed inventory of every supported slot family, including unset slots.
 
-    ``plugin_aux_entries`` overrides plugin auxiliary-task discovery; None
-    discovers through hermes_cli.plugins.get_plugin_auxiliary_tasks().
+    ``plugin_aux_entries`` overrides plugin auxiliary-task discovery outright
+    (tests/DI). Otherwise plugin tasks come from the HOST ``host_aux`` payload;
+    ``host_aux is None`` means the host supplied no auxiliary data, so plugin
+    rows are hidden WITH a warning (never a false "no plugins registered").
     """
-    entries_by_key = (_plugin_aux_entries_from_runtime() if plugin_aux_entries is None
-                      else _entries_by_key_map(plugin_aux_entries))
+    if plugin_aux_entries is None:
+        entries_by_key = _entries_by_key_map(_host_aux_entries(host_aux).values())
+    else:
+        entries_by_key = _entries_by_key_map(plugin_aux_entries)
     out: List[SlotObservation] = []
     add = out.append
 
@@ -727,8 +791,8 @@ def _build_inventory_impl(cfg: Dict[str, Any],
     # Plugin-registered auxiliary tasks (register_auxiliary_task): the same
     # auxiliary contract, plus optional metadata and declared inheritance.
     for key in sorted(entries_by_key):
-        if key in aux_selector_keys or key in _AUX_DISALLOWED_TASK_KEYS:
-            continue  # a plugin never shadows a built-in selector or a scalar
+        if key in aux_selector_keys:
+            continue  # a plugin never shadows a built-in selector
         entry = entries_by_key[key]
         metadata = {
             "label": str(entry.get("display_name") or key),
@@ -804,14 +868,16 @@ def _build_inventory_impl(cfg: Dict[str, Any],
 
 
 def build_inventory(cfg: Dict[str, Any],
-                    plugin_aux_entries: Optional[Iterable[Dict[str, Any]]] = None
+                    plugin_aux_entries: Optional[Iterable[Dict[str, Any]]] = None,
+                    *, host_aux: Optional[dict] = None
                     ) -> InventoryResult:
     """Typed inventory of every supported slot family, including unset slots.
 
-    ``plugin_aux_entries`` overrides plugin auxiliary-task discovery; None
-    discovers through hermes_cli.plugins.get_plugin_auxiliary_tasks() for the
-    Hermes home active in the current context (scope the home to inventory a
-    specific profile).
+    ``host_aux`` is the HOST auxiliary payload (the JSON body of
+    ``GET /api/model/auxiliary?profile=<p>``) for the profile being
+    inventoried; plugin-registered task rows come from it. ``None`` (no host
+    data) hides plugin rows and records a warning. ``plugin_aux_entries``
+    overrides discovery outright (tests/DI).
 
     Returns an ``InventoryResult`` — a ``list`` subclass, so existing
     ``build_inventory`` callers are unchanged — whose ``warnings`` carry the
@@ -820,7 +886,9 @@ def build_inventory(cfg: Dict[str, Any],
     warnings: List[str] = []
     token = _BUILD_WARNINGS.set(warnings)
     try:
-        return InventoryResult(_build_inventory_impl(cfg, plugin_aux_entries), warnings)
+        return InventoryResult(
+            _build_inventory_impl(cfg, plugin_aux_entries, host_aux=host_aux),
+            warnings)
     finally:
         _BUILD_WARNINGS.reset(token)
 
@@ -882,10 +950,6 @@ def _is_route_payload(value: Any) -> bool:
     return isinstance(value, dict) and "model" in value
 
 
-def _is_chain_payload(value: Any) -> bool:
-    return isinstance(value, dict) and "chain" in value
-
-
 def _shape_refusal(slot_id: str, current: Any, new_stored: Any) -> Optional[str]:
     """Refuse to change a stored value's container shape (e.g. a list replaced
     by a scalar route dict — the MoA reference_models failure mode)."""
@@ -945,12 +1009,38 @@ def _bad_chain_entry(chain: List[Any]) -> Optional[str]:
     return None
 
 
+def _moa_preset_names(cfg: Dict[str, Any],
+                      host_moa: Optional[dict] = None) -> Optional[frozenset]:
+    """Preset names ``moa.default_preset`` may select, or ``None`` (unavailable).
+
+    The HOST MoA payload (``GET /api/model/moa?profile=<p>``) is authoritative
+    when it carries a ``presets`` mapping — the host normalizes defaults the raw
+    document may not spell out. Otherwise the raw ``cfg['moa']['presets']``
+    mapping decides; with neither there is no catalog to validate against.
+    """
+    if isinstance(host_moa, dict):
+        presets = host_moa.get("presets")
+        if isinstance(presets, dict):
+            return frozenset(str(name) for name in presets)
+    moa = cfg.get("moa") if isinstance(cfg, dict) else None
+    presets = moa.get("presets") if isinstance(moa, dict) else None
+    if isinstance(presets, dict):
+        return frozenset(str(name) for name in presets)
+    return None
+
+
 def preview_changes(cfg: Dict[str, Any], edits: List[RouteEdit],
-                    plugin_aux_entries: Optional[Iterable[Dict[str, Any]]] = None) -> ChangePreview:
+                    plugin_aux_entries: Optional[Iterable[Dict[str, Any]]] = None,
+                    *, host_aux: Optional[dict] = None,
+                    host_moa: Optional[dict] = None) -> ChangePreview:
     """Deterministic before/after preview. Validates first; any rejected edit
-    fails the whole preview (invalid preflight performs no writes)."""
+    fails the whole preview (invalid preflight performs no writes).
+
+    ``host_aux`` / ``host_moa`` are the host payloads for the profile being
+    previewed (see ``build_inventory`` / ``_moa_preset_names``)."""
     inventory = {obs.descriptor.slot_id: obs
-                 for obs in build_inventory(cfg, plugin_aux_entries=plugin_aux_entries)}
+                 for obs in build_inventory(cfg, plugin_aux_entries=plugin_aux_entries,
+                                            host_aux=host_aux)}
     rejected: List[str] = []
     accepted: List[Tuple[str, SlotDescriptor, Any]] = []
 
@@ -992,10 +1082,8 @@ def preview_changes(cfg: Dict[str, Any], edits: List[RouteEdit],
                 rejected.append(model_refusal)
                 continue
         if desc.storage_path == "moa.default_preset" and isinstance(edit.value, dict):
-            try:
-                from hermes_cli.moa_config import normalize_moa_config
-                names = normalize_moa_config(cfg.get("moa"))["presets"]
-            except (ImportError, KeyError, TypeError):
+            names = _moa_preset_names(cfg, host_moa)
+            if names is None:
                 rejected.append(f"{edit.slot_id}: runtime preset catalog unavailable")
                 continue
             if edit.value.get("model") not in names:

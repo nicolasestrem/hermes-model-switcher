@@ -118,6 +118,56 @@ test("a recovery_required apply shows descriptive failure copy, not a raw catego
   });
 });
 
+// GUARD for the round-2 no-write fix (PR #17): broadening the
+// finished-with-issues whitelist to the host's decided no-write categories
+// must not weaken recovery. A recovery_required outcome — an ambiguous or
+// landed write (write_verification_failed here, external_edit on a
+// conflicted undo) — still shows the recovery banner and keeps Preview/Apply
+// blocked until the operation is recovered.
+test("a recovery_required apply keeps the recovery gate: banner shown, Preview and Apply blocked", async ({ page }) => {
+  await withFlags(page, { rollbackMode: "recovery_required" }, async () => {
+    await open(page);
+    await applyFastLane(page);
+    await expect(page.getByTestId("operation-failure")).toHaveAttribute("data-failure-category", "write_verification_failed");
+    await expect(page.getByTestId("operation-failure")).toContainText("final state: recovery_required");
+
+    // The recovery banner — outside the drawer — is the way out, not a fresh
+    // review.
+    await expect(page.getByTestId("recover-operation")).toBeVisible();
+    await page.getByRole("button", { name: "Close operation drawer", exact: true }).click();
+    await expect(page.getByTestId("recover-operation")).toBeVisible();
+
+    // A preset review is refused while recovery is needed: no preview panel
+    // comes back, and Apply stays down. (The reviewed-preset banner from the
+    // pre-failure review may persist — the review itself is what is refused.)
+    await page.getByRole("button", { name: /Fast lane/ }).click();
+    await page.waitForTimeout(500);
+    await expect(page.getByTestId("preview-panel")).toHaveCount(0);
+    await expect(page.getByTestId("apply-preset")).toBeDisabled();
+  });
+});
+
+test("an external-edit undo conflict keeps the recovery gate after the no-write fix", async ({ page }) => {
+  await withFlags(page, { undoConflict: true }, async () => {
+    await open(page);
+    await applyFastLane(page);
+    await expect(page.getByTestId("result-default")).toContainText("Applied + read back");
+
+    await page.getByTestId("undo-guard").check();
+    await page.getByTestId("undo-button").click();
+    await expect(page.getByTestId("operation-failure")).toHaveAttribute("data-failure-category", "external_edit");
+
+    // Recovery banner up, review refused, Apply down — the ambiguous-ownership
+    // categories never join the no-write whitelist.
+    await expect(page.getByTestId("recover-operation")).toBeVisible();
+    await page.getByRole("button", { name: "Close operation drawer", exact: true }).click();
+    await page.getByRole("button", { name: /Fast lane/ }).click();
+    await page.waitForTimeout(500);
+    await expect(page.getByTestId("preview-panel")).toHaveCount(0);
+    await expect(page.getByTestId("apply-preset")).toBeDisabled();
+  });
+});
+
 // NEW (Codex partial-undo finding): a user-requested UNDO where one profile's
 // bytes are restored but another hits a revision conflict. The DTO alone is
 // state/final_state ``recovery_required`` with a ``compensated`` step — which

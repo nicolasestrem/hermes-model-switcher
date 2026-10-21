@@ -1,17 +1,9 @@
-"""Reviewed presets and billing approval policy (T5).
+"""Reviewed route assignments with explicit billing approval.
 
-A saved preset is a *reviewed* intent: exact profile identities, route
-assignments, slot families and a billing policy. Subsequent Apply is
-one click — no confirmation modal — but preflight still runs on every
-click and blocks (never silently substitutes) when:
-  - a preset target profile is missing credentials,
-  - a route's cost class is unknown,
-  - the preset's billing policy does not approve a route's cost class,
-  - a cost class changed after review (unapproved change),
-  - a new profile exists that is not in the frozen review set (it never
-    silently joins; it appears as not-included until reviewed).
-
-All blocking happens BEFORE any write: preflight is pure.
+Preflight is pure and runs before every apply. Missing credentials, unapproved
+or changed cost classes, and unreviewed profiles block. Unknown costs require
+explicit approval. Saved profile identities and slot intent never auto-expand;
+host execution metadata is re-derived rather than trusted from stored presets.
 """
 from __future__ import annotations
 
@@ -33,12 +25,25 @@ class PresetBlocked(RuntimeError):
 
 @dataclass
 class RouteTarget:
-    """One route assignment inside a preset."""
+    """One route assignment inside a preset.
+
+    ``executor`` names HOW the assignment is applied: ``"backend"`` (written
+    here through the canonical save) or ``"host"`` (the browser performs one
+    public Hermes host call and the engine verifies the store afterwards).
+    ``host_call`` / ``readback_keys`` / ``allowed_prefixes`` describe a host
+    step and are always re-derived from the reviewed intent, never trusted
+    from a stored preset.
+    """
     profile: str
     store_kind: str            # config | cron | plugin
     path: str                  # file path of the owning store
     changes: Dict[str, Any]    # dotted storage path -> value
     cost_class: str            # one of ALL_COST_CLASSES at review time
+    executor: str = "backend"  # backend | host
+    host_call: Optional[Dict[str, Any]] = None
+    readback_keys: Optional[List[str]] = None
+    allowed_prefixes: Optional[List[str]] = None
+    warnings: List[str] = field(default_factory=list)
 
 
 @dataclass

@@ -18,17 +18,24 @@
   --hms-surface: var(--background, var(--surface-color, #1b1e24));
   --hms-border: var(--color-border, var(--border-color, #3a3f48));
   --hms-radius: 6px;
+  /* Host semantic tokens win. For hosts supplying only the foreground/surface
+     pair, tint the established fallback toward text so light surfaces remain
+     readable too. Undefined --midground preserves the legacy fallbacks. */
+  --hms-danger-text: color-mix(in srgb, #e5534b 65%, var(--midground));
+  --hms-success-text: color-mix(in srgb, #3fb950 50%, var(--midground));
+  --hms-warning-text: color-mix(in srgb, #d29922 50%, var(--midground));
 
   color: var(--midground, var(--text-color, #e6e8ee));
   font-size: 14px;
   line-height: 1.5;
   min-width: 0;
+  padding: 16px;
   overflow-wrap: anywhere;
   font-variant-numeric: tabular-nums;
 }
 
 .hms-root .hms-page-header {
-  margin-bottom: 24px;
+  margin-bottom: 16px;
 }
 
 .hms-root .hms-page-header h2 {
@@ -42,12 +49,16 @@
   margin: 0 0 16px;
 }
 
+.hms-root .hms-workspace-tools > .hms-note {
+  flex-basis: 100%;
+}
+
 .hms-root .hms-workspace-tools {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 12px;
   align-items: center;
-  padding: 12px 0 16px;
+  padding: 8px 0 12px;
   margin-bottom: 16px;
   border-bottom: 1px solid var(--hms-border);
 }
@@ -107,16 +118,16 @@
   vertical-align: middle;
 }
 
-.hms-root button:hover:not(:disabled) {
+.hms-root button:hover:not(:disabled):not([aria-disabled="true"]) {
   border-color: var(--hms-accent);
 }
 
-.hms-root button:active:not(:disabled) {
+.hms-root button:active:not(:disabled):not([aria-disabled="true"]) {
   border-color: currentColor;
 }
 
 .hms-root .hms-preview,
-.hms-root .hms-apply:not(:disabled),
+.hms-root .hms-apply:not(:disabled):not([aria-disabled="true"]),
 .hms-root .hms-apply-preset:not(:disabled) {
   border-color: var(--hms-accent);
   font-weight: 600;
@@ -224,16 +235,6 @@
   min-width: 0;
 }
 
-/* Human-readable state badges — text-backed semantics, colour is support only */
-.hms-root .hms-badge {
-  display: inline-block;
-  padding: 1px 8px;
-  border: 1px solid var(--hms-border);
-  border-radius: 999px;
-  font-size: 13px;
-  line-height: 1.6;
-  white-space: nowrap;
-}
 
 /* Inline explanatory notes (read-only reasons, hidden-selection counts) */
 .hms-root .hms-note {
@@ -241,11 +242,20 @@
   font-size: 13px;
 }
 
+/* A disabled Undo states its reason in place — plain text, never a control.
+   Warning for a state with nothing to undo; danger for recovery_required. */
+.hms-root .hms-note.hms-undo-note {
+  margin: 8px 0 0;
+  color: var(--warning-color, var(--hms-warning-text, #d29922));
+}
+.hms-root .hms-note.hms-undo-note[data-tone="danger"] {
+  color: var(--danger-color, var(--hms-danger-text, #e5534b));
+}
+
 /* Removal disclosure reads as advanced, but its controls stay reachable */
 .hms-root details[data-testid="removal-advanced"] {
-  border: 1px solid var(--hms-border);
-  border-radius: var(--hms-radius);
-  padding: 6px 10px;
+  padding: 0;
+  margin-top: 8px;
 }
 
 .hms-root details[data-testid="removal-advanced"] summary {
@@ -265,9 +275,9 @@
 }
 
 .hms-root .hms-profile-scope {
-  flex-basis: 100%;
+  grid-column: 1 / -1;
   min-width: 0;
-  padding: 12px;
+  padding: 8px;
   border: 1px solid var(--hms-border);
   border-radius: var(--hms-radius);
 }
@@ -314,11 +324,27 @@
   border: 1px solid var(--hms-border);
   border-radius: var(--hms-radius);
   margin-top: 8px;
+  overflow-x: scroll; /* Keep the native horizontal scroll affordance. */
+  scrollbar-gutter: stable;
+}
+
+/* Let the table grow rather than squeezing human-readable target labels. */
+.hms-root [data-testid="matrix-scroll"] [data-column="slot"] {
+  min-width: 160px;
+}
+
+.hms-root [data-testid="matrix-scroll"] [data-column="family"] {
+  min-width: 176px;
+}
+
+.hms-root [data-testid="matrix-scroll"] [data-column="state"] {
+  min-width: 112px;
 }
 
 /* Preserve readable route columns while the narrow viewport scrolls the table. */
 .hms-root [data-testid="matrix-scroll"] table {
   min-width: 850px;
+  font-size: 14px;
 }
 
 .hms-root td,
@@ -333,13 +359,16 @@
   overflow-wrap: anywhere;
 }
 
-.hms-root td[data-column="configured"] {
+.hms-root [data-testid="matrix-scroll"] td[data-column="configured"],
+.hms-root [data-testid="matrix-scroll"] td[data-column="observed"] {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  min-width: 160px;
-  overflow-wrap: anywhere;
+  min-width: 240px;
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 
 .hms-root tr[data-selected="true"] {
+  background: color-mix(in srgb, var(--hms-accent) 12%, var(--hms-surface));
   outline: 1px solid var(--hms-accent);
   outline-offset: -1px;
 }
@@ -353,6 +382,8 @@
 
 .hms-root [data-testid="profile-options"] label {
   padding: 4px;
+  min-height: 38px;
+  align-items: center;
   overflow-wrap: anywhere;
 }
 
@@ -366,9 +397,10 @@
   padding: 0 6px;
   border: 1px solid var(--hms-border);
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 600;
-  line-height: 18px;
+  line-height: 1.5;
+  white-space: nowrap;
 }
 
 /* ---------- Route dropdowns (native selects) ---------- */
@@ -393,8 +425,7 @@
 }
 
 .hms-root .hms-route-exact {
-  padding-left: 12px;
-  border-left: 2px solid var(--hms-border);
+  padding-inline-start: 8px;
   font-weight: 400;
   font-size: 13px;
 }
@@ -416,8 +447,9 @@
 
 .hms-root .hms-catalog-tools {
   display: grid;
-  gap: 6px;
-  padding-top: 6px;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 16px;
   border-top: 1px solid var(--hms-border);
 }
 
@@ -431,7 +463,7 @@
 .hms-root .hms-catalog-freshness {
   display: grid;
   gap: 4px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
 
@@ -453,7 +485,6 @@
 @media (max-width: 480px) {
   .hms-root .hms-page-header { margin-bottom: 16px; }
   .hms-root .hms-workspace-tools .hms-note { flex-basis: 100%; }
-  .hms-root .hms-filter { flex-basis: 100%; }
   .hms-root .hms-preset { width: 100%; text-align: left; }
   .hms-root [data-testid="action-surface"] { padding: 12px; }
 }
@@ -501,7 +532,7 @@
 
 .hms-root .hms-catalog-heading .hms-note {
   margin: 4px 0 0;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .hms-root .hms-catalog-actions {
@@ -510,7 +541,7 @@
 
 .hms-root .hms-catalog-provenance {
   margin: 0;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
 
@@ -545,13 +576,11 @@
 
 .hms-root .hms-catalog-summary > div {
   min-width: 0;
-  border: 1px solid var(--hms-border);
-  border-radius: var(--hms-radius);
-  padding: 8px 10px;
+  padding: 4px 0;
 }
 
 .hms-root .hms-catalog-summary dt {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
 
@@ -564,7 +593,7 @@
 
 .hms-root .hms-catalog-summary dd span {
   display: block;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 400;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
@@ -572,15 +601,15 @@
 .hms-root .hms-catalog-pending-note,
 .hms-root .hms-catalog-notices p {
   margin: 0;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
 
 .hms-root .hms-catalog-notices {
   display: grid;
-  gap: 2px;
-  border-left: 3px solid var(--hms-border);
-  padding-left: 8px;
+  gap: 4px;
+  border-top: 1px solid var(--hms-border);
+  padding-top: 8px;
 }
 
 .hms-root .hms-catalog-controls {
@@ -598,7 +627,7 @@
   flex: 1 1 260px;
   display: grid;
   gap: 4px;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .hms-root .hms-catalog-search input {
@@ -614,13 +643,13 @@
 
 .hms-root .hms-catalog-toggles button[aria-pressed="true"] {
   border-color: var(--hms-accent);
-  box-shadow: inset 0 0 0 1px var(--hms-accent);
+  font-weight: 600;
 }
 
 .hms-root .hms-catalog-sort {
   display: grid;
   gap: 4px;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .hms-root .hms-catalog-sort select {
@@ -633,7 +662,7 @@
   border: 1px solid var(--hms-border);
   border-radius: var(--hms-radius);
   overscroll-behavior: contain;
-  scroll-behavior: smooth;
+  scroll-behavior: auto;
 }
 
 .hms-root .hms-catalog-scroll:focus-visible {
@@ -678,7 +707,7 @@
 
 .hms-root .hms-catalog-model-id {
   display: block;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
   overflow-wrap: anywhere;
 }
@@ -689,7 +718,7 @@
   padding: 0 6px;
   border: 1px solid var(--hms-border);
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
 
@@ -715,12 +744,12 @@
 }
 
 .hms-root .hms-catalog-group-head code {
-  font-size: 11px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
 
 .hms-root .hms-catalog-group-head > span {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
 
@@ -728,7 +757,7 @@
 .hms-root .hms-catalog-unavailable {
   display: block;
   margin-top: 4px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
   overflow-wrap: anywhere;
 }
@@ -744,7 +773,7 @@
 }
 
 .hms-root .hms-catalog-included {
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .hms-root .hms-catalog-unknown {
@@ -756,13 +785,13 @@
   display: block;
   margin-top: 4px;
   max-width: 190px;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--text-muted-color, var(--midground, #9aa1ad));
 }
 
 .hms-root .hms-catalog-no-models {
   color: var(--text-muted-color, var(--midground, #9aa1ad));
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .hms-root .hms-catalog-panel {
@@ -776,8 +805,8 @@
   font-size: 13px;
 }
 
-.hms-root .hms-catalog-panel[data-kind="error"] {
-  border-left: 4px solid var(--hms-accent);
+.hms-root .hms-catalog-panel[data-kind="error"] strong {
+  color: var(--danger-color, var(--hms-danger-text, #e5534b));
 }
 
 @media (max-width: 768px) {
@@ -815,3 +844,140 @@
   }
 }
 
+
+/* Compact form rhythm and native filter grid: no focus-order changes. */
+.hms-root .hms-page-header p { margin-bottom: 0; }
+
+.hms-root .hms-editor-guidance {
+  margin: 0 0 16px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+.hms-root [data-testid="change-editor"][data-empty="true"] .hms-editor-guidance {
+  color: inherit;
+  font-weight: 600;
+}
+
+.hms-root [data-testid="change-editor"][data-empty="true"] .hms-editor-fields > label,
+.hms-root [data-testid="change-editor"][data-empty="true"] .hms-route-field {
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+  font-weight: 400;
+}
+
+.hms-root .hms-cost-relevance,
+.hms-root .hms-readonly {
+  display: block;
+}
+
+.hms-root .hms-editor-fields {
+  display: grid;
+  gap: 8px;
+}
+
+.hms-root [data-testid="change-editor"] .hms-section-description {
+  margin-bottom: 8px;
+}
+
+.hms-root .hms-matrix-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(130px, 100%), 1fr));
+  align-items: end;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.hms-root .hms-filter input,
+.hms-root .hms-filter select { margin-top: 0; }
+
+.hms-root .hms-matrix-filters > button { align-self: end; }
+
+.hms-root .hms-cost-ack {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding-block: 0;
+  margin-top: 16px;
+}
+
+.hms-root .hms-cost-ack > input[type="checkbox"] {
+  flex: 0 0 auto;
+  margin: 3px 0 0;
+}
+
+.hms-root .hms-preview-panel {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hms-border);
+}
+
+.hms-root [data-testid="profile-filter"] input[type="text"],
+.hms-root [data-testid="profile-filter"] input:not([type]) { flex: 1 1 160px; }
+
+.hms-root button[aria-pressed="true"] {
+  border-color: var(--hms-accent);
+  font-weight: 600;
+}
+
+.hms-root summary:hover { text-decoration: underline; text-underline-offset: 3px; }
+.hms-root summary:active { color: var(--hms-accent); }
+
+@media (min-width: 600px) {
+  .hms-root .hms-workspace:not(.hms-wide) .hms-route-picks {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+  .hms-root .hms-workspace:not(.hms-wide) .hms-route-status,
+  .hms-root .hms-workspace:not(.hms-wide) .hms-route-summary {
+    grid-column: 1 / -1;
+  }
+}
+
+/* Public host seams — DESIGN §5; flat, token-paired, no decorative motion. */
+.hms-root .hms-confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--foreground, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+}
+.hms-root .hms-confirm {
+  background: var(--hms-surface);
+  color: var(--midground, var(--text-color, #e6e8ee));
+  border: 1px solid var(--hms-border);
+  border-radius: var(--hms-radius);
+  padding: 16px;
+  max-width: 520px;
+  width: calc(100% - 32px);
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+.hms-root .hms-confirm h3 { margin: 0 0 8px; font-size: 16px; }
+.hms-root .hms-confirm p { margin: 0 0 12px; white-space: pre-wrap; }
+.hms-root .hms-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.hms-root .hms-apply-progress {
+  border: 1px solid var(--hms-border);
+  border-radius: var(--hms-radius);
+  padding: 8px;
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+.hms-root .hms-apply-progress [data-step-status="applied"] { color: var(--success-color, var(--hms-success-text, #3fb950)); }
+.hms-root .hms-apply-progress [data-step-status="failed"],
+.hms-root .hms-apply-progress [data-step-status="recovery_required"] { color: var(--danger-color, var(--hms-danger-text, #e5534b)); }
+.hms-root .hms-apply-progress [data-step-status="compensated"],
+.hms-root .hms-apply-progress [data-step-status="conflict"],
+.hms-root .hms-apply-progress [data-step-status="awaiting_host"],
+.hms-root .hms-apply-progress [data-step-status="confirm"],
+.hms-root .hms-host-notice:not([data-state="loading"]) { color: var(--warning-color, var(--hms-warning-text, #d29922)); }
+.hms-root .hms-host-notice[data-state="loading"] { color: var(--text-muted-color, #9aa1ad); }
+.hms-root button[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+@media (prefers-reduced-motion: reduce) {
+  .hms-root .hms-confirm, .hms-root .hms-confirm-backdrop, .hms-root .hms-apply-progress {
+    transition: none;
+    animation: none;
+    scroll-behavior: auto;
+  }
+}

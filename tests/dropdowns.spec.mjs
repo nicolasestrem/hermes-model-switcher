@@ -46,8 +46,9 @@ test("catalog loads lazily on first dropdown interaction, once, and lists truthf
   await expect(providerSelect(page).locator('option[value="nous"]')).toHaveCount(1);
   const requests = await catalogRequests(page);
   expect(requests.length).toBe(1);
-  expect(requests[0].search).toContain("profileId=default");
-  expect(requests[0].search).not.toContain("refresh=");
+  expect(requests[0].method).toBe("POST");
+  expect(requests[0].body.profile).toBe("default");
+  expect(requests[0].body.refresh).toBeUndefined();
   await expect(page.getByTestId("live-status")).toContainText("15 models available, 12 priced");
 
   // Label (slug); authenticated providers first, alphabetical; sign-in last + disabled.
@@ -76,7 +77,7 @@ test("catalog line is one compact summary; freshness detail stays collapsed; Ref
   const summary = page.getByTestId("catalog-summary");
   await expect(summary).toContainText("5 providers · 15 models");
   await expect(summary).toContainText("3 stale");
-  await expect(summary).toContainText("scope default");
+  await expect(summary).toContainText("Catalog for profile default");
 
   const details = page.getByTestId("catalog-freshness");
   expect(await details.evaluate((el) => el.tagName)).toBe("DETAILS");
@@ -87,9 +88,9 @@ test("catalog line is one compact summary; freshness detail stays collapsed; Ref
   await expect(page.locator('[data-provider-freshness="opencode-go"]')).toContainText("stale");
 
   await page.getByTestId("refresh-catalog").click();
+  await expect.poll(async () => (await catalogRequests(page)).length).toBe(2);
   const refreshed = await catalogRequests(page);
-  expect(refreshed.length).toBe(2);
-  expect(refreshed[1].search).toContain("refresh=1");
+  expect(refreshed[1].body.refresh).toBe(true);
   await expect(page.locator('[data-provider-freshness="nous"]')).toContainText("2026-10-18T18:00:00Z");
 });
 
@@ -181,7 +182,7 @@ test("typing an exact provider slug fetches /models once, on leaving the field",
   await expect(modelSelect(page).locator("option").first()).toHaveText("Finish the provider slug to list its models");
   await exact.blur();
   await expect.poll(async () => (await modelRequests(page)).length).toBe(1);
-  expect((await modelRequests(page))[0].search).toContain("provider=zhipu");
+  expect((await modelRequests(page))[0].body.provider).toBe("zhipu");
 });
 
 test("uncatalogued model lists fall back to /models with inline error and Retry", async ({ page }) => {
@@ -192,9 +193,10 @@ test("uncatalogued model lists fall back to /models with inline error and Retry"
   const error = page.getByTestId("model-error");
   await expect(error).toContainText("model catalog unavailable: upstream timeout");
   const req = (await modelRequests(page)).at(-1);
-  expect(req.search).toContain("provider=broken-provider");
-  expect(req.search).toContain("profileId=default");
-  expect(req.search).not.toContain("refresh=");
+  expect(req.method).toBe("POST");
+  expect(req.body.provider).toBe("broken-provider");
+  expect(req.body.profile).toBe("default");
+  expect(req.body.refresh).toBeUndefined();
 
   await page.evaluate(() => { window.__mockApi.modelsFail = false; });
   await page.getByTestId("model-retry").click();

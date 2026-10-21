@@ -71,7 +71,7 @@ def test_typed_reasons_are_constants_not_messages():
 def test_apply_409_does_not_echo_store_error_text(hermes_home, monkeypatch):
     """An unreadable store blocks the apply without leaking its path or text."""
     path = _plant_unreadable_store(hermes_home.path)
-    monkeypatch.setattr(plugin_api, "_resolve_apply", lambda body, profiles: [{
+    monkeypatch.setattr(plugin_api, "_resolve_apply", lambda body, profiles, host: [{
         "profile": "default",
         "store_kind": "yaml_config",
         "path": path,
@@ -90,7 +90,7 @@ def test_apply_409_does_not_echo_store_error_text(hermes_home, monkeypatch):
 
 def test_apply_409_does_not_echo_target_repr(hermes_home, monkeypatch):
     """A target missing its store binding must not be echoed as repr(dict)."""
-    monkeypatch.setattr(plugin_api, "_resolve_apply", lambda body, profiles: [{
+    monkeypatch.setattr(plugin_api, "_resolve_apply", lambda body, profiles, host: [{
         "profile": "default",
         "store_kind": "yaml_config",
         # no "path": preflight blocks, and the old message was repr(target)

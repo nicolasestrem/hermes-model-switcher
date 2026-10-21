@@ -15,7 +15,6 @@ const configFiles = [
   join(labHome, "profiles", "research", "config.yaml"),
 ];
 const configBytes = () => configFiles.map((file) => readFileSync(file, "utf8"));
-const catalogRequests = (page) => page.evaluate(() => window.__mockApi?.requests || []);
 
 // Cold uvicorn startup plus the real catalog probe can take longer than the
 // 30s default on a loaded machine.
@@ -32,7 +31,7 @@ async function openReal(page) {
 
 async function openCatalog(page) {
   const responsePromise = page.waitForResponse(
-    (r) => r.url().includes("/catalog") && r.request().method() === "GET");
+    (r) => r.url().endsWith("/catalog") && r.request().method() === "POST");
   await page.getByTestId("catalog-toggle").click();
   const payload = await (await responsePromise).json();
   await expect(page.getByTestId("catalog-view")).toBeVisible();
@@ -65,22 +64,28 @@ test("real catalog: one on-demand fetch, payload-shaped groups/rows, and honest 
       .toHaveCount(provider.models.length);
   }
 
-  // The aggregate catalog is a subset of the provider-scoped /models
-  // passthrough in this lab (the picker can expose extra aliases), so every
-  // catalog id must appear there — the reverse is not required.
+  // Both pure plugin transforms consume the SAME real host options payload.
+  // No private catalog discovery, inference or query-only fallback survives.
   const withModels = payload.providers.find((p) => p.models.length > 0);
   expect(withModels).toBeTruthy();
   const models = await page.evaluate(async (providerId) => {
-    const response = await fetch(
-      `/api/plugins/hermes-model-switcher/models?provider=${encodeURIComponent(providerId)}&profileId=default`);
+    const options = await window.__HERMES_PLUGIN_SDK__.fetchJSON(
+      "/api/model/options?profile=default&include_unconfigured=1");
+    const response = await window.__HERMES_PLUGIN_SDK__.authedFetch(
+      "/api/plugins/hermes-model-switcher/models", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile: "default", provider: providerId, options }),
+      });
     return response.json();
   }, withModels.id);
-  if (models.ok) {
-    const modelIds = new Set(models.models.map((m) => m.id));
-    for (const catalogModel of withModels.models) {
-      expect(modelIds.has(catalogModel.id), catalogModel.id).toBe(true);
-    }
+  expect(models.ok).toBe(true);
+  const modelIds = new Set(models.models.map((m) => m.id));
+  for (const catalogModel of withModels.models) {
+    expect(modelIds.has(catalogModel.id), catalogModel.id).toBe(true);
   }
+  const sdkCalls = await page.evaluate(() => window.__realSdkCalls);
+  expect(sdkCalls.some((r) => r.url.startsWith("/api/model/options?profile=default&"))).toBe(true);
+  expect(requests.some((r) => r.method === "GET" && r.url.includes("/catalog"))).toBe(false);
 
   // Priced rows echo the frozen display strings verbatim.
   if (!payload.cost.pending) {
@@ -94,7 +99,7 @@ test("real catalog: one on-demand fetch, payload-shaped groups/rows, and honest 
     }
   }
 
-  // Unknown is a dash with the never-free explanation — never a number.
+  // Unknown says not published with the never-free explanation — never a number.
   const unknownRows = payload.providers.flatMap((p) => p.models
     .filter((m) => m.pricingStatus === "unknown").map((m) => ({ provider: p.id, model: m.id })));
   await expect(page.locator('[data-model-row][data-pricing-status="unknown"]'))
@@ -102,7 +107,7 @@ test("real catalog: one on-demand fetch, payload-shaped groups/rows, and honest 
   for (const entry of unknownRows.slice(0, 6)) {
     const priceCell = page.locator(
       `[data-model-row][data-provider-id="${entry.provider}"][data-model-id="${entry.model}"] [data-column="input"]`);
-    await expect(priceCell).toHaveText("—");
+    await expect(priceCell).toHaveText("price not published");
     await expect(priceCell.locator(".hms-catalog-unknown"))
       .toHaveAttribute("title", /never treated as free/);
   }
@@ -135,6 +140,10 @@ test("real catalog: one on-demand fetch, payload-shaped groups/rows, and honest 
   await page.getByTestId("catalog-toggle").click();
   await expect(page.getByTestId("catalog-view")).toBeVisible();
   expect(requests.filter((r) => r.url.includes("/catalog"))).toHaveLength(1);
+  const legacy = await page.request.get("http://localhost:8932/api/plugins/hermes-model-switcher/catalog");
+  expect(legacy.status()).toBe(410);
+  expect(await legacy.json()).toEqual({ ok: false, reason: "hostCatalogRequired" });
+  expect(legacy.headers()["cache-control"]).toBe("no-store");
 });
 
 test("real catalog: browsing and Use prefill never change config bytes or send a write", async ({ page }) => {
@@ -163,6 +172,8 @@ test("real catalog: browsing and Use prefill never change config bytes or send a
 
   await page.waitForTimeout(300);
   expect(configBytes()).toEqual(before);
-  expect(requests.filter((r) => r.method === "POST" || r.method === "PUT")).toHaveLength(0);
+  // POST /state and /catalog are read-only host-evidence transforms, not writes.
+  expect(requests.filter((r) => r.method !== "GET" &&
+    !/\/(state|catalog|models)$/.test(r.url))).toHaveLength(0);
   expect(requests.filter((r) => /\/(preview|operations|presets)(\?|$)/.test(r.url))).toHaveLength(0);
 });
