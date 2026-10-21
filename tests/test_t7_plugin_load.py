@@ -38,7 +38,7 @@ def package(tmp_path_factory):
     # package completeness: manifest, IIFE bundle, backend, python modules
     for rel in ("plugin.yaml", "__init__.py", "LICENSE", "README.md",
                 "dashboard/manifest.json", "dashboard/dist/index.js",
-                "dashboard/plugin_api.py",
+                "dashboard/plugin_api.py", "dashboard/model_catalog.py",
                 "python/hermes_adapter.py", "python/route_inventory.py",
                 "python/model_switcher/engine.py"):
         assert (pkg / rel).is_file(), rel
@@ -66,7 +66,6 @@ def test_official_layout_discovered_by_real_seam(installed_plugin):
     assert manifest["entry"] == "dist/index.js"
     assert manifest["api"] == "plugin_api.py"
 
-    sys.path.insert(0, str(REPO))
     from hermes_cli.web_server_dashboard import (
         _discover_dashboard_plugins,
         _safe_plugin_api_relpath,
@@ -82,14 +81,35 @@ def test_official_layout_discovered_by_real_seam(installed_plugin):
     assert _safe_plugin_api_relpath("../plugin_api.py", dashboard_dir=target) is None
 
 
+def _load_isolated_backend(path, name, monkeypatch):
+    """Mirror host import semantics without conftest's repo import shortcuts.
+
+    Hermes registers the module BEFORE exec_module; dataclasses and FastAPI
+    resolve postponed annotations through sys.modules. Omitting registration
+    was a test-harness error, not a package/bootstrap failure.
+    """
+    import importlib.util
+
+    monkeypatch.setattr(sys, "path", [p for p in sys.path
+                                      if p not in (str(REPO / "src"), str(REPO))])
+    for key in list(sys.modules):
+        if key.split(".")[0] in ("model_switcher", "hermes_adapter", "route_inventory"):
+            monkeypatch.delitem(sys.modules, key)
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, mod)
+    spec.loader.exec_module(mod)
+    assert sys.modules[name] is mod
+    return mod
+
+
 def test_installed_backend_module_serves_state(installed_plugin, monkeypatch):
     home, target = installed_plugin
     monkeypatch.setenv("HERMES_HOME", str(home))
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "installed_plugin_api", target / "plugin_api.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    mod = _load_isolated_backend(target / "plugin_api.py", "installed_plugin_api", monkeypatch)
+    assert Path(str(sys.modules["model_switcher.engine"].__file__)).is_relative_to(target.parent / "python")
+    assert Path(str(sys.modules["hermes_adapter"].__file__)).is_relative_to(target.parent / "python")
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     app = FastAPI()
@@ -103,8 +123,23 @@ def test_installed_backend_module_serves_state(installed_plugin, monkeypatch):
     blob = json.dumps(body)
     assert '"providers"' not in blob and '"base_url"' not in blob  # sanitized DTO
 
+    # Also load the packaged pure catalog transform by file path, as the real
+    # backend does (the repository's dashboard package must not mask a missing file).
+    options = {"providers": [{"slug": "lab", "name": "Lab", "models": ["lab-model"],
+                               "authenticated": True, "source": "user-config"}],
+               "provider": "lab", "model": "lab-model"}
+    for route in ("/catalog", "/models"):
+        response = client.post(route, json={"provider": "lab", "options": options})
+        assert response.status_code == 200, response.text
+        assert response.json()["ok"] is True
+        assert "lab-model" in response.text
+        legacy = client.get(route)
+        assert legacy.status_code == 410
+        assert legacy.json() == {"ok": False, "reason": "hostCatalogRequired"}
+    assert Path(str(mod._model_catalog_module().__file__)).parent == target
 
-def test_checkout_layout_loads_the_backend(tmp_path, monkeypatch):
+
+def test_checkout_layout_loads_the_backend(tmp_path, monkeypatch, hermes_home):
     """The documented clone/plain-copy install must load its backend too.
 
     A checkout is a src/ layout — ``model_switcher`` lives under ``src/``, and
@@ -125,23 +160,15 @@ def test_checkout_layout_loads_the_backend(tmp_path, monkeypatch):
     assert (checkout / "src" / "model_switcher").is_dir()
     assert (checkout / "dashboard" / "dist" / "index.js").is_file()
 
-    # Import in isolation: the bootstrap has to work on its own, not because a
-    # previous test (or conftest) already put src/ and the repo root on sys.path.
-    monkeypatch.setattr(sys, "path", [p for p in sys.path
-                                      if p not in (str(REPO / "src"), str(REPO))])
-    for name in [n for n in sys.modules
-                 if n.split(".")[0] in ("model_switcher", "hermes_adapter",
-                                        "route_inventory")]:
-        monkeypatch.delitem(sys.modules, name, raising=False)
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "lab-home"))
-
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "checkout_plugin_api", checkout / "dashboard" / "plugin_api.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    # A lab home must be outside ~/.hermes: a nested tmp_path can resolve the
+    # default profile back to the live root. conftest supplies a safe /tmp home.
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home.path))
+    mod = _load_isolated_backend(checkout / "dashboard" / "plugin_api.py",
+                                 "checkout_plugin_api", monkeypatch)
     assert getattr(mod, "router", None) is not None
     assert mod.__file__.startswith(str(checkout))
+    assert Path(str(sys.modules["model_switcher.engine"].__file__)).is_relative_to(checkout / "src")
+    assert Path(str(sys.modules["hermes_adapter"].__file__)).is_relative_to(checkout)
 
 
 def test_install_uninstall_roundtrip(hermes_home, package):

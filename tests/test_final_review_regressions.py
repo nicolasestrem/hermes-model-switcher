@@ -112,8 +112,8 @@ def test_preview_preparation_race_is_refused_not_adopted(hermes_home, monkeypatc
     tc = _client()
     real = api._changes_to_targets
 
-    def raced(changes, profiles, strict=True):
-        targets, blocked = real(changes, profiles, strict=strict)
+    def raced(changes, profiles, strict=True, host=None):
+        targets, blocked = real(changes, profiles, strict=strict, host=host)
         with open(cfg, "a") as fh:
             fh.write("\nexternal:\n  marker: true\n")  # external writer
         return targets, blocked
@@ -231,8 +231,8 @@ def test_direct_apply_preparation_race_is_refused(hermes_home, monkeypatch):
     tc = _client()
     real = api._changes_to_targets
 
-    def raced(changes, profiles, strict=True):
-        targets, blocked = real(changes, profiles, strict=strict)
+    def raced(changes, profiles, strict=True, host=None):
+        targets, blocked = real(changes, profiles, strict=strict, host=host)
         with open(cfg, "a") as fh:
             fh.write("\nexternal:\n  marker: true\n")
         return targets, blocked
@@ -345,25 +345,35 @@ def test_main_slot_without_provider_never_reports_base_url_as_provider(hermes_ho
     assert "secret-token" not in json.dumps(slot)
 
 
-def test_picker_auth_prefers_an_authenticated_duplicate_row(hermes_home, monkeypatch):
-    """Duplicate picker rows for one slug: an earlier unauthenticated row must
-    not shadow a later authenticated one."""
-    hermes_home.make_profile("alpha")
+def test_picker_auth_prefers_an_authenticated_duplicate_row(hermes_home):
+    """Host options duplicate rows: explicit authentication wins, but it is
+    request/profile-scoped and a later unauthenticated request must block."""
+    cfg = _profile(hermes_home, "alpha")
+    tc = _client()
+    change = {"profileId": "alpha", "slotId": "delegation.model",
+              "action": "set", "to": {"provider": "nous", "model": "hermes-4"}}
 
-    class StubCatalog:
-        @staticmethod
-        def _load_picker_payload(refresh):
-            return {"providers": [
-                {"slug": "nous", "authenticated": False},
-                {"slug": "nous", "authenticated": True},
-            ]}
+    def payload(rows):
+        return {"changes": [change], "host": {"profiles": {
+            "alpha": {"options": {"providers": rows}}}}}
 
-    monkeypatch.setattr(api, "_model_catalog_module", lambda: StubCatalog)
-    assert api._runtime_provider_authenticated("alpha", "nous") is True
-    monkeypatch.setattr(api, "_model_catalog_module", lambda: type(
-        "M", (), {"_load_picker_payload": staticmethod(lambda refresh: {
-            "providers": [{"slug": "nous", "authenticated": False}]})}))
-    assert api._runtime_provider_authenticated("alpha", "nous") is False
+    r = tc.post("/operations", json=payload([
+        {"slug": "nous", "authenticated": False},
+        {"slug": "nous", "authenticated": True},
+    ]))
+    assert r.status_code == 200, r.text
+    assert r.json()["operation"]["state"] == "committed", r.text
+    assert yaml.safe_load(cfg.read_text())["delegation"] == {
+        "provider": "nous", "model": "hermes-4"}
+
+    change["to"]["model"] = "hermes-4-next"
+    before = cfg.read_text()
+    r = tc.post("/operations", json=payload([
+        {"slug": "nous", "authenticated": False},
+    ]))
+    assert r.status_code == 409, r.text
+    assert "missing provider credentials" in r.json()["detail"]["error"]
+    assert cfg.read_text() == before
 
 
 def test_state_chain_entries_are_sanitized(hermes_home):
@@ -452,11 +462,19 @@ def test_speech_backend_switch_binds_new_model_path_and_preserves_voice():
     assert cfg['tts']['elevenlabs']['voice_id'] == 'keep-voice'
 
 
-def test_unknown_provider_is_not_authenticated_by_unrelated_env(hermes_home, monkeypatch):
-    hermes_home.make_profile('alpha', env={'UNRELATED_KEY': 'not-authentication'})
-    monkeypatch.setattr(api, '_runtime_provider_authenticated', lambda *args: None)
-    ident = discover_profiles()['alpha']
-    assert not api._provider_credentials_satisfied('alpha', ident, {}, 'unrecognized-provider')
+def test_unknown_provider_is_not_authenticated_by_unrelated_env(hermes_home):
+    pdir = hermes_home.make_profile('alpha', env={'UNRELATED_KEY': 'not-authentication'})
+    cfg = pdir / 'config.yaml'
+    before = cfg.read_text()
+    r = _client().post('/operations', json={
+        'changes': [{'profileId': 'alpha', 'slotId': 'delegation.model',
+                     'action': 'set',
+                     'to': {'provider': 'unrecognized-provider', 'model': 'm'}}],
+        'host': {'profiles': {'alpha': {'options': {'providers': []}}}},
+    })
+    assert r.status_code == 409, r.text
+    assert 'missing provider credentials' in r.json()['detail']['error']
+    assert cfg.read_text() == before
 
 
 def test_declared_custom_key_env_is_not_bypassed_by_endpoint(hermes_home):
@@ -468,8 +486,8 @@ def test_declared_custom_key_env_is_not_bypassed_by_endpoint(hermes_home):
 
 def test_request_ack_does_not_override_saved_preset_policy(hermes_home, monkeypatch):
     hermes_home.make_profile('alpha')
-    monkeypatch.setattr(api, '_profile_has_credentials', lambda *args: True)
-    monkeypatch.setattr(api, '_live_cost_class', lambda *args: 'unknown')
+    monkeypatch.setattr(api, '_profile_has_credentials', lambda *args, **kwargs: True)
+    monkeypatch.setattr(api, '_live_cost_class', lambda *args, **kwargs: 'unknown')
     preset = ReviewedPreset('locked', 'Locked policy', BillingPolicy(['metered'], False),
         [RouteTarget('alpha', 'canonical_config', '', {'delegation.model': 'm'}, 'metered')],
         list(discover_profiles()))

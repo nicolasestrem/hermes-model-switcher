@@ -28,6 +28,7 @@ import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from host_protocol_helpers import finish_host_main_calls
 from model_switcher.engine import apply_operation, plan_operation, undo_operation
 from model_switcher.journal import OP_COMMITTED, OperationJournal
 from model_switcher.presets import (
@@ -222,7 +223,10 @@ def test_t7_api_end_to_end_state_preview_apply_undo(fleet):
 
     # -- apply (journalled, revision-guarded) ----------------------------
     r = client.post("/operations", json={"previewId": preview_id})
-    assert r.status_code == 200 and r.json()["ok"] is True, r.text
+    assert r.status_code == 200, r.text
+    assert _load(cfg_path) == pre_doc  # planning cannot perform the host write
+    r = finish_host_main_calls(client, r, home)
+    assert r.json()["ok"] is True, r.text
     op = r.json()["operation"]
     assert op["state"] == "committed", op
     assert all(res["status"] == "applied" for res in op["results"]), op

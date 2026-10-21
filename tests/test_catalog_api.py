@@ -1,13 +1,12 @@
-"""GET /catalog route contract + the unchanged GET /models contract.
+"""Public host-options payload -> catalog/model POST route contracts.
 
-The route is exercised through a real FastAPI app mounted exactly like the
-Dashboard mounts the plugin router (``include_router(plugin_api.router)``), with
-``plugin_api._ADAPTER`` replaced by an offline fake. No live config, network,
-inference, preset store or journal is touched.
+The host owns profile scope, refresh and prices; the plugin transforms supplied
+/api/model/options JSON. No private adapter picker/pricing seam, live config,
+network, inference, preset store or journal is touched.
 """
 from __future__ import annotations
 
-import contextlib
+import copy
 import json
 import sys
 from pathlib import Path
@@ -67,57 +66,6 @@ def make_payload(*rows):
     return {"providers": list(rows), "model": "", "provider": ""}
 
 
-class FakeProbe:
-    def __init__(self, *, picker=None, routes=None, entries=None,
-                 models_dev=None, available=True):
-        self.picker = picker or {}
-        self.routes = routes or {}
-        self.entries = entries or {}
-        self.models_dev = models_dev or {}
-        self.available = available
-        self.unavailable = () if available else ("pricing",)
-        self.calls = []
-
-    def picker_pricing(self, provider):
-        self.calls.append(("picker", provider))
-        return dict(self.picker.get(provider) or {})
-
-    def billing_mode(self, model, provider):
-        self.calls.append(("route", model, provider))
-        return self.routes.get((provider, model))
-
-    def pricing_entry(self, model, provider):
-        self.calls.append(("entry", model, provider))
-        return self.entries.get((provider, model))
-
-    def models_dev_cost(self, provider, model):
-        self.calls.append(("models_dev", provider, model))
-        return self.models_dev.get((provider, model))
-
-
-class FakeAdapter:
-    def __init__(self, payload, probe=None, *, raise_on_payload=None):
-        self.payload = payload
-        self.probe = probe or FakeProbe()
-        self.scopes = []
-        self.refresh_calls = []
-        self.raise_on_payload = raise_on_payload
-
-    @contextlib.contextmanager
-    def scoped(self, profile):
-        self.scopes.append(profile)
-        yield type("Ident", (), {"name": profile or "default"})()
-
-    def catalog_payload(self, refresh):
-        self.refresh_calls.append(refresh)
-        if self.raise_on_payload is not None:
-            raise self.raise_on_payload
-        return self.payload
-
-    def pricing_probe(self):
-        return self.probe
-
-
 PRICED_PAYLOAD = make_payload(
     make_row("nous", "Nous", models=["hermes-4-405b"],
              pricing={"hermes-4-405b": {
@@ -129,16 +77,14 @@ PRICED_PAYLOAD = make_payload(
 
 @pytest.fixture()
 def fake(monkeypatch):
-    adapter = FakeAdapter(
-        PRICED_PAYLOAD,
-        FakeProbe(picker={"nous": {"hermes-4-405b": {
-            "prompt": "0.00001", "completion": "0.00005",
-            "input_cache_read": "0.00000025"}}}),
-    )
-    monkeypatch.setattr(api, "_ADAPTER", adapter)
+    class NoCoreCatalog:
+        def __getattr__(self, name):
+            raise AssertionError(f"transform must not use adapter.{name}")
+
+    monkeypatch.setattr(api, "_ADAPTER", NoCoreCatalog())
     monkeypatch.setattr(api, "discover_profiles",
                         lambda: {"default": object(), "work": object()})
-    return adapter
+    return copy.deepcopy(PRICED_PAYLOAD)
 
 
 # -- route shape / mounting -------------------------------------------------
@@ -154,7 +100,7 @@ def test_catalog_route_is_mounted_like_models_and_is_sync():
 
 
 def test_catalog_returns_aggregate_dto_with_no_store(fake):
-    r = _client().get("/catalog")
+    r = _client().post("/catalog", json={"options": fake})
     assert r.status_code == 200
     assert r.headers["cache-control"] == "no-store"
     body = r.json()
@@ -173,27 +119,51 @@ def test_catalog_returns_aggregate_dto_with_no_store(fake):
     assert set(model["cost"]) == COST_KEYS
     assert model["cost"]["display"] == {
         "input": "$10.00", "output": "$50.00", "cache": "$0.25"}
+    for key in ("input", "output", "cacheRead", "pricingVersion"):
+        assert model["cost"][key] is None
+    assert model["cost"]["source"] == "picker"
+    assert provider["fetchedAt"] is None and provider["stale"] is True
 
 
 def test_catalog_forwards_profile_provider_and_refresh(fake):
-    r = _client().get("/catalog?profileId=work&provider=NOUS&refresh=1")
+    r = _client().post("/catalog", json={"profile": "work", "provider": "NOUS",
+                                         "refresh": True, "options": fake})
     assert r.status_code == 200
     body = r.json()
     assert body["profileId"] == "work"
     assert [p["id"] for p in body["providers"]] == ["nous"]
-    assert fake.scopes == ["work"]
-    assert fake.refresh_calls == [True]
+    assert body["cost"] == {"pending": False, "unavailableProviders": []}
 
 
-def test_catalog_refresh_defaults_to_false(fake):
-    _client().get("/catalog")
-    assert fake.refresh_calls == [False]
+@pytest.mark.parametrize("refresh", [False, True])
+def test_refresh_is_transform_metadata_not_core_fetch(fake, monkeypatch, refresh):
+    from dashboard.model_catalog import catalog_response
+    calls = []
+
+    def transform(options, provider, **filters):
+        calls.append((options, provider, filters))
+        return catalog_response(options, provider, **filters)
+
+    monkeypatch.setattr(api, "_model_catalog_module", lambda: SimpleNamespace(
+        catalog_response=transform))
+    body = {"profile": "work", "provider": "nous", "options": fake}
+    if refresh:
+        body["refresh"] = True
+    r = _client().post("/catalog", json=body)
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert calls == [(fake, "nous", {"profile_id": "work", "refresh": refresh})]
+    assert catalog_response(fake, refresh=True) == catalog_response(fake, refresh=False)
 
 
 # -- truthful failures ------------------------------------------------------
 
-def test_unknown_profile_is_refused_before_any_lookup(fake):
-    r = _client().get("/catalog?profileId=ghost")
+def test_unknown_profile_is_refused_before_transform(fake, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise AssertionError("unknown profile must not reach the transform")
+
+    monkeypatch.setattr(api, "_model_catalog_module", lambda: SimpleNamespace(
+        catalog_response=refuse))
+    r = _client().post("/catalog", json={"profile": "ghost", "options": fake})
     assert r.status_code == 200
     assert r.headers["cache-control"] == "no-store"
     body = r.json()
@@ -201,13 +171,10 @@ def test_unknown_profile_is_refused_before_any_lookup(fake):
     assert body["error"] == "unknown profile 'ghost'"
     assert body["providers"] == []
     assert body["profileId"] == "ghost"
-    assert fake.scopes == []  # refused before the adapter looked anything up
 
 
-def test_zero_provider_rows_is_a_visible_failure(monkeypatch):
-    monkeypatch.setattr(api, "_ADAPTER", FakeAdapter(make_payload()))
-    monkeypatch.setattr(api, "discover_profiles", lambda: {"default": object()})
-    r = _client().get("/catalog")
+def test_zero_provider_rows_is_a_visible_failure(fake):
+    r = _client().post("/catalog", json={"options": make_payload()})
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is False
@@ -215,28 +182,29 @@ def test_zero_provider_rows_is_a_visible_failure(monkeypatch):
     assert body["error"] == "no providers in this profile's catalog"
 
 
-def test_adapter_exception_is_sanitized(monkeypatch):
-    monkeypatch.setattr(api, "_ADAPTER", FakeAdapter(
-        {}, raise_on_payload=RuntimeError(
-            f"Authorization: Bearer secret-test-token at {LAB_HOST_PATH}")))
-    monkeypatch.setattr(api, "discover_profiles", lambda: {"default": object()})
-    r = _client().get("/catalog")
+@pytest.mark.parametrize("path", ["/catalog", "/models"])
+def test_transform_exception_is_sanitized(monkeypatch, fake, path):
+    def boom(*args, **kwargs):
+        raise RuntimeError(f"Authorization: Bearer secret-test-token at {LAB_HOST_PATH}")
+
+    monkeypatch.setattr(api, "_model_catalog_module", lambda: SimpleNamespace(
+        catalog_response=boom, models_response=boom))
+    r = _client().post(path, json={"options": fake, "provider": "nous"})
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is False
-    assert "RuntimeError" in body["error"]
+    assert body["error"] == "catalog lookup failed"
     serialized = json.dumps(body)
-    assert "secret-test-token" not in serialized
-    assert "Bearer" not in serialized
-    assert "/home/" not in serialized
-    assert LAB_HOST_PATH not in serialized
+    for forbidden in ("secret-test-token", "Bearer", "/home/", LAB_HOST_PATH):
+        assert forbidden not in serialized
 
 
-def test_module_load_failure_is_sanitized(monkeypatch):
+@pytest.mark.parametrize("path", ["/catalog", "/models"])
+def test_module_load_failure_is_sanitized(monkeypatch, path, fake):
     def boom():
-        raise RuntimeError("Authorization: Bearer secret-test-token")
+        raise RuntimeError("Authorization: Bearer ***")
     monkeypatch.setattr(api, "_model_catalog_module", boom)
-    r = _client().get("/catalog")
+    r = _client().post(path, json={"options": fake, "provider": "nous"})
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is False
@@ -246,9 +214,9 @@ def test_module_load_failure_is_sanitized(monkeypatch):
 
 def test_non_mapping_module_result_is_a_visible_failure(monkeypatch, fake):
     monkeypatch.setattr(api, "_model_catalog_module", lambda: SimpleNamespace(
-        get_model_catalog_all=lambda *a, **k: "not-a-mapping",
-        get_model_catalog=lambda *a, **k: "not-a-mapping"))
-    r = _client().get("/catalog")
+        catalog_response=lambda *a, **k: "not-a-mapping",
+        models_response=lambda *a, **k: "not-a-mapping"))
+    r = _client().post("/catalog", json={"options": fake})
     assert r.status_code == 200
     assert r.json()["ok"] is False
     assert r.json()["error"] == "catalog returned an unexpected payload"
@@ -261,7 +229,7 @@ def test_catalog_does_not_gate_on_runtime_writability(monkeypatch, fake):
     def refuse():
         raise AssertionError("catalog must not consult _runtime_writable")
     monkeypatch.setattr(api, "_runtime_writable", refuse)
-    r = _client().get("/catalog")
+    r = _client().post("/catalog", json={"options": fake})
     assert r.status_code == 200
     assert r.json()["ok"] is True
 
@@ -279,16 +247,15 @@ def test_catalog_touches_no_preset_or_state_store(monkeypatch, fake):
     monkeypatch.setattr(api, "_state_dir", refuse_state)
     monkeypatch.setattr(api, "_preset_store", refuse_store)
     monkeypatch.setattr(api, "_journal", refuse_journal)
-    r = _client().get("/catalog")
+    r = _client().post("/catalog", json={"options": fake})
     assert r.status_code == 200
     assert r.json()["ok"] is True
-    assert fake.scopes == [None]
 
 
-# -- GET /models contract unchanged ----------------------------------------
+# -- POST /models preserves DTO; GET requires host payload ------------------
 
 def test_models_endpoint_contract_unchanged(fake):
-    r = _client().get("/models?provider=nous")
+    r = _client().post("/models", json={"options": fake, "provider": "nous"})
     assert r.status_code == 200
     assert r.headers["cache-control"] == "no-store"
     body = r.json()
@@ -307,15 +274,69 @@ def test_models_endpoint_contract_unchanged(fake):
 
 
 def test_models_endpoint_empty_provider_is_still_truthful(fake):
-    body = _client().get("/models").json()
+    body = _client().post("/models", json={"options": fake}).json()
     assert body["ok"] is False
     assert body["models"] == []
     assert body["error"] == "no provider specified"
 
 
 def test_models_endpoint_unknown_provider_is_still_truthful(fake):
-    body = _client().get("/models?provider=ghost").json()
+    body = _client().post("/models", json={"options": fake, "provider": "ghost"}).json()
     assert body["ok"] is False
     assert body["models"] == []
     assert "ghost" in body["error"]
-    assert fake.scopes == [None]
+
+
+@pytest.mark.parametrize("path", ["/catalog", "/models"])
+def test_legacy_get_requires_host_payload_without_lookup(path, monkeypatch, fake):
+    def refuse(*args, **kwargs):
+        raise AssertionError("legacy GET must not look up a catalog or profile")
+
+    monkeypatch.setattr(api, "_model_catalog_module", refuse)
+    monkeypatch.setattr(api, "discover_profiles", refuse)
+    r = _client().get(path + "?profileId=work&provider=nous&refresh=1")
+    assert r.status_code == 410
+    assert r.headers["cache-control"] == "no-store"
+    assert r.json() == {"ok": False, "reason": "hostCatalogRequired"}
+
+
+@pytest.mark.parametrize("path", ["/catalog", "/models"])
+@pytest.mark.parametrize("options", [None, "not-a-mapping", {}, {"providers": "bad"}])
+def test_missing_or_malformed_host_options_are_visible_failures(path, options, fake):
+    r = _client().post(path, json={"provider": "nous", "options": options})
+    assert r.status_code == 200
+    assert r.headers["cache-control"] == "no-store"
+    body = r.json()
+    assert body["ok"] is False
+    assert body["error"] == "hostCatalogUnavailable"
+    assert body["providers"] == []
+    if path == "/models":
+        assert body["models"] == []
+
+
+@pytest.mark.parametrize("path", ["/catalog", "/models"])
+def test_bundled_options_belong_to_requested_profile(path, fake):
+    r = _client().post(path, json={"profile": "work", "provider": "nous",
+        "host": {"profiles": {
+            "default": {"options": make_payload(make_row("wrong", models=["not-work"]))},
+            "work": {"options": fake}}}})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert "not-work" not in r.text
+    assert "hermes-4-405b" in r.text
+
+
+@pytest.mark.parametrize("path", ["/catalog", "/models"])
+def test_direct_options_take_precedence_over_bundle(path, fake):
+    r = _client().post(path, json={"profile": "work", "provider": "nous", "options": fake,
+        "host": {"profiles": {"work": {"options": make_payload()}}}})
+    assert r.status_code == 200 and r.json()["ok"] is True
+
+
+def test_pending_host_prices_are_unknown_not_invented_free(fake):
+    fake["providers"][0]["pricing_pending"] = True
+    r = _client().post("/catalog", json={"provider": "nous", "options": fake})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["cost"] == {"pending": True, "unavailableProviders": []}
+    model = body["providers"][0]["models"][0]
+    assert model["pricingStatus"] == "unknown" and model["cost"] is None

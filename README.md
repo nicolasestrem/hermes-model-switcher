@@ -223,7 +223,7 @@ and exact-model removal; see [advanced routing](docs/technical-reference.md).
   [backlog](docs/backlog.md).
 - **Platform scope.** Linux is the verification target; macOS and native Windows are
   unverified. Earlier green results do not establish final 0.3.0 compatibility.
-- **Host capabilities required.** Missing public config/home/secret capabilities make
+- **Host capabilities required.** Missing public config, home or secret capabilities make
   the plugin read-only; missing host payloads show notices and unknown data. Main and
   compatible auxiliary writes need `/api/model/set`; other slots use public config
   load/save under the target home. No private-core compatibility shim is used.

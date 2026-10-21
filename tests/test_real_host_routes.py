@@ -32,6 +32,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parent.parent
 REAL_APP_PATH = Path(__file__).resolve().parent / "real_app.py"
@@ -128,8 +129,19 @@ def test_root_profile_query_value_is_default(lab):
 
 def test_host_routes_mount_next_to_the_plugin_router(lab):
     client, _home, _app = lab
-    plugin = client.get("/api/plugins/hermes-model-switcher/models")
+    plugin_path = "/api/plugins/hermes-model-switcher/models"
+    legacy = client.get(plugin_path)
+    assert legacy.status_code == 410, legacy.text
+    assert legacy.json() == {"ok": False, "reason": "hostCatalogRequired"}
+    assert legacy.headers["cache-control"] == "no-store"
+    options = _providers(client, "research")
+    plugin = client.post(plugin_path, json={
+        "profile": "research", "provider": "openai-api", "options": options,
+    })
     assert plugin.status_code == 200, plugin.text
+    assert plugin.json()["ok"] is True, plugin.text
+    assert plugin.json()["models"], plugin.text
+    assert plugin.headers["cache-control"] == "no-store"
     assert client.get("/healthz").json() == {"ok": True}
     for path in ("/api/model/options", "/api/model/auxiliary", "/api/model/moa"):
         assert client.get(path, params={"profile": "default"}).status_code == 200, path
@@ -203,6 +215,11 @@ def test_set_main_scope_writes_the_named_profile_only(lab):
     written = research_cfg.read_text()
     assert "provider: zhipu" in written
     assert "default: glm-5.3-flash" in written
+    # Canonical endpoint resolution belongs to this real public host route,
+    # not to a plugin-private preparation hook or a blind two-key writer.
+    persisted = yaml.safe_load(written)
+    assert persisted["model"]["base_url"] == "http://127.0.0.1:8080/v1"
+    assert persisted["providers"]["zhipu"]["base_url"] == "http://127.0.0.1:8080/v1"
     # the default profile was NOT the target — byte-identical to the seed
     assert default_cfg.read_text() == app.PROFILES["default"]
 

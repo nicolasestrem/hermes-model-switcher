@@ -70,14 +70,18 @@ def test_valid_openrouter_scalar_save_and_removal_keep_exact_intents(hermes_home
 @pytest.mark.parametrize('block', ['', '  follow_base: {}\n',
     '  follow_base:\n    timeout: 30\n',
     '  follow_base:\n    provider: auto\n    model: ""\n    base_url: ""\n'])
-def test_unpinned_registered_task_dto_reports_inheritance_and_effective_route(hermes_home, monkeypatch, block):
-    import hermes_cli.plugins as plugins
-    from hermes_cli.plugins_aux_tasks import build_auxiliary_task_entry
-    entry = build_auxiliary_task_entry('example-plugin', 'example-plugin', 'follow_base',
-        display_name='Follow base', description='', defaults={}, inherit_from='compression', registered={})
-    monkeypatch.setattr(plugins, 'get_plugin_auxiliary_tasks', lambda: [entry])
+def test_unpinned_registered_task_dto_reports_inheritance_and_effective_route(hermes_home, block):
     tc = client(hermes_home, block)
-    response = tc.get('/state')
+    host = {'profiles': {'default': {'auxiliary': {
+        'tasks': [{
+            'task': 'follow_base', 'label': 'Follow base', 'hint': '', 'plugin': 'example-plugin',
+            'provider': 'auto', 'model': '', 'base_url': '', 'reasoning_effort': None,
+            'local_endpoint': False, 'inherit_from': 'compression',
+            'effective': {'provider': 'lablocal', 'model': 'base-model', 'base_url': ''},
+        }], 'main': {'provider': 'lablocal', 'model': 'chat'},
+    }}}}
+    original = (hermes_home.path / 'config.yaml').read_bytes()
+    response = tc.post('/state', json={'host': host})
     assert response.status_code == 200, response.text
     row = next(s for s in response.json()['slots'] if s['slotId'] == 'auxiliary.follow_base')
     assert row['state'] == 'inherit', row
@@ -85,3 +89,11 @@ def test_unpinned_registered_task_dto_reports_inheritance_and_effective_route(he
     assert row['effectiveRoute']['model'] == 'base-model', row
     assert row['lastObserved'] is None
     assert row['provider'] != 'lablocal' and row['model'] != 'base-model'
+    assert row['metadata']['label'] == 'Follow base', row
+    assert row['metadata']['plugin'] == 'example-plugin', row
+    assert row['metadata']['inheritFrom'] == 'compression', row
+    assert (hermes_home.path / 'config.yaml').read_bytes() == original
+    # Host evidence is request-scoped, not a replacement process-global registry.
+    missing = tc.get('/state')
+    assert missing.status_code == 200, missing.text
+    assert not any(s['slotId'] == 'auxiliary.follow_base' for s in missing.json()['slots'])

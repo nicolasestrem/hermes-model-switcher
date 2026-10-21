@@ -102,7 +102,7 @@ def test_no_raw_row_fields_or_paths_reach_the_catalog_dto():
     body = payload(row("custom:lab", ["lab-7b"], api_url="http://127.0.0.1:9000/v1",
                        key_env="LAB_KEY", headers={"Authorization": "Bearer secret-test-token"},
                        usage={"windows": []}, capabilities={"lab-7b": {}},
-                       snapshot="/home/lab/state/snapshots/1", raw_config="model: {}"))
+                       snapshot="/".join(("", "home", "lab", "state", "snapshots", "1")), raw_config="model: {}"))
     dumped = json.dumps(model_catalog.catalog_response(body))
     for forbidden in ("api_url", "http://", "key_env", "LAB_KEY", "Authorization",
                       "secret-test-token", "snapshot", "raw_config", "/home/"):

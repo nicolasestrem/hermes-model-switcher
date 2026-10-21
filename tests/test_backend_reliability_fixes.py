@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
@@ -51,6 +52,9 @@ from model_switcher.journal import (  # noqa: E402
 )
 
 import dashboard.plugin_api as plugin_api  # noqa: E402
+from host_protocol_helpers import (  # noqa: E402
+    finish_host_main_call, finish_host_main_calls,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -181,6 +185,7 @@ def test_apply_success_reports_ok_true_committed(hermes_home):
     pid = _fleet_preset(tc)
     r = tc.post("/operations", json={"presetId": pid})
     assert r.status_code == 200, r.text
+    r = finish_host_main_calls(tc, r, hermes_home.path)
     body = r.json()
     assert body["ok"] is True, body
     op = body["operation"]
@@ -189,34 +194,63 @@ def test_apply_success_reports_ok_true_committed(hermes_home):
     assert set(op) == {"id", "state", "results", "undoable",
                        "final_state", "failure"}
     for res in op["results"]:
-        assert set(res) == {"profileId", "status", "store",
+        assert set(res) == {"profileId", "status", "seq", "store",
                             "revisionBefore", "revisionAfter"}
 
 
+@pytest.mark.parametrize("outcome, category", [
+    ("error", "host_error"),
+    ("ok", "host_no_write"),
+])
 def test_apply_failure_reports_ok_false_with_safe_category(hermes_home,
-                                                           monkeypatch):
-    _m(hermes_home, "default")
-    _m(hermes_home, "alpha")
+                                                           outcome, category):
+    # The first host write succeeds; the second host call fails without writing.
+    # Both explicit failure and false-success/no-write must compensate the first.
+    private_marker = "synthetic-private-snapshot-value"
+    config = BASE_CONFIG + f"unrelated:\n  private_note: {private_marker}\n"
+    paths = {p: _m(hermes_home, p, config=config) for p in ("default", "alpha")}
+    before = {p: yaml.safe_load(path.read_text()) for p, path in paths.items()}
     tc = _client()
     pid = _fleet_preset(tc)
-    real_apply = plugin_api.apply_operation
-    monkeypatch.setattr(
-        plugin_api, "apply_operation",
-        lambda journal, oid: real_apply(journal, oid, fail_after=1))
     r = tc.post("/operations", json={"presetId": pid})
+    assert r.status_code == 200, r.text
+    assert r.json()["hostCall"]["seq"] == 0
+    assert r.json()["hostCall"]["query"]["profile"] == "default"
+    assert {p: yaml.safe_load(path.read_text()) for p, path in paths.items()} == before
+    r = finish_host_main_call(tc, r, hermes_home.path)
+    assert r.json()["operation"]["state"] == "awaiting_host", r.text
+    assert yaml.safe_load(paths["default"].read_text())["model"]["default"] == \
+        "lab-7b-instruct"
+    assert yaml.safe_load(paths["alpha"].read_text()) == before["alpha"]
+    call = r.json()["hostCall"]
+    assert call["seq"] == 1 and call["query"]["profile"] == "alpha"
+    r = tc.post(f"/operations/{call['opId']}/host-result", json={
+        "seq": call["seq"], "token": call["token"], "outcome": outcome,
+        "status": 503 if outcome == "error" else 200,
+    })
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["ok"] is False, body
     op = body["operation"]
     assert op["state"] == "compensated", op
     assert op["final_state"] == "compensated", op
-    assert op["failure"] == "write_verification_failed", op
-    # No raw message, snapshot, payload or path may appear in the DTO.
+    assert op["failure"] == category, op
+    assert {p: yaml.safe_load(path.read_text()) for p, path in paths.items()} == before
+    persisted = tc.get(f"/operations/{op['id']}")
+    assert persisted.status_code == 200, persisted.text
+    assert persisted.json()["operation"] == op
+    # No raw message, snapshot, payload, path or expired token may escape.
+    assert "hostCall" not in body
+    for response in (r, persisted):
+        assert private_marker not in response.text
+        assert str(hermes_home.path) not in response.text
+        assert call["token"] not in response.text
     assert not ({"error", "snapshot", "payload", "path", "changes"} & set(op))
     assert set(op) == {"id", "state", "results", "undoable",
                        "final_state", "failure"}
+    assert [res["seq"] for res in op["results"]] == [0, 1]
     for res in op["results"]:
-        assert set(res) == {"profileId", "status", "store",
+        assert set(res) == {"profileId", "status", "seq", "store",
                             "revisionBefore", "revisionAfter"}
 
 
