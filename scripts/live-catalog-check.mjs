@@ -10,7 +10,9 @@ import { chromium, firefox } from "@playwright/test";
 const base = process.env.HMS_LIVE_URL;
 if (!base) { console.error("HMS_LIVE_URL is required"); process.exit(2); }
 const profile = process.env.HMS_LIVE_PROFILE || "default";
-const url = `${base.replace(/\/$/, "")}/model-switcher?profile=${encodeURIComponent(profile)}`;
+// The plugin scopes its catalog from its own profile filter, not the URL, so
+// the check selects the profile in the UI and then asserts the shown scope.
+const url = `${base.replace(/\/$/, "")}/model-switcher`;
 
 async function check(engine) {
   const browser = await engine.launch();
@@ -28,7 +30,18 @@ async function check(engine) {
   await page.goto(url, { waitUntil: "networkidle" });
   const toggle = page.getByTestId("catalog-toggle");
   if (!(await toggle.count())) throw new Error(`plugin did not mount at ${page.url()} (login required? set HMS_LIVE_COOKIE)`);
+  // Exactly one profile ticked = the catalog's scope (main.jsx catalogProfileId).
+  const option = page.locator(`[data-profile-option="${profile}"]`);
+  if (!(await option.count())) throw new Error(`profile "${profile}" is not offered by the plugin's profile filter`);
+  for (const other of await page.locator("[data-profile-option]:checked").all()) {
+    if ((await other.getAttribute("data-profile-option")) !== profile) await other.uncheck();
+  }
+  await option.check();
   if (!(await page.getByTestId("catalog-table").isVisible())) await toggle.click();
+  const scope = page.locator(".hms-catalog-readonly code").first();
+  await scope.waitFor({ timeout: 20000 });
+  const shown = (await scope.textContent())?.trim();
+  if (shown !== profile) throw new Error(`catalog scope is "${shown}", expected "${profile}"`);
   await page.locator("[data-model-row]").first().waitFor({ timeout: 20000 });
   const problems = await page.evaluate(() => {
     const out = [];
@@ -55,14 +68,14 @@ async function check(engine) {
   });
   const rows = await page.locator("[data-model-row]").count();
   await browser.close();
-  return { rows, problems: [...failedAssets.map((a) => `asset failed: ${a}`), ...new Set(problems)] };
+  return { rows, profile, problems: [...failedAssets.map((a) => `asset failed: ${a}`), ...new Set(problems)] };
 }
 
 let failed = false;
 for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
   try {
     const { rows, problems } = await check(engine);
-    console.log(`${name}: ${rows} catalog rows, ${problems.length} problem(s)`);
+    console.log(`${name}: profile "${profile}", ${rows} catalog rows, ${problems.length} problem(s)`);
     for (const p of problems.slice(0, 20)) console.log(`  - ${p}`);
     if (problems.length) failed = true;
   } catch (err) {

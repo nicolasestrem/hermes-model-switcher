@@ -94,6 +94,25 @@ Always use an isolated lab home; never aim seeding or install scripts at live
 profiles. The visual-evidence spec writes under `TMPDIR`, so keep it pointed at a
 writable directory.
 
+### Host-stylesheet guard
+
+`tests/host-css-guard.spec.mjs` renders the catalog under the host dashboard's
+real stylesheet, served by `tests/server.mjs` from
+`$HERMES_MODEL_SWITCHER_HERMES_REPO/hermes_cli/web_dist/assets/index-*.css`.
+`web_dist` is git-ignored upstream, so build it once in the pinned checkout
+(`cd <checkout>/web && npm ci && npm run build`); without it the route answers
+500 and the spec fails rather than passing on fixture CSS. CI does the same.
+
+Its screenshot comparison is opt-in (`HMS_SCREENSHOT=1`): the
+`catalog-host-css-linux.png` baseline depends on the local font stack and on the
+pinned stylesheet, so regenerate it (`--update-snapshots`) whenever the Hermes pin
+moves. The DOM and colour assertions run everywhere.
+
+After installing into a real dashboard, `npm run check:live` runs the same checks
+against it read-only in Chromium and Firefox (`HMS_LIVE_URL`, optional
+`HMS_LIVE_PROFILE` selected through the plugin's own profile filter, and
+`HMS_LIVE_COOKIE` when the dashboard needs a login).
+
 ## Privacy gate
 
 ```sh

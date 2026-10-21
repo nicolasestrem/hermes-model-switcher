@@ -29,8 +29,16 @@ async function openCatalogUnderHostCss(page, { idLabels = true } = {}) {
   await expect(page.locator("[data-model-row]").first()).toBeVisible();
 }
 
-for (const idLabels of [true, false]) {
-  test(`catalog rows stay single-line and legible under host CSS (label ${idLabels ? "=" : "≠"} id)`, async ({ page }) => {
+// Line counts, not pixel heights: heights move with font metrics and the
+// pinned host stylesheet, a stacked duplicate line does not.
+const LABEL_SHAPES = [
+  { idLabels: true, name: "label = id", oneLine: true },
+  { idLabels: "missing", name: "label missing", oneLine: true },
+  { idLabels: false, name: "label ≠ id", oneLine: false },
+];
+
+for (const { idLabels, name, oneLine } of LABEL_SHAPES) {
+  test(`catalog rows stay single-line and legible under host CSS (${name})`, async ({ page }) => {
     await openCatalogUnderHostCss(page, { idLabels });
 
     const rows = await page.locator("[data-model-row]").evaluateAll((trs) => trs.map((tr) => {
@@ -40,9 +48,6 @@ for (const idLabels of [true, false]) {
       return {
         id,
         idCount: text.split(id).length - 1,
-        // Model-cell CONTENT height: the Use cell may legitimately add a
-        // "sign-in needed" reason line, so the row height is not the signal.
-        height: (() => { const r = document.createRange(); r.selectNodeContents(cell); return r.getBoundingClientRect().height; })(),
         hasIdLine: !!cell.querySelector(".hms-catalog-model-id"),
         // Rendered text lines in the model cell (block children stack).
         modelLines: [...cell.children].filter((el) => el.getClientRects().length
@@ -51,15 +56,13 @@ for (const idLabels of [true, false]) {
     }));
     expect(rows.length).toBeGreaterThan(3);
     for (const row of rows) {
-      if (idLabels) {
+      if (oneLine) {
         expect(row.idCount, `${row.id} rendered more than once`).toBe(1);
         expect(row.hasIdLine, `${row.id} kept a redundant id line`).toBe(false);
         expect(row.modelLines, `${row.id} model cell stacks ${row.modelLines} lines`).toBe(1);
-        expect(row.height, `${row.id} model cell too tall`).toBeLessThanOrEqual(30);
       } else {
         expect(row.hasIdLine, `${row.id} lost its id line`).toBe(true);
         expect(row.modelLines, `${row.id} model cell`).toBe(2);
-        expect(row.height, `${row.id} model cell too tall`).toBeLessThanOrEqual(56);
       }
     }
 
@@ -85,7 +88,11 @@ for (const idLabels of [true, false]) {
   });
 }
 
+// Pixel baselines are font-stack specific, so the screenshot layer is opt-in
+// (HMS_SCREENSHOT=1) on the machine that recorded it; the DOM/colour checks
+// above are the always-on guard and run everywhere, CI included.
 test("catalog under host CSS matches the approved screenshot", async ({ page }) => {
+  test.skip(!process.env.HMS_SCREENSHOT, "set HMS_SCREENSHOT=1 to compare against the recorded baseline");
   await page.setViewportSize({ width: 1280, height: 900 });
   await openCatalogUnderHostCss(page);
   await expect(page.getByTestId("catalog-table")).toHaveScreenshot("catalog-host-css.png", {

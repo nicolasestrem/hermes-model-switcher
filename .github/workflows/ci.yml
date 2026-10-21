@@ -113,6 +113,13 @@ jobs:
       - name: Build the Dashboard bundle
         run: npm run build
 
+      # tests/host-css-guard.spec.mjs renders the plugin under the host's REAL
+      # stylesheet; hermes_cli/web_dist is git-ignored upstream, so build it
+      # from the pinned checkout (tests/server.mjs answers 500 without it).
+      - name: Build the pinned Hermes dashboard stylesheet
+        working-directory: ${{ env.HERMES_MODEL_SWITCHER_HERMES_REPO }}/web
+        run: npm ci && npm run build
+
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
