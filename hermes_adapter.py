@@ -1,35 +1,50 @@
-"""Version-tested Hermes adapter — all version-sensitive Hermes imports and
-explicit target-profile/credential scoping live here (plan T2).
+"""Version-tolerant Hermes adapter — built ONLY on Hermes' public plugin seams.
 
-Contract (from the accepted plan, evidence lines referenced):
-- Resolve homes through Hermes APIs only (``hermes_cli.profiles``,
-  ``hermes_constants.get_hermes_home``); never hardcode this installation's
-  paths and never change global ``HERMES_HOME`` in request handlers
-  (web_routers/models.py:138-168 uses ``_config_profile_scope`` the same way).
-- Credential/secret scope follows the profile: reads and writes run inside
-  ``hermes_cli.web_server_profiles._config_profile_scope`` so ``get_secret``
-  resolves the scoped profile's ``.env`` and is fail-closed across profiles
-  (agent/secret_scope.py; web_server_dashboard.py:812-851 boundary).
-- Canonical route preparation reuses Hermes' own seams —
-  ``web_server_config._prepare_main_assignment`` (models.py:376-427) and the
-  canonical save path ``config.save_config`` / ``require_readable_config_before_write``
-  (config.py:2064-2069, 2456-2498). No shell interpolation, no textual YAML
-  replacement.
-- Unsupported runtimes are READ-ONLY: anything below the tested baseline or a
-  failed import never gains write access (web_server_config's code-skew refusal
-  at models.py:151-154 is the in-core pattern this mirrors).
+Every version-sensitive Hermes import in this plugin lives here. The imports
+this module makes are the ones Hermes documents for plugin authors
+(``hermes_cli/plugin_validate_private_imports.py`` ``_PUBLIC``):
+
+- ``hermes_cli.config`` — ``load_config``, ``save_config``,
+  ``require_readable_config_before_write``, ``read_raw_config``,
+  ``get_config_path``, ``DEFAULT_CONFIG``.
+- ``hermes_constants`` — home/root resolution, the context-local home override,
+  and named-profile identity/liveness helpers.
+- ``agent.secret_scope`` — ``get_secret``, ``set_secret_scope``,
+  ``reset_secret_scope``, ``build_profile_secret_scope``.
+
+No private attribute is read through a public module (no ``_CONFIG_LOCK``, no
+``_strip_default_values``, no ``_config_profile_scope``): the adapter scopes a
+profile by installing the public context-local home override plus that
+profile's secret scope, and serializes its own canonical saves with its own
+re-entrant lock.
+
+Contract:
+- Homes resolve through public ``hermes_constants`` helpers only; global
+  ``HERMES_HOME`` is NEVER mutated in a request handler — the context-local
+  override is used instead (``set_hermes_home_override``).
+- The credential scope follows the profile: ``build_profile_secret_scope`` over
+  the profile's own ``.env``, installed with ``set_secret_scope`` so
+  ``get_secret`` resolves the scoped profile and can never read another
+  profile's value.
+- Canonical saves go through ``config.save_config`` /
+  ``require_readable_config_before_write``. No shell interpolation, no textual
+  YAML replacement.
+- Unsupported runtimes are READ-ONLY: the capability probe must find every
+  required public seam importable and callable, otherwise no write path is
+  opened. Nothing here depends on ``install-stamp.json`` or a version string.
 """
 from __future__ import annotations
 
 import contextlib
 import contextvars
-import re
+import hashlib
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
 
-# The expected (pre-write) config revision is carried into the canonical lock
+# The expected (pre-write) config revision is carried into the canonical save
 # guard WITHOUT changing the seam's call signature: the config adapter sets it
 # for the duration of the unmodified apply_canonical_save() call, so a
 # monkeypatched seam that keeps the historical (profile, updated, identity)
@@ -47,16 +62,49 @@ def expected_revision_scope(revision: Optional[str]) -> Iterator[None]:
     finally:
         _EXPECTED_REVISION.reset(token)
 
-# The inspected, tested baseline (PLAN.md "Evidence"): Hermes v0.21.7,
-# commit 590af66a58c2b3eb3c5edd1dcfefa09c625ae18a.
-SUPPORTED_BASELINE_VERSION = (0, 21, 7)
-SUPPORTED_BASELINE_LABEL = "v0.21.7 (590af66a58c2b3eb3c5edd1dcfefa09c625ae18a)"
 
-_VERSION_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
+# ---------------------------------------------------------------------------
+# Capability probe: the public seams this plugin requires.
+#
+# `supported` is decided by CAPABILITY, never by a version string or a build
+# stamp: a Hermes that exports every seam below is writable no matter what
+# `hermes_cli.__version__` / a distribution's metadata reports, and a Hermes
+# that is missing one is read-only no matter what version it claims.
+# ---------------------------------------------------------------------------
+CONFIG_CALLABLE_SEAMS = (
+    "load_config",
+    "save_config",
+    "require_readable_config_before_write",
+    "read_raw_config",
+    "get_config_path",
+)
+CONFIG_VALUE_SEAMS = ("DEFAULT_CONFIG",)
+
+CONSTANTS_CALLABLE_SEAMS = (
+    "get_hermes_home",
+    "get_default_hermes_root",
+    "set_hermes_home_override",
+    "reset_hermes_home_override",
+    "get_hermes_home_override",
+    "named_profile_has_identity",
+    "named_profile_is_live",
+    "named_profile_is_deleted",
+    "profile_name_for_home",
+    "named_profile_home",
+)
+# The canonical named-profile grammar; profile discovery mirrors it exactly.
+CONSTANTS_VALUE_SEAMS = ("PROFILE_ID_RE",)
+
+SECRET_SCOPE_CALLABLE_SEAMS = (
+    "get_secret",
+    "set_secret_scope",
+    "reset_secret_scope",
+    "build_profile_secret_scope",
+)
 
 
 class ReadOnlyRuntime(RuntimeError):
-    """The running Hermes is not a supported baseline: writes are refused."""
+    """The running Hermes lacks the required public seams: writes are refused."""
 
 
 class UnknownProfile(LookupError):
@@ -68,162 +116,79 @@ class ProfileIdentityChanged(RuntimeError):
 
 
 class StoreConflict(RuntimeError):
-    """The store's revision changed underneath us — refuse, never force."""
+    """The store's revision changed before saving — no write was attempted."""
 
 
-class CatalogSeamUnavailable(RuntimeError):
-    """The installed Hermes picker seam is missing (version skew).
+class PostSaveConflict(RuntimeError):
+    """The strict readback is not the document this save intended to produce.
 
-    Raised by :meth:`HermesAdapter.catalog_payload`; callers surface it as a
-    truthful sanitized failure (``ok=False``), never as an empty catalog.
+    A save WAS attempted. Never attach/adopt a post revision, retry the write,
+    or compensate this step blindly. CanonicalConfigStoreAdapter translates
+    this to StoreWriteAmbiguous (NOT StorePreWriteConflict). The engine must
+    persist an ambiguous step and recovery_required, with no post_revision;
+    any public failure category must be a fixed allowlisted value.
     """
 
 
-def _load_inventory():
-    """Import the installed picker builder module (the ONE import site)."""
-    from hermes_cli import inventory
+def _version_label() -> str:
+    """Best-effort, INFORMATIONAL Hermes package version ("" when unknown).
 
-    return inventory
-
-
-def _load_pricing_seams() -> Dict[str, Any]:
-    """Import every offline pricing seam this plugin reads (the ONE import site).
-
-    Version skew must fail HERE, behind the adapter, so no other module carries
-    a Hermes-private import and a missing attribute degrades to "unknown cost"
-    rather than a 500.
-    """
-    from hermes_cli.models_pricing import get_pricing_for_provider
-    from agent import usage_pricing
-    from agent import models_dev
-
-    resolve_billing_route = getattr(usage_pricing, "resolve_billing_route", None)
-    get_pricing_entry = getattr(usage_pricing, "get_pricing_entry", None)
-    get_model_info = getattr(models_dev, "get_model_info", None)
-    for name, value in (
-        ("resolve_billing_route", resolve_billing_route),
-        ("get_pricing_entry", get_pricing_entry),
-        ("get_model_info", get_model_info),
-    ):
-        if not callable(value):
-            raise AttributeError(f"agent models seam missing {name}")
-    return {
-        "get_pricing_for_provider": get_pricing_for_provider,
-        "resolve_billing_route": resolve_billing_route,
-        "get_pricing_entry": get_pricing_entry,
-        "get_model_info": get_model_info,
-    }
-
-
-def _float_or_none(value: Any) -> Optional[float]:
-    """Nullable numeric seam value as a float; unparsable → None (never 0)."""
-    try:
-        return None if value is None else float(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-
-
-def _raw_models_dev_cost(provider: str, model: str) -> Optional[Dict[str, Any]]:
-    """The RAW models.dev cost dict for provider/model, offline, or None.
-
-    ``ModelInfo`` zero-fills missing costs (``has_cost_data()`` is only input>0
-    or output>0), so a 0.0 rate cannot distinguish a free model from one with
-    no catalog data. Presence of the registry's own ``cost`` mapping is the
-    evidence; this probe never allows network access and never guesses.
+    Never used for gating: a git checkout without distribution metadata reports
+    nothing here and is still fully writable.
     """
     try:
-        from agent import models_dev
+        from importlib.metadata import version
 
-        resolve: Any = getattr(models_dev, "_models_dev_id", None)
-        registry: Any = getattr(models_dev, "_registry_models", None)
-        entries: Any = getattr(models_dev, "_iter_model_entries", None)
-        if not (callable(resolve) and callable(registry) and callable(entries)):
-            return None
-        mdev_id = resolve(provider) or provider
-        models = registry(mdev_id, allow_network=False)
-        if not isinstance(models, dict):
-            return None
-        entry = next(
-            (e for _mid, e in entries(
-                models, model, suffix_fallback=False, provider=provider)),
-            None)
-        cost = entry.get("cost") if isinstance(entry, dict) else None
-        if not isinstance(cost, dict) or not any(k in cost for k in ("input", "output")):
-            return None
-        return cost
+        return str(version("hermes-agent") or "")
     except Exception:
-        return None
+        return ""
 
 
-class PricingProbe:
-    """Exception-safe, OFFLINE pricing probe over the installed Hermes rate sources.
+def _import_seam_modules() -> Dict[str, Any]:
+    """Import the public seam modules by name, one report per failure."""
+    modules: Dict[str, Any] = {}
+    errors: list = []
+    try:
+        from hermes_cli import config as config_mod
 
-    Every method answers from caches only: the picker probe passes
-    ``cached_only=True``, billing routes are resolved WITHOUT ``base_url`` /
-    ``api_key`` (those arguments enable provider metadata fetches), and
-    models.dev is read with ``allow_network=False``. A seam that cannot answer
-    returns ``{}`` / ``None``; callers must render that as ``unknown``, never as
-    free or ``$0.00``. ``available`` is False only when the pricing imports
-    themselves failed (version skew).
-    """
+        modules["config"] = config_mod
+    except Exception as exc:
+        errors.append(f"hermes_cli.config import failed: {type(exc).__name__}")
+    try:
+        import hermes_constants as constants_mod
 
-    def __init__(self, *, available: bool = True, unavailable: tuple = (),
-                 reason: Optional[str] = None,
-                 picker: Optional[Any] = None, route: Optional[Any] = None,
-                 entry: Optional[Any] = None, models_dev: Optional[Any] = None):
-        self.available = bool(available)
-        self.unavailable = tuple(unavailable)
-        self.reason = reason
-        self._picker = picker
-        self._route = route
-        self._entry = entry
-        self._models_dev = models_dev
+        modules["constants"] = constants_mod
+    except Exception as exc:
+        errors.append(f"hermes_constants import failed: {type(exc).__name__}")
+    try:
+        from agent import secret_scope as secret_scope_mod
 
-    def picker_pricing(self, provider: str) -> Dict[str, Any]:
-        """Raw per-token pricing rows ``{model: {prompt, completion, ...}}``."""
-        if self._picker is None:
-            return {}
-        try:
-            rows = self._picker(str(provider or ""))
-        except Exception:
-            return {}
-        return rows if isinstance(rows, dict) else {}
+        modules["secret_scope"] = secret_scope_mod
+    except Exception as exc:
+        errors.append(f"agent.secret_scope import failed: {type(exc).__name__}")
+    return {"modules": modules, "errors": errors}
 
-    def billing_mode(self, model: str, provider: str) -> Optional[str]:
-        """``resolve_billing_route(...).billing_mode`` for provider-only lookup."""
-        if self._route is None:
-            return None
-        try:
-            mode = self._route(str(model or ""), str(provider or ""))
-        except Exception:
-            return None
-        return str(mode) if mode else None
 
-    def pricing_entry(self, model: str, provider: str) -> Optional[Dict[str, Any]]:
-        """Official-docs snapshot entry as USD/1M numbers (provider-only call)."""
-        if self._entry is None:
-            return None
-        try:
-            entry = self._entry(str(model or ""), str(provider or ""))
-        except Exception:
-            return None
-        if entry is None:
-            return None
-        return entry if isinstance(entry, dict) else None
-
-    def models_dev_cost(self, provider: str, model: str) -> Optional[Dict[str, Any]]:
-        """models.dev rate row (USD/1M) only when the catalog defines a cost dict."""
-        if self._models_dev is None:
-            return None
-        try:
-            cost = self._models_dev(str(provider or ""), str(model or ""))
-        except Exception:
-            return None
-        return cost if isinstance(cost, dict) else None
-
-    def __repr__(self) -> str:  # never include seam callables/errors
-        return (f"PricingProbe(available={self.available!r}, "
-                f"unavailable={self.unavailable!r}, reason={self.reason!r})")
+def _missing_seams(modules: Dict[str, Any]) -> list:
+    """Every required seam a successfully imported module fails to expose."""
+    missing: list = []
+    for module_name, module, callables, values in (
+        ("hermes_cli.config", modules.get("config"), CONFIG_CALLABLE_SEAMS,
+         CONFIG_VALUE_SEAMS),
+        ("hermes_constants", modules.get("constants"), CONSTANTS_CALLABLE_SEAMS,
+         CONSTANTS_VALUE_SEAMS),
+        ("agent.secret_scope", modules.get("secret_scope"),
+         SECRET_SCOPE_CALLABLE_SEAMS, ()),
+    ):
+        if module is None:
+            continue  # already reported as an import failure
+        for name in callables:
+            if not callable(getattr(module, name, None)):
+                missing.append(f"{module_name}.{name}")
+        for name in values:
+            if getattr(module, name, None) is None:
+                missing.append(f"{module_name}.{name}")
+    return missing
 
 
 @dataclass(frozen=True)
@@ -235,38 +200,35 @@ class RuntimeInfo:
     reasons: tuple = field(default=())
 
 
-def _version_tuple(label: str) -> Optional[tuple]:
-    m = _VERSION_RE.search(label or "")
-    return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
-
-
 def probe_runtime() -> RuntimeInfo:
-    """Import-test the version-sensitive seams and compare against the baseline."""
-    reasons = []
-    importable = True
-    version_label = ""
-    try:
-        import hermes_cli  # noqa: F401  (version seam)
-        from hermes_cli import config as _config  # noqa: F401  (canonical save seam)
-        from hermes_cli import web_server_config  # noqa: F401  (assignment seam)
-        version_label = str(getattr(hermes_cli, "__version__", "") or "")
-    except Exception as exc:  # import failure can never gain write access
-        importable = False
-        reasons.append(f"hermes import failed: {exc!r}")
-    vt = _version_tuple(version_label)
-    if importable and vt is None:
-        reasons.append(f"unparsable Hermes version {version_label!r}")
-    supported = importable and vt is not None and vt >= SUPPORTED_BASELINE_VERSION and vt[0] == 0
-    if importable and not supported:
-        reasons.append(
-            f"Hermes {version_label} outside tested baseline {SUPPORTED_BASELINE_LABEL}")
+    """Capability probe over the public seams (no version comparison).
+
+    ``supported`` iff every required public seam imports and is callable;
+    ``read_only`` is its negation, so an unknown/future Hermes that keeps these
+    seams keeps full write access, and a skewed one that loses any of them
+    degrades to read-only instead of raising deep inside a write.
+    """
+    imported = _import_seam_modules()
+    modules = imported["modules"]
+    reasons = list(imported["errors"])
+    missing = _missing_seams(modules)
+    if missing:
+        reasons.append("missing public Hermes seams: " + ", ".join(sorted(missing)))
+    importable = not imported["errors"]
+    supported = importable and not missing
     return RuntimeInfo(
-        importable=importable, version_label=version_label, supported=supported,
-        read_only=not supported, reasons=tuple(reasons))
+        importable=importable,
+        version_label=_version_label(),
+        supported=supported,
+        read_only=not supported,
+        reasons=tuple(reasons),
+    )
 
 
 def _hermes():
+    """The public ``hermes_cli.config`` module (the ONE import site)."""
     from hermes_cli import config as config_mod
+
     return config_mod
 
 
@@ -278,31 +240,80 @@ class ProfileIdentity:
     fingerprint: str  # realpath + directory identity + marker presence
 
 
-def discover_profiles() -> Dict[str, ProfileIdentity]:
-    """All discovered profiles via Hermes' own discovery APIs (default home +
-    every named profile). Read-only; never mutates global HERMES_HOME."""
-    from hermes_cli.profiles import list_profile_names, get_profile_dir
-    out: Dict[str, ProfileIdentity] = {}
-    for name in list_profile_names():
+def _profiles_root(root) -> Path:
+    return Path(root) / "profiles"
+
+
+def _iter_named_profile_dirs(root) -> list:
+    """Sorted named-profile dirs under ``<root>/profiles``, mirroring Hermes.
+
+    Mirrors ``hermes_cli.profiles._iter_named_profile_dirs(live_only=True)`` at
+    the tested revision using only public ``hermes_constants`` helpers: a
+    directory is a profile only when it carries an identity marker, is not
+    tombstoned, is not ``default``, and matches the canonical name grammar.
+    Marker-less shells left by cron/logging side-effects are never listed.
+    """
+    import hermes_constants as constants_mod
+
+    profiles_root = _profiles_root(root)
+    try:
+        if not profiles_root.is_dir():
+            return []
+        entries = sorted(profiles_root.iterdir())
+    except OSError:
+        return []
+    out: list = []
+    for entry in entries:
         try:
-            pdir = get_profile_dir(name)
-        except Exception:
+            if not entry.is_dir():
+                continue
+        except OSError:
             continue
-        out[name] = ProfileIdentity(name=name, path=str(pdir),
-                                    fingerprint=_identity_fingerprint(name, pdir))
+        if entry.name == "default" or not constants_mod.PROFILE_ID_RE.match(entry.name):
+            continue
+        if not constants_mod.named_profile_has_identity(entry):
+            continue
+        if constants_mod.named_profile_is_deleted(entry):
+            continue
+        out.append(entry)
     return out
 
 
-def _identity_fingerprint(name: str, pdir) -> str:
-    import hashlib
-    from pathlib import Path
-    from hermes_cli.profiles import named_profile_has_identity
+def discover_profiles() -> Dict[str, ProfileIdentity]:
+    """All discovered profiles via Hermes' own rules (default home + named).
+
+    Mirrors ``hermes_cli.profiles.list_profile_names()``: ``"default"`` first
+    (the default/root home), then every live identity-bearing profile dir under
+    ``<root>/profiles`` sorted by name. Read-only; never mutates HERMES_HOME.
+    """
+    import hermes_constants as constants_mod
+
+    root = Path(constants_mod.get_default_hermes_root())
+    out: Dict[str, ProfileIdentity] = {
+        "default": ProfileIdentity(
+            name="default", path=str(root),
+            fingerprint=_identity_fingerprint(root)),
+    }
+    for pdir in _iter_named_profile_dirs(root):
+        out[pdir.name] = ProfileIdentity(
+            name=pdir.name, path=str(pdir),
+            fingerprint=_identity_fingerprint(pdir))
+    return out
+
+
+def _identity_fingerprint(pdir) -> str:
+    """SHA-256 prefix over realpath + (dev, ino) + identity-marker presence."""
+    import hermes_constants as constants_mod
+
     h = hashlib.sha256()
     h.update(str(Path(pdir).resolve()).encode())
-    stat = Path(pdir).stat()
-    h.update(f"{stat.st_dev}:{stat.st_ino}".encode())
     try:
-        marker_present = bool(named_profile_has_identity(pdir))
+        stat = Path(pdir).stat()
+        h.update(f"{stat.st_dev}:{stat.st_ino}".encode())
+    except OSError:
+        h.update(b"no-stat")
+    try:
+        marker_present = bool(constants_mod.named_profile_has_identity(pdir))
     except Exception:
         marker_present = False
     h.update(b"identity" if marker_present else b"no-identity")
@@ -327,140 +338,82 @@ class HermesAdapter:
         self._write_lock = threading.RLock()
 
     # -- scoping -----------------------------------------------------
+    def profile_home(self, profile: Optional[str] = None) -> str:
+        """The discovered home path of *profile* (``None`` = current home).
+
+        Raises :class:`UnknownProfile` for a name that is not in the discovered
+        set — never a fabricated path under the profiles root.
+        """
+        if not profile:
+            import hermes_constants as constants_mod
+
+            return str(constants_mod.get_hermes_home())
+        ident = discover_profiles().get(profile)
+        if ident is None:
+            raise UnknownProfile(profile)
+        return ident.path
+
     @contextlib.contextmanager
     def scoped(self, profile: Optional[str]) -> Iterator[ProfileIdentity]:
-        """Enter the profile's home AND secret scope through Hermes' own seam.
+        """Enter the profile's home AND secret scope through public seams.
 
-        Yields the resolved profile identity. Mutating callers must pass an
-        explicit profile — ``None`` is only valid for read-only use against
-        the process's own home (same rule as web_routers/_common.destructive_profile).
+        Installs ``set_hermes_home_override(<profile home>)`` plus
+        ``set_secret_scope(build_profile_secret_scope(home), profile_home=...)``
+        and resets BOTH on exit. Yields the resolved profile identity. Mutating
+        callers must pass an explicit profile — ``None`` is only valid for
+        read-only use against the process's own home.
         """
-        profiles = discover_profiles()
-        if profile is None:
-            # Read-only current-home scope (the dashboard's own profile).
-            from tui_gateway.launch_profile_policy import launch_secret_scope
-            from hermes_constants import get_hermes_home
-            home = get_hermes_home()
-            ident = ProfileIdentity(name="default", path=str(home), fingerprint="current")
-            from agent.secret_scope import set_secret_scope, reset_secret_scope
-            token = set_secret_scope(launch_secret_scope(home), profile_home=str(home))
+        if not profile:
+            import hermes_constants as constants_mod
+
+            home = Path(constants_mod.get_hermes_home())
+            ident = ProfileIdentity(name="default", path=str(home),
+                                    fingerprint="current")
+            with self._enter_scope(home, ident, None) as entered:
+                yield entered
+            return
+        ident = discover_profiles().get(profile)
+        if ident is None:
+            raise UnknownProfile(profile)
+        with self._enter_scope(Path(ident.path), ident, profile) as entered:
+            yield entered
+
+    @contextlib.contextmanager
+    def _enter_scope(self, home: Path, ident: ProfileIdentity,
+                     profile: Optional[str]) -> Iterator[ProfileIdentity]:
+        """Install the home override + profile secret scope, then undo both."""
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+        from agent.secret_scope import (
+            build_profile_secret_scope,
+            reset_secret_scope,
+            set_secret_scope,
+        )
+
+        home_token = set_hermes_home_override(home)
+        try:
+            scope_token = set_secret_scope(
+                build_profile_secret_scope(Path(home)), profile_home=str(home))
             try:
+                if profile is not None:
+                    _assert_identity(profile, ident)
                 yield ident
             finally:
-                reset_secret_scope(token)
-            return
-        if profile not in profiles:
-            raise UnknownProfile(profile)
-        ident = profiles[profile]
-        from hermes_cli.web_server_profiles import _config_profile_scope
-        with _config_profile_scope(profile):
-            _assert_identity(profile, ident)
-            yield ident
+                reset_secret_scope(scope_token)
+        finally:
+            # Home is protected immediately: setup AND secret reset may fail.
+            reset_hermes_home_override(home_token)
 
     # -- reads -------------------------------------------------------
-    def catalog_payload(self, refresh: bool = False) -> Any:
-        """The installed picker payload for the CURRENT profile scope.
-
-        Call inside :meth:`scoped` so the builder reads the requested profile's
-        config and credential scope. ``hermes_cli.inventory`` is imported here
-        and nowhere else in the plugin; version skew raises
-        :class:`CatalogSeamUnavailable` (sanitized by the API layer) instead of
-        surfacing an import traceback or an empty-success catalog.
-        """
-        try:
-            inventory = _load_inventory()
-            build = getattr(inventory, "build_model_options_payload", None)
-            load_ctx = getattr(inventory, "load_picker_context", None)
-            if not callable(build) or not callable(load_ctx):
-                raise AttributeError("hermes_cli.inventory picker seam missing")
-        except (ImportError, AttributeError) as exc:
-            raise CatalogSeamUnavailable(type(exc).__name__) from None
-        return build(
-            load_ctx(),
-            explicit_only=False,
-            include_unconfigured=True,
-            refresh=bool(refresh),
-        )
-
-    def pricing_probe(self) -> PricingProbe:
-        """Build an OFFLINE pricing probe over the installed rate sources.
-
-        Import failure (version skew) degrades to ``available=False`` with no
-        callables: callers then report every price as ``unknown`` and list the
-        affected providers in ``cost.unavailableProviders``. Never raises.
-        """
-        try:
-            seams = _load_pricing_seams()
-        except (ImportError, AttributeError) as exc:
-            return PricingProbe(
-                available=False,
-                unavailable=("pricing",),
-                reason=type(exc).__name__,
-            )
-
-        def _picker(provider: str) -> Dict[str, Any]:
-            # cached_only=True: never start provider I/O on a read path.
-            return seams["get_pricing_for_provider"](
-                provider, cached_only=True) or {}
-
-        def _route(model: str, provider: str) -> Optional[str]:
-            # provider-only: base_url/api_key would enable a network metadata
-            # fetch inside the resolver; the catalog must stay offline.
-            route = seams["resolve_billing_route"](model, provider=provider)
-            return getattr(route, "billing_mode", None)
-
-        def _entry(model: str, provider: str) -> Optional[Dict[str, Any]]:
-            entry = seams["get_pricing_entry"](model, provider=provider)
-            if entry is None:
-                return None
-
-            def dec(name: str) -> Optional[float]:
-                value = getattr(entry, name, None)
-                return float(value) if value is not None else None
-
-            return {
-                "input": dec("input_cost_per_million"),
-                "output": dec("output_cost_per_million"),
-                "cache_read": dec("cache_read_cost_per_million"),
-                "cache_write": dec("cache_write_cost_per_million"),
-                "source": getattr(entry, "source", None),
-                "pricing_version": getattr(entry, "pricing_version", None),
-            }
-
-        def _models_dev(provider: str, model: str) -> Optional[Dict[str, Any]]:
-            info = seams["get_model_info"](provider, model, allow_network=False)
-            if info is None:
-                return None
-            # ModelInfo defaults costs to 0.0, so 0.0 alone cannot distinguish
-            # "free" from "no data". Presence is proven by a raw cost dict in
-            # the offline registry or by parsed positive rates.
-            raw_present = _raw_models_dev_cost(provider, model) is not None
-            try:
-                has_cost = bool(info.has_cost_data())
-            except Exception:
-                has_cost = False
-            if not raw_present and not has_cost:
-                return None
-            return {
-                "input": _float_or_none(getattr(info, "cost_input", None)),
-                "output": _float_or_none(getattr(info, "cost_output", None)),
-                "cache_read": _float_or_none(getattr(info, "cost_cache_read", None)),
-            }
-
-        return PricingProbe(
-            available=True,
-            picker=_picker,
-            route=_route,
-            entry=_entry,
-            models_dev=_models_dev,
-        )
-
     def load_raw_config(self, profile: Optional[str] = None) -> Dict[str, Any]:
         """Strict raw-config read inside the profile scope (no defaults merge;
         failed reads surface as errors, never as an empty config)."""
+        import copy
+
         with self.scoped(profile):
             cfg = _hermes().require_readable_config_before_write()
-            import copy
             return copy.deepcopy(dict(cfg))
 
     def config_revision(self, profile: Optional[str] = None) -> str:
@@ -470,41 +423,27 @@ class HermesAdapter:
         a revision across the lock boundary and have it match."""
         return _rev(self.load_raw_config(profile))
 
-    # -- canonical route preparation/validation (no writes) ----------
-    def prepare_main_assignment(
-            self, cfg: Dict[str, Any], provider: str, model: str,
-            base_url: str = "", api_key: str = "") -> Dict[str, Any]:
-        """Canonical validation half of POST /api/model/set (web_server_config.
-        _prepare_main_assignment): returns {base_url, result} without writing."""
-        self._assert_writable()
-        from hermes_cli.web_server_config import _prepare_main_assignment
-        base_url, result = _prepare_main_assignment(cfg, provider, model, base_url, api_key)
-        return {"base_url": base_url, "result": result}
-
-    def plan_canonical_save(self, profile: str, updated: Dict[str, Any]) -> Dict[str, Any]:
-        """Dry-run of the canonical complete-state save (config.py:2456-2498):
-        normalize + strip-defaults the way save_config would, and report the
-        exact paths that would change — no lock, no write."""
-        self._assert_writable()
-        from hermes_cli import config as config_mod
-        raw = self.load_raw_config(profile)
-        stripped = config_mod._strip_default_values(
-            config_mod._canonicalize_config(updated), config_mod.DEFAULT_CONFIG,
-            preserve_keys=set(config_mod._explicit_config_paths(raw)))
-        return {"planned_document": stripped}
-
     # -- writes ------------------------------------------------------
     def apply_canonical_save(self, profile: str, updated: Dict[str, Any],
                              identity: Optional[ProfileIdentity] = None,
                              expected_revision: Optional[str] = None
                              ) -> Dict[str, Any]:
-        """Journalled-style single-profile canonical save inside Hermes' own
-        profile scope + config lock, with an identity recheck against the
-        discovered profile set and a post-write readback of the exact target.
+        """Journalled-style single-profile canonical save inside the profile
+        scope, with an identity recheck against the discovered profile set and
+        a post-write readback of the exact target.
 
-        expected_revision: when given, the revision fingerprint of the freshly
-        read config must still match, otherwise a StoreConflict is raised
-        BEFORE any write (refuse-stale, never overwrite an intervening edit)."""
+        The revision check uses a plugin-local lock, NOT Hermes' lock. For
+        merge-expressible edits, only changed leaves are sent to public
+        ``save_config(..., merge_existing=True)``: its disk reread and rebase
+        run under Hermes' own lock, preserving unrelated live leaves.
+
+        LIMIT: Hermes exposes no public compare-and-save / locked transform.
+        A same-key writer can still land between this check and the host's
+        lock, then be overwritten undetectably. Deletions (and nested mapping
+        -> null) cannot use its merge API; full-state saves retain that race
+        even for unrelated edits. See _save_patch. Do not treat this lock as
+        a host-wide transaction. Strict readback never adopts foreign edits.
+        """
         self._assert_writable()
         if not profile:
             raise ValueError("explicit profile required for writes")
@@ -514,47 +453,41 @@ class HermesAdapter:
             _assert_identity(profile, identity)
         config_mod = _hermes()
         with self.scoped(profile):
-            with self._write_lock, config_mod._CONFIG_LOCK:
+            with self._write_lock:
                 # Re-assert the discovered identity INSIDE the lock: the
                 # pre-lock check is only a fast fail; the guard that matters
-                # must run under the same lock as the save.
+                # must run in the same critical section as the save.
                 if identity is not None:
                     _assert_identity(profile, identity)
                 fresh = config_mod.require_readable_config_before_write()
-                if expected_revision is not None and _rev(fresh) != expected_revision:
+                fresh_rev = _rev(fresh)
+                if expected_revision is not None and fresh_rev != expected_revision:
                     raise StoreConflict(
                         f"profile {profile!r}: config changed since the revision "
-                        f"was taken (current {(_rev(fresh))!r}, expected "
+                        f"was taken (current {fresh_rev!r}, expected "
                         f"{expected_revision!r}) — refusing the save; re-read "
                         "and re-plan the edit")
-                config_mod.save_config(updated)
-                after = config_mod.require_readable_config_before_write()
+                expected = _expected_sparse_document(
+                    updated, fresh, config_mod.DEFAULT_CONFIG)
+                patch = _save_patch(fresh, updated)
+                if patch is None:
+                    # Omissions deliberately remove keys. merge_existing would
+                    # resurrect them; nested dict->None is ignored by its deep
+                    # merge. The public full-state path is save_config (which
+                    # uses atomic_config_replace), NOT atomic_config_write.
+                    config_mod.save_config(updated)
+                else:
+                    config_mod.save_config(patch, merge_existing=True)
+                try:
+                    after = config_mod.require_readable_config_before_write()
+                except Exception as exc:
+                    raise PostSaveConflict(
+                        "canonical save readback is unreadable") from exc
+                if _rev(after) != _rev(expected):
+                    raise PostSaveConflict(
+                        "canonical save readback differs from intended document")
                 return {"ok": True, "profile": profile,
-                        "revision_before": _rev(fresh), "revision_after": _rev(after)}
-
-    # -- plugin auth/enablement gate (web_server.py:650-688 semantics) --
-    def plugin_backend_allowed(self, plugin_name: str) -> bool:
-        """Mirror of the runtime plugin gate: enabled set / disabled set from
-        the config, unknown plugin = user plugin = blocked (safe default)."""
-        from hermes_cli.plugins_cmd import _get_enabled_set, _get_disabled_set
-        try:
-            from hermes_cli.web_server import _get_dashboard_plugins
-        except Exception:
-            _get_dashboard_plugins = None  # no dashboard process: all names are user plugins
-        name = (plugin_name or "").strip()
-        if not name:
-            return False
-        if name in _get_disabled_set():
-            return False
-        if _get_dashboard_plugins is not None:
-            plugin = next(
-                (p for p in _get_dashboard_plugins() if p.get("name") == name), None)
-            source = plugin.get("source") if plugin else "user"
-        else:
-            source = "user"
-        if source == "user" and name not in _get_enabled_set():
-            return False
-        return True
+                        "revision_before": fresh_rev, "revision_after": _rev(expected)}
 
     def _assert_writable(self) -> None:
         if self.runtime.read_only:
@@ -563,7 +496,67 @@ class HermesAdapter:
                 + "; ".join(self.runtime.reasons))
 
 
+def _save_patch(before: Dict[str, Any], desired: Dict[str, Any]) -> Optional[dict]:
+    """Smallest merge payload, or None when a full-state save is required.
+
+    A full stale document is NOT a partial payload: it overwrites unchanged
+    siblings with their old values. Omission cannot delete through merge;
+    replacing a mapping can erase concurrently added descendants, so use the
+    explicit replacement path for those cases and report the public-CAS gap.
+    """
+    import copy
+
+    if set(before) - set(desired):
+        return None
+    patch = {}
+    for key, value in desired.items():
+        if key in before and _rev({"v": value}) == _rev({"v": before[key]}):
+            continue
+        if key in before and isinstance(before[key], dict):
+            if not isinstance(value, dict):
+                return None
+            nested = _save_patch(before[key], value)
+            if nested is None:
+                return None
+            patch[key] = nested
+        else:
+            patch[key] = copy.deepcopy(value)
+    return patch
+
+
+def _expected_sparse_document(desired: dict, before: dict, defaults: dict) -> dict:
+    """Predict default stripping using public DEFAULT_CONFIG and raw authorship.
+
+    This is NOT a canonicalization pipeline. Inputs are raw canonical documents
+    from the store plus edits to canonical slots. Legacy normalization or any
+    other host transformation we cannot predict is conservatively ambiguous,
+    never accepted by borrowing a foreign readback. Preserve authored leaves,
+    including nulls and empty lists, exactly as Hermes' sparse save does.
+    """
+    import copy
+
+    missing = object()
+    dropped = object()
+    def strip(value, old, default, path):
+        if (old is not missing and not isinstance(old, dict)) or path == ("_config_version",):
+            return copy.deepcopy(value)
+        if isinstance(value, dict) and value:
+            old_map = old if isinstance(old, dict) else {}
+            default_map = default if isinstance(default, dict) else {}
+            result = {}
+            for key, child in value.items():
+                kept = strip(child, old_map.get(key, missing),
+                             default_map.get(key), (*path, key))
+                if kept is not dropped:
+                    result[key] = kept
+            return result or dropped
+        return dropped if value == default else copy.deepcopy(value)
+    expected = strip(desired, before, defaults, ())
+    return expected if isinstance(expected, dict) else {}
+
+
 def _rev(cfg: Dict[str, Any]) -> str:
-    import hashlib
     import json
-    return hashlib.sha256(json.dumps(cfg, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+    return hashlib.sha256(
+        json.dumps(cfg, sort_keys=True, default=str).encode()).hexdigest()[:16]

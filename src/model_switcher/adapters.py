@@ -316,9 +316,10 @@ class CanonicalConfigStoreAdapter(YamlFileStoreAdapter):
     """config.yaml writes that go through Hermes' own canonical save seam.
 
     Every write/restore calls ``HermesAdapter.apply_canonical_save``, which
-    runs inside the explicit profile's scope AND Hermes' ``_CONFIG_LOCK``
-    (plus this adapter set's own write lock) and normalizes/strips defaults
-    exactly as ``hermes_cli.config.save_config`` would. There is NO raw-YAML
+    runs inside the explicit profile's public home/secret scope under this
+    adapter set's own re-entrant write lock, re-checks the revision
+    immediately before ``save_config``, and normalizes/strips defaults exactly
+    as ``hermes_cli.config.save_config`` would. There is NO raw-YAML
     fallback: if the runtime is unsupported or no profile is bound, the
     write raises — the caller sees a visible block, never a textual YAML
     rewrite behind its back.
@@ -345,9 +346,9 @@ class CanonicalConfigStoreAdapter(YamlFileStoreAdapter):
 
     def revision(self) -> str:
         """The canonical store's revision is the SAME fingerprint the save's
-        lock guard compares (``_rev`` of the strictly re-read config document),
+        guard compares (``_rev`` of the strictly re-read config document),
         NOT a raw-bytes hash: the engine carries this value into the canonical
-        save so the stale-write check runs inside Hermes' ``_CONFIG_LOCK``.
+        save so the stale-write check runs inside the adapter's save lock.
         A raw-bytes digest would never match the guard, leaving it dead."""
         try:
             return self._adapter().config_revision(self.profile)
@@ -358,36 +359,41 @@ class CanonicalConfigStoreAdapter(YamlFileStoreAdapter):
 
     def write(self, data: Dict[str, Any],
               expected_revision: Optional[str] = None) -> Optional[str]:
-        # Full-document canonical save through Hermes' own seam: explicit
-        # profile scope + config lock + revision/provenance readback live
-        # inside apply_canonical_save. ``expected_revision`` is carried INTO
-        # the lock: the check-then-save race is closed there, not here.
+        # Canonical save through Hermes' public seam: explicit profile scope,
+        # local revision check and provenance readback live in the adapter.
+        # This is NOT a host-wide CAS: see apply_canonical_save's documented
+        # race between our check and Hermes acquiring its own private lock.
         # Raises ReadOnlyRuntime / UnknownProfile / ProfileIdentityChanged on
-        # any violation — never a raw file write. Hermes' StoreConflict is
-        # raised ONLY at its locked fresh-revision guard, BEFORE the save, so
-        # it is translated to the pre-write-tagged StorePreWriteConflict;
+        # any violation — never a raw file write. StoreConflict is raised ONLY
+        # at the guarded fresh-revision check, BEFORE save_config, so it is
+        # translated to the pre-write-tagged StorePreWriteConflict;
         # identity/scope violations keep the ordinary (untagged) StoreConflict.
         from hermes_adapter import (
             StoreConflict as _CanonSegmentConflict,
+            PostSaveConflict,
             ProfileIdentityChanged,
             UnknownProfile,
             expected_revision_scope,
         )
         try:
-            # carry the expected revision INTO the seam's lock via the
+            # carry the expected revision INTO the save's lock via the
             # revision scope (keeps apply_canonical_save's call signature
             # stable for existing test doubles while the guard still runs
-            # under Hermes' _CONFIG_LOCK).
+            # under the adapter's write lock).
             with expected_revision_scope(expected_revision):
                 result = self._adapter().apply_canonical_save(
                     self.profile, data, identity=self._identity)
+        except PostSaveConflict as exc:
+            # The save was attempted; never label a failed provenance check as
+            # a known no-write conflict, even when the resulting bytes match.
+            raise StoreWriteAmbiguous(str(exc)) from exc
         except _CanonSegmentConflict as exc:
-            # Hermes' canonical save raises its StoreConflict ONLY at the
-            # locked fresh-revision guard, BEFORE config_mod.save_config —
-            # provably no write was attempted. Tag it pre-write so the engine
-            # records a known no-write step instead of escalating to
-            # recovery_required. (Post-write ambiguity keeps failing closed
-            # via StoreWriteAmbiguous, which is never tagged here.)
+            # The canonical save raises StoreConflict ONLY at the guarded
+            # fresh-revision check, BEFORE config_mod.save_config — provably no
+            # write was attempted. Tag it pre-write so the engine records a
+            # known no-write step instead of escalating to recovery_required.
+            # (Post-write ambiguity keeps failing closed via
+            # StoreWriteAmbiguous, which is never tagged here.)
             raise StorePreWriteConflict(str(exc)) from exc
         except (ProfileIdentityChanged, UnknownProfile) as exc:
             # identity/scope violations keep the conservative ordinary
@@ -399,9 +405,8 @@ class CanonicalConfigStoreAdapter(YamlFileStoreAdapter):
 
     def apply_changes_guarded(self, changes: Dict[str, Any],
                               expected_revision: Optional[str] = None) -> WriteOutcome:
-        """Canonical apply: the revision guard is enforced INSIDE the canonical
-        save lock (via ``write(expected_revision=...)``), so a concurrent save
-        cannot slip between the engine's recheck and ours."""
+        """Canonical apply with a local revision check and strict provenance
+        readback; this is not a public host-wide compare-and-save operation."""
         pre = self.revision()
         data = self.read() or {}
         for dotted, value in changes.items():
@@ -447,25 +452,33 @@ class CanonicalConfigStoreAdapter(YamlFileStoreAdapter):
     def intended_write_matches(self, snapshot: Optional[Dict[str, Any]],
                                changes: Dict[str, Any],
                                current_revision: str) -> bool:
-        """Canonical-store crash-window predicate. The write landed through
-        Hermes' canonical save seam (normalize + strip-defaults), so raw
-        serialized bytes from a naive projection never match: decide from the
-        documents themselves — the intended document is run through the SAME
-        canonical pipeline (plan_canonical_save) and compared against the
-        strictly re-read on-disk document. Anything undecidable is False, so
-        the reconcile caller fails closed to recovery_required."""
-        if not self.exists() or not self.readback(changes):
-            return False
+        """Recognise only our intended changes in one strict, revision-bound read.
+
+        Revision, semantic readback and foreign-diff coverage all describe the
+        same loaded document. Added/removed/retyped mappings are examined down
+        to their changed leaves: a narrow change never owns foreign siblings.
+        Unreadable or otherwise undecidable state fails closed to False.
+        """
+        from hermes_adapter import _rev
+
         try:
-            intended = _changes_applied(
-                snapshot if snapshot is not None else {}, changes)
-            adapter = self._adapter()
-            planned = adapter.plan_canonical_save(
-                self.profile, intended)["planned_document"]
-            on_disk = adapter.load_raw_config(self.profile)
+            if not self.exists():
+                return False
+            on_disk = self._adapter().load_raw_config(self.profile)
+            if not isinstance(on_disk, dict) or _rev(on_disk) != current_revision:
+                return False
+            for dotted, value in changes.items():
+                actual = _get_dotted(on_disk, dotted)
+                if _is_delete_sentinel(value):
+                    if actual is not _MISSING:
+                        return False
+                elif actual != value:
+                    return False
+            base = snapshot if isinstance(snapshot, dict) else {}
+            return all(_covered_by_changes(path, changes)
+                       for path in _differing_paths(base, on_disk))
         except Exception:
             return False  # undecidable -> ambiguous, never guessed
-        return planned == on_disk
 
 
 def adapter_for(store_kind: str, path: str, profile: Optional[str] = None,
@@ -514,6 +527,39 @@ def _get_dotted(data: Dict[str, Any], dotted: str) -> Any:
 
 
 _MISSING = object()
+
+
+def _differing_paths(left: Any, right: Any, prefix: str = "") -> list:
+    """Changed leaves, including descendants of added/removed/retyped mappings.
+
+    Mapping structure is covered only when all its changed descendants are
+    covered. Scalars/lists and empty mappings are leaves; list order and
+    contents are compared as a whole value, not as a path space.
+    """
+    if isinstance(left, dict) or isinstance(right, dict):
+        left_map = left if isinstance(left, dict) else {}
+        right_map = right if isinstance(right, dict) else {}
+        out: list = []
+        for key in sorted(set(left_map) | set(right_map), key=str):
+            path = f"{prefix}.{key}" if prefix else str(key)
+            out.extend(_differing_paths(
+                left_map.get(key, _MISSING), right_map.get(key, _MISSING), path))
+        if out:
+            return out
+    return [] if left == right else [prefix]
+
+
+def _covered_by_changes(path: str, changes: Dict[str, Any]) -> bool:
+    """True only for a change key itself or one of its descendants.
+
+    A structural ancestor is handled by recursing into every changed child,
+    never by granting ownership of foreign siblings to a narrower change.
+    """
+    for dotted in changes:
+        dotted = str(dotted)
+        if path == dotted or path.startswith(dotted + "."):
+            return True
+    return False
 
 
 def _changes_applied(base: Dict[str, Any],

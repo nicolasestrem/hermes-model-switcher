@@ -54,36 +54,28 @@ export HERMES_MODEL_SWITCHER_HERMES_REPO=/path/to/hermes-agent
 Both `conftest.py` and `real_app.py` honour this variable (default
 `~/.hermes/hermes-agent`).
 
-The verified revision is Hermes **v0.22.0+canary.20261014T070054Z**, commit
-`0e427d788d253630d38a3a51cd76849e73cd6925`. Reproduce it from the public repository:
+The verified revision is Hermes **v0.22.2+canary.20261020T065957Z**, commit
+`c5a3c0f8767a72203363d249add14142dbcf3cc7`. Reproduce it from the public repository:
 
 ```sh
 # Pin the exact commit: it is immutable (the canary tag is annotated onto it).
 git init /tmp/hermes-agent
 git -C /tmp/hermes-agent remote add origin https://github.com/NousResearch/hermes-agent.git
-git -C /tmp/hermes-agent fetch --depth 1 origin 0e427d788d253630d38a3a51cd76849e73cd6925
+git -C /tmp/hermes-agent fetch --depth 1 origin c5a3c0f8767a72203363d249add14142dbcf3cc7
 git -C /tmp/hermes-agent checkout -q FETCH_HEAD
-git -C /tmp/hermes-agent rev-parse HEAD   # 0e427d788d253630d38a3a51cd76849e73cd6925
+git -C /tmp/hermes-agent rev-parse HEAD   # c5a3c0f8767a72203363d249add14142dbcf3cc7
 ```
 
-The clone must also carry a **source identity**. `hermes_cli.__version__` is read
-from `install-stamp.json` — an installer-generated file that is git-ignored — so a
-bare clone reports the pre-stamp placeholder `0.0.0`. That trips the adapter's
-supported-baseline guard (`v0.21.7`), which refuses writes and fails the
-integration tests. Write the stamp the supported way, with Hermes' own
-`scripts/write_install_stamp.py`, deriving the base version from the verified tag:
-
-```sh
-python scripts/bootstrap_ci_runtime.py \
-    --checkout /tmp/hermes-agent \
-    --sha 0e427d788d253630d38a3a51cd76849e73cd6925 \
-    --tag v0.22.0+canary.20261014T070054Z
-```
-
-`bootstrap_ci_runtime.py` fetches the annotated tag, peels it to a commit, and
-refuses unless that commit, the pinned SHA, and the checkout `HEAD` all agree — it
-never hand-authors a version. After it runs, `probe_runtime()` reports
-`supported=True` on genuine metadata. CI runs the same step (see below).
+A bare clone is enough: **there is no runtime bootstrap and no install stamp to
+write.** `hermes_adapter.probe_runtime()` gates on capability, not on a version
+string — it requires every public seam this plugin uses (`hermes_cli.config`'s
+load/save/read-guard helpers, the `hermes_constants` home and named-profile
+helpers, and `agent.secret_scope`) to import and be callable, and reports
+`supported=True` when they do. `hermes_cli.__version__` is never consulted, so a
+checkout without `install-stamp.json` (installer-generated and git-ignored) is
+fully writable, a future Hermes that keeps these seams stays writable without a
+plugin release, and a Hermes missing a seam degrades to read-only instead of
+failing in the middle of a write.
 
 A plain checkout is enough: the plugin's own `.[test]` dependencies run the whole
 suite once the checkout is on the path — you do not install Hermes's own dependency
@@ -126,10 +118,10 @@ refuses an existing destination unless you pass `--replace`.
 only. Three jobs:
 
 - **backend** — `pip install -e '.[test]'` then `python -m pytest tests/`, on Python
-  3.11 and 3.13, after cloning the pinned Hermes checkout above and running
-  `scripts/bootstrap_ci_runtime.py` to give it a real source identity.
+  3.11 and 3.13, after cloning the pinned Hermes checkout above. No install-stamp
+  or bootstrap step: gating is capability-based, so a bare clone runs the suite.
 - **browser** — `npm ci`, `npm run build`, `npx playwright install --with-deps chromium`,
-  then bare `npm test`, on Node 22 and 24, with the pinned, stamped checkout available.
+  then bare `npm test`, on Node 22 and 24, with the pinned checkout available.
 - **package** — the declared Python 3.10 floor: install, UI build, `compileall`, and
   the privacy guard.
 
