@@ -318,6 +318,19 @@
   scrollbar-gutter: stable;
 }
 
+/* Let the table grow rather than squeezing human-readable target labels. */
+.hms-root [data-testid="matrix-scroll"] [data-column="slot"] {
+  min-width: 160px;
+}
+
+.hms-root [data-testid="matrix-scroll"] [data-column="family"] {
+  min-width: 176px;
+}
+
+.hms-root [data-testid="matrix-scroll"] [data-column="state"] {
+  min-width: 112px;
+}
+
 /* Preserve readable route columns while the narrow viewport scrolls the table. */
 .hms-root [data-testid="matrix-scroll"] table {
   min-width: 850px;

@@ -47,6 +47,49 @@ test('workflow copy and state guide selection without changing focus order', asy
 });
 
 for (const theme of ['light', 'dark']) for (const width of [1440, 768, 375]) {
+  test(`secondary text contrast is AA on actual surfaces in ${theme} ${width}`, async ({ page }) => {
+    await open(page, theme, width);
+    const readings = [];
+    const measure = async state => {
+      const samples = await page.locator('.hms-root').evaluate(root => {
+        const ctx = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+        const rgba = color => {
+          ctx.clearRect(0, 0, 1, 1); ctx.fillStyle = color; ctx.fillRect(0, 0, 1, 1);
+          return [...ctx.getImageData(0, 0, 1, 1).data].map((v, i) => i === 3 ? v / 255 : v);
+        };
+        const over = (a, b) => {
+          const alpha = a[3] + b[3] * (1 - a[3]);
+          return !alpha ? [0, 0, 0, 0] : [0, 1, 2].map(i => (a[i] * a[3] + b[i] * b[3] * (1 - a[3])) / alpha).concat(alpha);
+        };
+        const lum = c => c.slice(0, 3).map(v => v / 255).map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4).reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0);
+        const probe = document.createElement('span');
+        probe.style.color = 'var(--text-muted-color)'; root.appendChild(probe);
+        const muted = getComputedStyle(probe).color; probe.remove();
+        return [...root.querySelectorAll('*')].filter(el => el.getClientRects().length && el.getBoundingClientRect().right > 0 && !el.closest(':disabled,[aria-disabled="true"],[hidden]') && [...el.childNodes].some(n => n.nodeType === Node.TEXT_NODE && n.textContent.trim()) && getComputedStyle(el).color === muted).map(el => {
+          let text = [0, 0, 0, 0], blank = [0, 0, 0, 0];
+          for (let n = el; n; n = n.parentElement) {
+            const css = getComputedStyle(n), bg = rgba(css.backgroundColor);
+            text = over(text, bg); blank = over(blank, bg);
+            if (n === el) text = over(rgba(css.color), text);
+            text[3] *= Number(css.opacity); blank[3] *= Number(css.opacity);
+          }
+          const a = lum(over(text, [255, 255, 255, 1])), b = lum(over(blank, [255, 255, 255, 1]));
+          return { text: el.textContent.trim().slice(0, 100), ratio: (Math.max(a, b) + .05) / (Math.min(a, b) + .05) };
+        });
+      });
+      expect(samples.length).toBeGreaterThan(0);
+      for (const sample of samples) expect(sample.ratio, `${state}: ${sample.text}`).toBeGreaterThanOrEqual(4.5);
+      readings.push({ state, count: samples.length, min: Math.min(...samples.map(s => s.ratio)) });
+    };
+    await measure('initial');
+    await page.getByLabel('Select default main', { exact: true }).check();
+    await measure('selected');
+    await page.getByTestId('catalog-toggle').click();
+    await expect(page.getByTestId('catalog-table')).toBeVisible();
+    await measure('catalog');
+    console.log(JSON.stringify({ theme, width, secondaryContrast: readings }));
+  });
+
   test(`matrix identifiers stay whole with discoverable owned scroll in ${theme} ${width}`, async ({ page }) => {
     await open(page, theme, width);
     const matrix = page.getByTestId('matrix-scroll');
@@ -55,6 +98,17 @@ for (const theme of ['light', 'dark']) for (const width of [1440, 768, 375]) {
       await expect(cell).toHaveCSS('white-space', 'nowrap');
       expect(await cell.evaluate(el => parseFloat(getComputedStyle(el).minWidth))).toBeGreaterThanOrEqual(240);
     }
+    for (const [column, min] of [['slot', 160], ['family', 176], ['state', 112]]) {
+      const cell = column === 'slot'
+        ? matrix.locator('[data-row="default/main"] td').nth(2)
+        : matrix.locator(`[data-row="default/main"] [data-column="${column}"]`);
+      expect(await cell.evaluate(el => parseFloat(getComputedStyle(el).minWidth))).toBeGreaterThanOrEqual(min);
+    }
+    const labelLines = await matrix.locator('[data-row="default/main"] .hms-expand').evaluate(el => {
+      const range = document.createRange(); range.selectNodeContents(el);
+      return range.getClientRects().length;
+    });
+    expect(labelLines).toBe(1);
     await expect(matrix).toHaveCSS('overflow-x', 'scroll');
     // A wide pane may fit all columns; narrow panes must scroll, not wrap IDs.
     if (width < 1440) {

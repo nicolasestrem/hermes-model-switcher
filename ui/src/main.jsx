@@ -1045,7 +1045,7 @@ function Matrix({ profiles, slots, selection, onToggle, onToggleAll, onClearSele
                       </span>
                     )}
                   </td>
-                  <td><button className="hms-expand" title={s.slotId} aria-label={`Details for ${s.profileId} ${s.slotId}`} aria-expanded={!!expanded[key]} onClick={() => onExpand(key)}>{taskLabel(s)}</button></td>
+                  <td data-column="slot"><button className="hms-expand" title={s.slotId} aria-label={`Details for ${s.profileId} ${s.slotId}`} aria-expanded={!!expanded[key]} onClick={() => onExpand(key)}>{taskLabel(s)}</button></td>
                   <td data-column="family" data-family-id={s.family}>{familyLabel(s.family)}</td>
                   <td data-column="state">
                     <span className="hms-badge" data-state={normalizeState(s.state)}>{stateLabel(s.state)}</span>
