@@ -242,6 +242,16 @@
   font-size: 13px;
 }
 
+/* A disabled Undo states its reason in place — plain text, never a control.
+   Warning for a state with nothing to undo; danger for recovery_required. */
+.hms-root .hms-note.hms-undo-note {
+  margin: 8px 0 0;
+  color: var(--warning-color, var(--hms-warning-text, #d29922));
+}
+.hms-root .hms-note.hms-undo-note[data-tone="danger"] {
+  color: var(--danger-color, var(--hms-danger-text, #e5534b));
+}
+
 /* Removal disclosure reads as advanced, but its controls stay reachable */
 .hms-root details[data-testid="removal-advanced"] {
   padding: 0;

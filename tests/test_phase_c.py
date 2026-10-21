@@ -142,6 +142,7 @@ def test_undo_preserves_later_edit(lab):
     undone = undo_operation(journal, op["op_id"])
     # revision no longer matches post-write: conflict, no forced restore
     assert undone["state"] == OP_RECOVERY_REQUIRED
+    assert undone["failure_category"] == "external_edit"
     body = read(path)
     assert body["user_note"] == "keep me"
     assert body["main"]["model"] == "m/new"  # later edit preserved

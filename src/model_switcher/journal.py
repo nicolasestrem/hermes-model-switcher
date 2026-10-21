@@ -331,21 +331,6 @@ class OperationJournal:
             " WHERE op_id=? AND seq=? AND host_token_hash=?", (op_id, seq, token_hash))
         return cur.rowcount == 1
 
-    def set_host_expectations(self, op_id: str, seq: int,
-                              readback_keys: Optional[List[str]] = None,
-                              allowed_prefixes: Optional[List[str]] = None) -> None:
-        """Persist the semantic readback keys / allowed key prefixes for a host
-        step when the planner did not know them. Stored (not just used) so
-        reconcile can still verify the write after a restart."""
-        if readback_keys is not None:
-            self._conn.execute(
-                "UPDATE steps SET host_readback_keys=? WHERE op_id=? AND seq=?",
-                (json.dumps(list(readback_keys)), op_id, seq))
-        if allowed_prefixes is not None:
-            self._conn.execute(
-                "UPDATE steps SET host_allowed_prefixes=? WHERE op_id=? AND seq=?",
-                (json.dumps(list(allowed_prefixes)), op_id, seq))
-
     def finish(self, op_id: str, state: str) -> None:
         self._touch(op_id, state)
 

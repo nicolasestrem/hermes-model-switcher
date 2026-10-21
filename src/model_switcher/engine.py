@@ -8,8 +8,12 @@ Operation IDs are idempotent.
 Backend steps write through their store adapter. Host steps return a public
 host_call envelope and await the browser's outcome. Only a token hash is
 persisted; missing, retired, or replayed tokens cannot change operation state.
-Reapplying an untouched awaiting step reissues its token. Submitted readback
-keys and allowed prefixes are persisted so restart verification is identical.
+A rejected observation (unknown outcome, unparseable status, wrong step) is
+refused BEFORE the token is consumed, so the step stays awaiting and the same
+token can be resubmitted with a corrected report. Reapplying an untouched
+awaiting step reissues its token. Readback keys and allowed prefixes are
+journalled at plan time only -- a submission can never supply them -- so
+restart verification is identical.
 
 Host outcomes are checked against the store, never trusted as write evidence:
 - Unmoved revision: known no-write failure.
@@ -439,9 +443,10 @@ def _changed_keys(before: Any, after: Any, prefix: str = "") -> List[str]:
 def _host_expectations(step: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     """(semantic readback keys, allowed key prefixes) for a host step.
 
-    Both are journalled at plan time (or adopted from the first submission) so
-    reconcile can still verify the call after a restart. The default is
-    deliberately narrow: the step's own changes are the only keys it may move.
+    Both are journalled at plan time only -- no submission can supply or replace
+    them -- so reconcile can still verify the call after a restart. The default
+    is deliberately narrow: with no declared prefixes, the step's own changes are
+    the only keys it may move, so a sibling key that also moved is foreign.
     """
     readback_keys = [str(k) for k in (step.get("host_readback_keys") or [])
                      if str(k).strip()]
@@ -775,9 +780,7 @@ def apply_operation(journal: OperationJournal, op_id: str,
 
 def submit_host_result(journal: OperationJournal, op_id: str, seq: int,
                        token: str, outcome: Optional[str] = None,
-                       status: Optional[int] = None,
-                       readback_keys: Optional[List[str]] = None,
-                       allowed_prefixes: Optional[List[str]] = None
+                       status: Optional[int] = None
                        ) -> Dict[str, Any]:
     """Report what the browser's PUBLIC host call actually did.
 
@@ -793,8 +796,14 @@ def submit_host_result(journal: OperationJournal, op_id: str, seq: int,
     Then the engine keeps driving: backend steps run, the next host step becomes
     the new ``host_call``, or the operation commits.
 
-    A missing/foreign/retired/replayed token raises ApplyHostTokenMismatch with
-    NO state change.
+    The observation is validated BEFORE the token is consumed, so every refusal
+    (unknown outcome, unparseable status, wrong step, bad token) is
+    side-effect-free: the step stays ``awaiting_host`` and the same token can be
+    resubmitted with a corrected report.
+
+    Expectations are never accepted from the caller: readback keys and allowed
+    prefixes are journalled by the planner and read back from the step here, so
+    a submission can only report an observation.
     """
     op = journal.get(op_id)
     if op is None:
@@ -811,20 +820,14 @@ def submit_host_result(journal: OperationJournal, op_id: str, seq: int,
         raise ApplyHostTokenMismatch("host token rejected")
     if step["state"] != STEP_AWAITING_HOST:
         raise ApplyHostResultRejected("step is not awaiting a host result")
+    # Validate the fixed observation FIRST: it is pure input checking, and a
+    # rejection must leave the token live so a corrected retry is possible.
+    normalized = _normalize_host_outcome(outcome, status)
     # Consume the token ATOMICALLY before evaluating: a second concurrent
     # submission with the same token loses here and gets the fixed mismatch
     # refusal with no state change, instead of evaluating the same store twice.
     if not journal.consume_host_token(op_id, seq, presented):
         raise ApplyHostTokenMismatch("host token already consumed")
-    normalized = _normalize_host_outcome(outcome, status)
-    # The step's journalled expectations are authoritative (they survive a
-    # restart); a caller may only SUPPLY them when the planner had none.
-    if readback_keys and step.get("host_readback_keys") is None:
-        journal.set_host_expectations(op_id, seq, readback_keys=readback_keys)
-    if allowed_prefixes and step.get("host_allowed_prefixes") is None:
-        journal.set_host_expectations(op_id, seq,
-                                      allowed_prefixes=allowed_prefixes)
-    step = _step_by_seq(_require_op(journal, op_id), seq) or step
     terminal = _record_host_outcome(journal, op_id, step, normalized)
     if terminal is not None:
         return terminal
@@ -1023,6 +1026,9 @@ def undo_operation(journal: OperationJournal, op_id: str) -> Dict[str, Any]:
             continue
         journal.set_step_state(op_id, step["seq"], STEP_COMPENSATED)
     if conflicts:
+        # The only way compensate refuses is a revision that moved after our
+        # write: someone else edited the store. Say so with the fixed category.
+        journal.set_failure_category(op_id, "external_edit")
         journal.finish(op_id, OP_RECOVERY_REQUIRED)
     else:
         journal.finish(op_id, OP_UNDONE)

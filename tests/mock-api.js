@@ -1,7 +1,7 @@
 // In-page mock of the plugin backend. Injected before the bundle loads.
 // Test hooks: window.__mockApi = { failState, failReadback, failUndo, okFalse,
 // rollbackMode: "compensated"|"partial"|"recovery_required", noWrite,
-// statusOverride, overrideState, undoPartial }
+// statusOverride, overrideState, undoPartial, undoConflict }
 (function () {
   const BASE = "/api/plugins/hermes-model-switcher";
 
@@ -750,6 +750,24 @@
       const op = operations[opUndo[1]];
       if (!op) return { status: 200, body: { ok: false, error: "unknown operation" } };
       if (M.failUndo) return { status: 200, body: { ok: false, error: "revision conflict: profile edited after apply" } };
+      // A CONFLICTED undo: every applied profile moved since the apply (e.g. a
+      // host save renamed legacy model keys, or any external edit), so no
+      // snapshot may be restored over it. The whole operation ends
+      // ``recovery_required`` with ok:false and every step ``conflict``.
+      // ``failure`` is "external_edit": the engine's undo path records that
+      // fixed category when a compensate is refused, and _op_dto projects it.
+      if (M.undoConflict) {
+        const operation = {
+          id: op.id,
+          state: "recovery_required",
+          results: operationDto(op).results.map((r) => ({ ...r, status: "conflict" })),
+          undoable: false,
+          final_state: "recovery_required",
+          failure: "external_edit",
+        };
+        operations[op.id] = operation;
+        return { status: 200, body: { ok: false, operation } };
+      }
       // A PARTIAL undo: the first applied step's previous bytes are restored
       // (``compensated``), but a later profile's revision changed since the apply
       // so its undo hits a ``conflict``. The WHOLE operation is therefore

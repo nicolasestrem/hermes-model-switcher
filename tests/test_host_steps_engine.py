@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import json
 import sqlite3
 import stat
@@ -428,32 +429,113 @@ def test_status_without_an_outcome_is_derived(tmp_path):
         journal.close()
 
 
-def test_route_expectations_can_be_supplied_at_submission_time(tmp_path):
-    """A planner that knows nothing about the route can hand the semantic keys
-    and allowed prefixes to the submit call; they are then journalled, so a
-    later reconcile would verify the same write."""
+def test_rejected_outcome_does_not_burn_the_token(tmp_path):
+    """A correct token with an unsupported outcome is refused with NO state
+    change -- including the token itself. A rejection must never strand the
+    step: the browser corrects the report and resubmits the SAME token."""
     paths, journal = _lab(tmp_path)
     path = paths["default"]
     try:
-        target = _host_target(path)
-        target.pop("readback_keys")
-        target.pop("allowed_prefixes")
-        op = plan_operation(journal, [target])
+        op = plan_operation(journal, [_host_target(path)])
+        token = apply_operation(journal, op["op_id"])["host_call"]["token"]
+
+        with pytest.raises(ApplyHostResultRejected):
+            submit_host_result(journal, op["op_id"], 0, token, "bogus")
+
+        after = journal.get(op["op_id"])
+        assert after["state"] == OP_AWAITING_HOST
+        assert after["steps"][0]["state"] == STEP_AWAITING_HOST
+        assert after["steps"][0]["host_token_hash"], \
+            "a rejected observation must not consume the live token"
+
+        _host_write(path, HOST_CHANGES)
+        result = submit_host_result(journal, op["op_id"], 0, token, "ok")
+        assert result["state"] == OP_COMMITTED
+        assert _read(path)["main"]["provider"] == "nous"
+    finally:
+        journal.close()
+
+
+def test_rejected_status_does_not_burn_the_token(tmp_path):
+    """Same guarantee for a status the engine cannot parse: the refusal is
+    side-effect-free, so a corrected retry still applies."""
+    paths, journal = _lab(tmp_path)
+    path = paths["default"]
+    try:
+        op = plan_operation(journal, [_host_target(path)])
+        token = apply_operation(journal, op["op_id"])["host_call"]["token"]
+
+        with pytest.raises(ApplyHostResultRejected):
+            submit_host_result(journal, op["op_id"], 0, token,
+                               status="not-a-status")
+
+        after = journal.get(op["op_id"])
+        assert after["state"] == OP_AWAITING_HOST
+        assert after["steps"][0]["host_token_hash"]
+
+        _host_write(path, HOST_CHANGES)
+        result = submit_host_result(journal, op["op_id"], 0, token, "ok")
+        assert result["state"] == OP_COMMITTED
+    finally:
+        journal.close()
+
+
+def test_route_expectations_are_journalled_at_plan_time(tmp_path):
+    """Expectations are SERVER-derived: the planner persists them with the step
+    (so a later reconcile verifies the same write), and the submission API has
+    no way to supply or replace them."""
+    paths, journal = _lab(tmp_path)
+    path = paths["default"]
+    try:
+        op = plan_operation(journal, [_host_target(path, allowed=("main.",))])
         planned = journal.get(op["op_id"])["steps"][0]
-        assert planned["host_readback_keys"] is None
-        assert planned["host_allowed_prefixes"] is None
+        assert planned["host_readback_keys"] == ["main.provider", "main.model"]
+        # A trailing-dot route prefix is journalled as given and cleaned only
+        # when matching, so the stored plan mirrors what the planner declared.
+        assert planned["host_allowed_prefixes"] == ["main."]
+
+        params = inspect.signature(submit_host_result).parameters
+        assert "readback_keys" not in params
+        assert "allowed_prefixes" not in params
 
         token = apply_operation(journal, op["op_id"])["host_call"]["token"]
         _host_write(path, HOST_CHANGES)
-        result = submit_host_result(
-            journal, op["op_id"], 0, token, "ok",
-            readback_keys=["main.provider", "main.model"],
-            allowed_prefixes=["main."])
+        result = submit_host_result(journal, op["op_id"], 0, token, "ok")
 
         assert result["state"] == OP_COMMITTED
         stored = journal.get(op["op_id"])["steps"][0]
         assert stored["host_readback_keys"] == ["main.provider", "main.model"]
         assert stored["host_allowed_prefixes"] == ["main."]
+    finally:
+        journal.close()
+
+
+def test_no_journalled_prefixes_allow_only_the_steps_own_changes(tmp_path):
+    """Fail-narrow default: with no plan-time allowed_prefixes, the allowlist is
+    the step's own changed keys. A host write that also moves a SIBLING key in
+    the same top-level section is a foreign diff -> recovery_required."""
+    paths, journal = _lab(tmp_path)
+    path = paths["default"]
+    try:
+        target = _host_target(path, readback_keys=())
+        target.pop("allowed_prefixes")
+        op = plan_operation(journal, [target])
+        planned = journal.get(op["op_id"])["steps"][0]
+        assert planned["host_allowed_prefixes"] is None
+        assert engine._host_expectations(planned) == ([], sorted(HOST_CHANGES))
+
+        token = apply_operation(journal, op["op_id"])["host_call"]["token"]
+        # Our intended write landed AND a sibling key we never planned moved.
+        _host_write(path, HOST_CHANGES,
+                    extra={"main.reasoning_effort": "high"})
+
+        result = submit_host_result(journal, op["op_id"], 0, token, "ok")
+
+        assert result["state"] == OP_RECOVERY_REQUIRED
+        assert result["failure_category"] == "external_edit"
+        assert _steps(result) == [STEP_CONFLICT]
+        # Nothing is reverted over an edit that is not ours.
+        assert _read(path)["main"]["reasoning_effort"] == "high"
     finally:
         journal.close()
 

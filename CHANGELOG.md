@@ -39,7 +39,12 @@
 - Backend-slot saves send changed leaves through `save_config(merge_existing=True)`,
   so concurrent edits to unrelated keys survive. A same-key edit landing between
   the revision check and Hermes' own lock can still be overwritten undetected, and
-  deletions need a full-state save. Closing this needs an upstream compare-and-save seam.
+  deletions need a full-state save. Closing this needs an upstream compare-and-save seam
+  ([NousResearch/hermes-agent#142339](https://github.com/NousResearch/hermes-agent/issues/142339)).
+  Non-main slots lack a public typed write route
+  ([#142340](https://github.com/NousResearch/hermes-agent/issues/142340)), and main has no
+  dry-run footprint for exact previews
+  ([#142341](https://github.com/NousResearch/hermes-agent/issues/142341)).
 - When a host save normalizes legacy raw config aliases, Undo cannot recreate them
   exactly and stops at `recovery_required` instead of claiming a restore.
 

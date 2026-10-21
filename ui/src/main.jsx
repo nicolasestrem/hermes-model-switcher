@@ -1637,6 +1637,76 @@ const STATE_COPY = {
   committed: "committed",
 };
 
+// A guarded Undo that cannot run (or ran and did not restore) must say WHY in
+// plain words and what to do next: a disabled button with no reason is a dead
+// end. Reasons are mapped from the FIXED failure category the backend sends
+// (journal.FAILURE_CATEGORIES) and fall back to the terminal state when the DTO
+// carries no category — an undo conflict carries none today, because
+// engine.undo_operation finishes recovery_required without recording one. The
+// enum never reaches the user; these sentences do.
+const UNDO_FAILURE_COPY = {
+  external_edit: ["the config changed outside this operation", "Review the profile config, then refresh."],
+  revision_conflict: ["the profile changed after the review", "Review the profile config, then refresh."],
+  store_unreadable: ["the stored configuration could not be read", "Check access to the config store, then refresh."],
+  write_verification_failed: ["the last write could not be verified", "Check the profile config before trying again."],
+  io_error: ["a storage error interrupted the write", "Check the profile config, then retry."],
+  host_no_write: ["the host reported success but wrote nothing", "Check the profile config, then refresh."],
+  host_declined: ["the host declined the write at the model confirmation", "Review the profile config, then retry."],
+  host_error: ["the host refused the write", "Review the profile config, then retry."],
+  host_token_mismatch: ["a host step was out of sequence", "Refresh and review the operation again."],
+  step_failed: ["a step failed before it could be verified", "Check the profile config, then retry."],
+  blocked: ["the apply was blocked before any write", "Fix the blocking reason, then review again."],
+  unknown_failure: ["the operation could not be verified", "Check the profile config, then refresh."],
+};
+const UNDO_STATE_COPY = {
+  // recovery_required is handled per-action in undoReason(): only an UNDO
+  // reaches it through a revision conflict (external edit); an apply without a
+  // category must not invent that cause.
+  recovery_required: ["the operation could not be verified", "Review the profile config before trying again."],
+  partial: ["the operation only partly rolled back", "Review the profile config, then refresh."],
+  compensated: ["the failed apply was already rolled back", "Review the profile config before another change."],
+  pending: ["nothing was written, so there is nothing to undo", "Review the change again."],
+  failed: ["the apply did not commit", "Review the profile config, then retry."],
+  undone: ["this operation is already undone", "Refresh to confirm the restored revisions."],
+  awaiting_host: ["a host step is still awaiting a result", "Finish or recover the operation first."],
+  applying: ["the operation is still running", "Wait for it to finish, then refresh."],
+  committed: ["this operation has no applied steps to undo", "Refresh to review its current state."],
+};
+
+// Returns {key, why, next, text} for a blocked/non-restoring Undo, or null when
+// Undo is available. ``key`` is the fixed category (or terminal state) for
+// traceability; ``text`` is the sentence rendered beside the control.
+function undoReason({ action, finalState, failure, undoable }) {
+  const fromFailure = failure ? UNDO_FAILURE_COPY[failure] : null;
+  // An undo conflict means the store moved after the apply — the same fact the
+  // external_edit category carries, and the only way undo reaches this state.
+  const undoConflict = action === "undo" && finalState === "recovery_required";
+  const mapped = fromFailure
+    || (undoConflict ? ["the config changed outside this operation", "Review the profile config, then refresh."] : null)
+    || (finalState ? UNDO_STATE_COPY[finalState] : null);
+  if (!mapped) {
+    if (undoable !== false) return null;
+    return {
+      key: "not_undoable",
+      why: "this operation cannot be undone",
+      next: "Refresh to review its current state.",
+      text: "Undo is unavailable: this operation cannot be undone. Refresh to review its current state.",
+    };
+  }
+  const [why, next] = mapped;
+  // An undo that RAN and ended recovery_required did not restore everything;
+  // "unavailable" there would misdescribe a mutation the user requested.
+  const lead = undoConflict ? "Undo did not restore every profile" : "Undo is unavailable";
+  return { key: fromFailure ? failure : finalState, why, next, text: `${lead}: ${why}. ${next}` };
+}
+
+function nameList(names) {
+  const list = (names || []).filter(Boolean);
+  if (list.length <= 1) return list[0] || "";
+  return `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
+}
+
+
 // Only a scalar is displayable: an object would render as "[object Object]" and
 // the safe failure category / state strings are always scalars.
 function scalarText(v) {
@@ -1719,6 +1789,12 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
   const category = scalarText(operation.failure) || results.map((r) => scalarText(r.failure)).find(Boolean) || null;
   const failure = category && Object.hasOwn(FAILURE_COPY, category) ? category : category ? "unknown_failure" : null;
   const failureCopy = failure ? FAILURE_COPY[failure] || "Operation could not be verified — check recovery" : null;
+  // A disabled Undo needs its reason on screen: an operation the backend marks
+  // non-undoable, or one that is recovery_required, gets one plain sentence
+  // beside the control (never a focusable element, never the raw enum).
+  const undoNote = (operation.undoable === false || finalState === "recovery_required")
+    ? undoReason({ action, finalState, failure, undoable: operation.undoable })
+    : null;
   // A failed apply may carry NO failure category (the rollback itself is the
   // outcome); the terminal state still has to be on screen, so the state line
   // is driven by the state, not by the presence of ``failure``. ``pending`` is
@@ -1789,6 +1865,14 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
         </label>
         <button className="hms-undo" data-testid="undo-button" disabled={!undoGuarded || busy || operation.undoable === false}
           onClick={onUndo}>Undo operation</button>
+        {undoNote && (
+          <p className="hms-note hms-undo-note" data-testid="undo-unavailable"
+            data-reason={undoNote.key}
+            data-tone={finalState === "recovery_required" ? "danger" : "warning"}
+            aria-live="polite">
+            {undoNote.text}
+          </p>
+        )}
       </div>
     </aside>
   );
@@ -2416,12 +2500,32 @@ function App() {
       await refreshSilently();
       setRecoveryNeeded(op.operation.state === "recovery_required");
       // A conflicted undo returns ok:false WITH the operation DTO
-      // (recovery_required); render it and say so plainly instead of "Undo
-      // failed" for an outcome the user can actually see in the drawer.
-      const statuses = op.operation.results.map((r) => `${r.profileId} ${r.status}`).join(", ");
-      const outcome = op.ok === true ? "" : ` · ${op.operation.final_state || "incomplete"}` +
-        (op.operation.failure ? ` (${op.operation.failure})` : "");
-      announce(`Undo finished: ${statuses}${outcome}`);
+      // (recovery_required); render it and say so in plain words instead of
+      // "Undo failed" for an outcome the user can actually see in the drawer.
+      // Raw state tokens ("default compensated, research conflict ·
+      // recovery_required") are for the DTO, not for the person reading it.
+      const results = Array.isArray(op.operation.results) ? op.operation.results : [];
+      const restored = results.filter((r) => COMPENSATED_STATUSES.includes(r.status))
+        .map((r) => profileNameOf(r.profileId));
+      const blocked = results.filter((r) => !COMPENSATED_STATUSES.includes(r.status))
+        .map((r) => profileNameOf(r.profileId));
+      if (op.ok === true) {
+        announce(restored.length
+          ? `Undo finished: previous revisions restored for ${nameList(restored)}.`
+          : "Undo finished: no revisions needed restoring.");
+      } else {
+        const parts = [];
+        if (restored.length) parts.push(`${nameList(restored)} restored`);
+        if (blocked.length) parts.push(`${nameList(blocked)} not restored`);
+        const reason = undoReason({
+          action: "undo",
+          finalState: op.operation.final_state || op.operation.state,
+          failure: op.operation.failure || null,
+          undoable: false,
+        });
+        announce(`Undo finished: ${parts.length ? parts.join(", ") : "no profiles restored"}` +
+          `${reason ? ` — ${reason.why}. ${reason.next}` : "."}`, "error");
+      }
     } catch (e) {
       announce("Undo failed: " + (e instanceof ApiError ? e.message : String(e)), "error");
     } finally {
