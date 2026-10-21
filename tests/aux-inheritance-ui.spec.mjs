@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { mockHostReads } from './route-helpers.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -8,6 +9,7 @@ for (const state of ['inherit', 'unset']) for (const width of [1440, 375]) {
     const errors = [];
     page.on('pageerror', e => errors.push(e.message));
     page.on('console', msg => { if (msg.type() === 'error') errors.push(msg.text()); });
+    await mockHostReads(page);
     await page.route('**/tests/mock-api.js', r => r.fulfill({ body: '', contentType: 'application/javascript' }));
     await page.route('**/api/plugins/hermes-model-switcher/state', r => r.fulfill({ json: {
       ok: true, profiles: [{ id: 'default', name: 'Default', writable: true }], presets: [],

@@ -159,7 +159,7 @@ function CatalogPriceCell({ model, field, pending }) {
   if (display) return <span>{display}</span>;
   return (
     <span className="hms-catalog-unknown" title={CATALOG_UNKNOWN_TITLE}
-      aria-label={CATALOG_UNKNOWN_TITLE}>—</span>
+      aria-label={CATALOG_UNKNOWN_TITLE}>price not published</span>
   );
 }
 
@@ -1617,7 +1617,7 @@ const FAILURE_COPY = {
   // classified the result by re-reading the store. The host's own response
   // text never reaches this map — only these fixed categories do.
   host_no_write: "The host reported success but wrote nothing — not applied",
-  host_declined: "Host write declined at the cost confirmation",
+  host_declined: "Host write declined at the model confirmation",
   host_error: "The host refused the write",
   host_token_mismatch: "Host step out of sequence — nothing was changed",
   external_edit: "The host route was changed by something else during apply",
@@ -1700,20 +1700,22 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
   // THAT profile — even when the whole operation is incomplete (another profile
   // hit a conflict). Per-profile bytes are verified independently of the op.
   const isRestored = (status) => COMPENSATED_STATUSES.includes(status) && undoContext;
-  const appliedCount = results.filter((r) => r.status === "applied").length;
-  const restoredCount = results.filter((r) => isRestored(r.status)).length;
-  const conflictCount = results.filter((r) => r.status === "conflict").length;
+  const profileCount = (rows) => new Set(rows.map((r) => r.profileId)).size;
+  const appliedCount = profileCount(results.filter((r) => r.status === "applied"));
+  const restoredCount = profileCount(results.filter((r) => isRestored(r.status)));
+  const conflictCount = profileCount(results.filter((r) => r.status === "conflict"));
   // Any step that is not a verified ``applied`` needs attention — UNLESS it is a
   // compensated/restored step of a user-requested undo. A fully-compensated
   // failed apply therefore reads "0 applied · N need attention" instead of the
   // old, dangerously clean "0 · 0"; a partial undo counts only the conflicted
   // profile (the restored one is genuinely back); an unrecognised future status
   // is counted too rather than silently ignored.
-  const attentionCount = results.filter((r) =>
+  const attentionCount = profileCount(results.filter((r) =>
     r.status !== "applied" && !isRestored(r.status)
-  ).length;
-  const failure = scalarText(operation.failure) || results.map((r) => scalarText(r.failure)).find(Boolean) || null;
-  const failureCopy = failure ? FAILURE_COPY[failure] || failure : null;
+  ));
+  const category = scalarText(operation.failure) || results.map((r) => scalarText(r.failure)).find(Boolean) || null;
+  const failure = category && Object.hasOwn(FAILURE_COPY, category) ? category : category ? "unknown_failure" : null;
+  const failureCopy = failure ? FAILURE_COPY[failure] || "Operation could not be verified — check recovery" : null;
   // A failed apply may carry NO failure category (the rollback itself is the
   // outcome); the terminal state still has to be on screen, so the state line
   // is driven by the state, not by the presence of ``failure``. ``pending`` is
@@ -1753,7 +1755,7 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
         </p>
       )}
       <ul style={{ listStyle: "none", padding: 0 }}>
-        {results.map((r) => {
+        {results.map((r, index) => {
           const isCompensated = COMPENSATED_STATUSES.includes(r.status);
           const label = isCompensated
             ? (undoContext
@@ -1763,7 +1765,7 @@ function OperationDrawer({ open, operation, onUndo, onClose, undoGuarded, setUnd
                   : UNKNOWN_RESTORE_LABEL) // no context: never invent "apply"
             : RESULT_LABEL[r.status] || { text: r.status, color: THEME.fg };
           return (
-            <li key={r.profileId} data-testid={`result-${r.profileId}`}
+            <li key={`${r.profileId}-${index}`} data-testid={`result-${r.profileId}`}
               style={{ borderBottom: `1px solid ${THEME.border}`, padding: "6px 0" }}>
               <strong>{r.profileId}</strong>{" "}
               <span role="status" style={{ color: label.color }} data-status={r.status}>
@@ -1940,24 +1942,25 @@ function ApplyProgress({ progress }) {
   );
 }
 
-// One line per step, in operation order. `results` is the DTO's per-profile
-// status list (the only per-step truth the backend exposes); the host call in
-// flight is appended as the step that is currently running.
+// Results are journal steps (several may share a profile). The host sequence
+// is zero-based and indexes the same step list, including backend-only steps.
 function progressEntries(operation, hostCall, profileNameOf) {
   const entries = ((operation && Array.isArray(operation.results)) ? operation.results : [])
-    .map((result) => ({
-      key: `step-${result.profileId}`,
-      label: `${profileNameOf(result.profileId)} (${result.profileId})`,
+    .map((result, index) => ({
+      key: `step-${index}`,
+      label: `${profileNameOf(result.profileId)} (${result.profileId}) · step ${index + 1}`,
       status: result.status,
     }));
   if (hostCall) {
     const profile = (hostCall.query && hostCall.query.profile) || "";
     const route = String(hostCall.path || "").replace(/^\/api\/model\//, "");
-    entries.push({
+    const running = {
       key: `host-${hostCall.seq}`,
-      label: `host ${route || "write"}${profile ? ` → ${profile}` : ""}`,
+      label: `host ${route || "write"}${profile ? ` → ${profile}` : ""} · step ${hostCall.seq + 1}`,
       status: "awaiting_host",
-    });
+    };
+    if (entries[hostCall.seq]) entries[hostCall.seq] = running;
+    else entries.push(running);
   }
   return entries;
 }
@@ -2044,14 +2047,13 @@ function App() {
     try {
       const enriched = await api.loadState(bundle);
       if (!enriched || !Array.isArray(enriched.slots)) return null;
-      if (seq !== null && seq !== loadSeq.current) return null;
+      if (mine !== hostSeq.current || (seq !== null && seq !== loadSeq.current)) return null;
       setState(enriched);
       setSelection((old) => new Map(enriched.slots.filter((slot) =>
         old.has(slot.profileId + "/" + slot.slotId)).map((slot) =>
         [slot.profileId + "/" + slot.slotId, slot])));
     } catch (e) {
-      // The config-only state stays on screen; no second notice: the host
-      // notice above already says the host half is degraded.
+      setHostNotice({ text: "Host enrichment unavailable. Configuration-only state is shown.", kind: "partial" });
     }
     return bundle;
   };
@@ -2191,6 +2193,7 @@ function App() {
   };
 
   const reviewPreset = async (preset) => {
+    if (mutationLock.current || recoveryNeeded) return;
     invalidateReviews();
     setReviewPreset(preset);
     setPreview(null);
@@ -2281,7 +2284,7 @@ function App() {
     } catch (e) {
       return { outcome: "error", status: hostStatusOf(e) };
     }
-    if (res && res.confirm_required === true) {
+    if (res?.ok === false && res.confirm_required === true && typeof res.confirm_message === "string") {
       setProgress((prev) => (prev ? { ...prev, note: "waiting for your confirmation",
         entries: prev.entries.map((entry) => entry.key === `host-${call.seq}` ? { ...entry, status: "confirm" } : entry) } : prev));
       const accepted = await askConfirm(res.confirm_message);
@@ -2320,7 +2323,7 @@ function App() {
       setOperation(op.operation);
       setOpAction("apply");
       const seen = new Set();
-      let lastSeq = 0;
+      let lastSeq = -1;
       // Bulk operations may contain arbitrarily many valid steps. Detect a
       // repeated or out-of-order instruction before issuing a second write.
       while (op.hostCall) {
@@ -2337,7 +2340,9 @@ function App() {
       }
       const terminal = ["committed", "undone", "partial", "compensated", "recovery_required", "failed"];
       const finalState = op.operation.final_state || op.operation.state;
-      if (!terminal.includes(finalState)) throw new ApiError("Operation is unfinished");
+      const noWriteConflict = finalState === "pending" && op.operation.failure === "revision_conflict" &&
+        op.operation.results.every((r) => ["failed", "pending"].includes(r.status));
+      if (!terminal.includes(finalState) && !noWriteConflict) throw new ApiError("Operation is unfinished");
       setRecoveryNeeded(finalState === "recovery_required");
       setProgress({ entries: progressEntries(op.operation, null, profileNameOf),
         note: op.ok === true ? "finished" : finalState === "recovery_required" ? "recovery required" : "finished with issues" });
@@ -2352,18 +2357,23 @@ function App() {
       // exact operation and reconcile the journal before another mutation.
       if (operationId) {
         setRecoveryNeeded(true);
+        let reconciled = null;
         try {
           let recovered = await api.getOperation(operationId);
           if (["pending", "awaiting_host"].includes(recovered.operation.state)) recovered = await api.recover(operationId);
           setOperation(recovered.operation);
+          reconciled = recovered.operation;
           setRecoveryNeeded(["pending", "awaiting_host", "recovery_required"].includes(recovered.operation.state));
+          await refreshSilently();
           openDrawer(applyOpener.current);
         } catch {
           // Preserve the last known operation and block subsequent mutations.
           setRecoveryNeeded(true);
         }
-        setProgress({ entries: [{ key: "recovery", label: `Operation ${operationId}`, status: "recovery_required" }], note: "check operation before continuing" });
-        announce("Apply interrupted. Check or recover the last operation before continuing.", "error");
+        setProgress(reconciled ? { entries: progressEntries(reconciled, null, profileNameOf), note: "interrupted · " + reconciled.state }
+          : { entries: [{ key: "recovery", label: `Operation ${operationId}`, status: "recovery_required" }], note: "check operation before continuing" });
+        announce(reconciled ? "Apply interrupted. Operation readback: " + reconciled.state
+          : "Apply interrupted. Check or recover the last operation before continuing.", "error");
       } else {
         setProgress({ entries: [{ key: "request", label: "Operation request", status: "failed" }], note: "failed" });
         announce("Apply failed: " + (e instanceof ApiError ? e.message : "Request failed"), "error");
@@ -2542,7 +2552,7 @@ function App() {
             just did nothing. Mirror the same message visibly, next to the
             buttons that trigger it. */}
         {status.text && (
-          <p data-testid="visible-status"
+          <p data-testid="visible-status" data-kind={status.kind}
             style={{
               margin: "0 0 8px", fontSize: 13,
               color: status.kind === "error" ? THEME.danger : THEME.muted,

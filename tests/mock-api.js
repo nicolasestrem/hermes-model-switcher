@@ -174,13 +174,16 @@
         // Every row unknown: exercises the "no cheapest tile when no prices"
         // branch without inventing a provider-specific shape.
         if (M.catalogNoPrices) return { ...mapped, pricingStatus: "unknown", cost: null };
+        if (M.catalogNullNumericModel === m.id && mapped.cost) return {
+          ...mapped, cost: { ...mapped.cost, input: null, output: null, cacheRead: null },
+        };
         return mapped;
       });
       return {
         id: p.id, label: p.label, authenticated: p.authenticated, configured: p.configured,
         isCurrent: p.isCurrent, modelCount: models.length,
-        fetchedAt: refresh ? "2026-10-18T18:00:00Z" : p.fetchedAt,
-        stale: refresh ? false : p.stale,
+        fetchedAt: M.catalogPickerCache ? null : refresh ? "2026-10-18T18:00:00Z" : p.fetchedAt,
+        stale: M.catalogPickerCache ? true : refresh ? false : p.stale,
         warning: p.warning, models,
       };
     });
@@ -199,14 +202,15 @@
   function modelsFor(provider) {
     const row = catalogProviders.find((p) => p.id === provider);
     if (!row || row.authenticated === false) {
-      return { ok: false, provider, models: [], fetchedAt: null, source: "unknown", stale: true,
+      return { ok: false, provider, providers: [], models: [], fetchedAt: null, source: "unknown", stale: true,
         error: `provider '${provider}' is not available in this profile's catalog (not configured or not authenticated)` };
     }
     const extra = provider === "nous" && window.__mockApi.catalogZeroPriced
       ? zeroPricedModels : [];
     const models = [...(row.models || []), ...extra].map((m) => ({ id: m.id, name: m.label }));
     return {
-      ok: true, provider, models, fetchedAt: row.fetchedAt, source: "picker", stale: row.stale,
+      ok: true, provider, models, providers: catalogProviders.map((p) => ({ id: p.id, name: p.label })),
+      fetchedAt: row.fetchedAt, source: "picker", stale: row.stale,
       error: row.warning || (models.length ? null : `provider '${provider}' reported no models`),
     };
   }
@@ -307,10 +311,14 @@
   // POST /api/model/set?profile=… — the host's own assignment route, including
   // its cost guard: an expensive model without `confirm_expensive_model` is
   // refused with `confirm_required: true` + a human `confirm_message`.
-  function hostSet(body, params) {
+  async function hostSet(body, params) {
     const M = window.__mockApi;
+    if (M.hostSetDelayMs) await new Promise((resolve) => setTimeout(resolve, M.hostSetDelayMs));
+    M.hostSetCount = (M.hostSetCount || 0) + 1;
+    if (M.hostFailAfter && M.hostSetCount > M.hostFailAfter) return { status: 503, body: { detail: "private host failure", ok: false } };
     const scope = body.scope || "main";
     const profileId = body.profile || params.get("profile") || "default";
+    if (M.hostSetBody) return { status: 200, body: M.hostSetBody };
     if (M.hostSetHttp) {
       return { status: M.hostSetHttp, body: { detail: "host assignment failed", ok: false } };
     }
@@ -373,24 +381,11 @@
   // single-shot operation reports, so the drawer renders both identically.
   function operationDto(op) {
     if (!op || !Array.isArray(op.steps)) return op; // already a plain DTO
-    const order = [];
-    const byProfile = new Map();
-    for (const step of op.steps) {
-      if (!byProfile.has(step.profileId)) { byProfile.set(step.profileId, []); order.push(step.profileId); }
-      byProfile.get(step.profileId).push(step);
-    }
-    const results = order.map((pid) => {
-      const statuses = byProfile.get(pid).map((s) => s.status);
-      let status = "pending";
-      if (statuses.every((s) => s === "applied")) status = "applied";
-      else if (statuses.some((s) => s === "failed")) status = "failed";
-      else if (statuses.some((s) => s === "pending")) status = "pending";
-      else if (statuses.some((s) => s === "compensated")) status = "compensated";
-      const changed = status === "applied";
-      return { profileId: pid, status,
-        revisionBefore: "rev" + pid + "-a",
-        revisionAfter: changed ? "rev" + pid + "-b" : "rev" + pid + "-a" };
-    });
+    const results = op.steps.map((step) => ({
+      profileId: step.profileId, status: step.status, store: "config",
+      revisionBefore: "rev" + step.profileId + "-a",
+      revisionAfter: "rev" + step.profileId + (step.status === "applied" ? "-b" : "-a"),
+    }));
     return {
       id: op.id, state: op.state, results,
       undoable: results.some((r) => r.status === "applied"),
@@ -429,7 +424,10 @@
       const next = op.steps.find((s) => s.status === "pending");
       if (!next) break;
       if (next.executor === "host") {
-        op.seq += 1;
+        op.seq = op.steps.indexOf(next);
+        next.status = "awaiting_host";
+        op.state = "awaiting_host";
+        op.finalState = "awaiting_host";
         op.token = "tok-" + op.id + "-" + op.seq;
         op.awaiting = { seq: op.seq, token: op.token };
         return hostEnvelope(op, {
@@ -652,11 +650,15 @@
       if (!op.awaiting || body.seq !== op.awaiting.seq || body.token !== op.awaiting.token) {
         return { status: 409, body: { ok: false, error: "host_token_mismatch" } };
       }
-      const step = op.steps.find((s) => s.status === "pending");
+      const step = op.steps.find((s) => s.status === "awaiting_host");
       op.awaiting = null;
       op.token = null;
       const compensateApplied = () => {
-        for (const s of op.steps) if (s.status === "applied") s.status = "compensated";
+        for (const s of op.steps) if (s.status === "applied") {
+          const target = slots.find((row) => row.profileId === s.profileId && row.slotId === s.slotId);
+          if (target && s.change?.from) Object.assign(target, s.change.from);
+          s.status = "compensated";
+        }
       };
       const fail = (status, category) => {
         step.status = status;
@@ -675,6 +677,23 @@
       }
       if (body.outcome === "declined") return fail("compensated", "host_declined");
       return fail("failed", "host_error");
+    }
+    const opRecover = path.match(new RegExp("^" + BASE + "/operations/([^/]+)/recover$"));
+    if (opRecover && method === "POST") {
+      const op = operations[opRecover[1]];
+      if (!op) return { status: 404, body: { ok: false, error: "unknown operation" } };
+      if (op.awaiting) {
+        for (const s of op.steps) {
+          if (s.status === "applied") {
+            const target = slots.find((row) => row.profileId === s.profileId && row.slotId === s.slotId);
+            if (target && s.change?.from) Object.assign(target, s.change.from);
+            s.status = "compensated";
+          } else if (s.status === "awaiting_host") s.status = "failed";
+        }
+        op.awaiting = null; op.token = null;
+        op.state = "compensated"; op.finalState = "compensated"; op.failure = "host_error";
+      }
+      return hostEnvelope(op, null);
     }
     const opUndo = path.match(new RegExp("^" + BASE + "/operations/([^/]+)/undo$"));
     if (opUndo && method === "POST") {
@@ -756,6 +775,10 @@
       try { body = opts && opts.body ? JSON.parse(opts.body) : {}; } catch (e) {}
       window.__mockApi.requests.push({ path: u.pathname, search: u.search, method, body });
       const res = await handle(u.pathname, method, body, u.searchParams);
+      if (u.pathname.endsWith("/host-result") && window.__mockApi.hostResultLoseOnce) {
+        window.__mockApi.hostResultLoseOnce = false;
+        throw new TypeError("Synthetic lost continuation response");
+      }
       if (u.pathname === BASE + "/catalog" && method === "POST") {
         // Expose the exact served aggregate for specs that assert the rendered
         // group/row matrix against the API payload without a second request.

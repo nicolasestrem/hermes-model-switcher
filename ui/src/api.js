@@ -243,7 +243,7 @@ export function validHostPart(part, value) {
 // the host; a preconfirmed body would bypass the user's confirmation dialog.
 export function validateHostCall(call, operationId) {
   const fail = () => { throw new ApiError("Invalid host step", { status: 0 }); };
-  if (!record(call) || call.opId !== operationId || !Number.isInteger(call.seq) || call.seq < 1 ||
+  if (!record(call) || call.opId !== operationId || !Number.isInteger(call.seq) || call.seq < 0 ||
       typeof call.token !== "string" || !call.token || call.method !== "POST" || call.path !== HOST_ROUTES.set ||
       !record(call.query) || Object.keys(call.query).some((k) => k !== "profile") ||
       typeof call.query.profile !== "string" || !call.query.profile || !record(call.body)) fail();
@@ -283,37 +283,43 @@ export function emptyHostBundle() {
   return { profiles: {} };
 }
 
-// Host bundle for a set of profiles: at most `limit` (3) profiles in flight,
-// one request at a time inside a profile. Never throws: unreachable routes
-// degrade to `null` plus one entry in `failures`, so a 404 on an older Hermes
-// can never block the tab.
+// Bound read concurrency across overlapping mount/catalog requests too.
+const hostReadQueue = [];
+let hostReadsActive = 0;
+async function readHostPart(path) {
+  await new Promise((resolve) => {
+    const enter = () => { hostReadsActive += 1; resolve(); };
+    if (hostReadsActive < 3) enter(); else hostReadQueue.push(enter);
+  });
+  try { return await hostJSON(path); }
+  finally { hostReadsActive -= 1; hostReadQueue.shift()?.(); }
+}
+
+// Each profile's options/auxiliary/MoA reads run in parallel, capped at three
+// concurrent reads. No short timeout: custom endpoints may take over 15s.
 export async function loadHostBundle(profileIds, { refresh = false, limit = 3 } = {}) {
   const ids = [...new Set((profileIds || []).filter((id) => typeof id === "string" && id))];
   const host = emptyHostBundle();
+  for (const id of ids) host.profiles[id] = { options: null, auxiliary: null, moa: null };
+  const tasks = ids.flatMap((pid) => HOST_PARTS.map((part) => ({ pid, part })));
   const failures = [];
   const pathFor = (part, pid) => (part === "options" ? hostOptionsPath(pid, { refresh })
     : part === "auxiliary" ? hostAuxiliaryPath(pid) : hostMoaPath(pid));
   let cursor = 0;
   const worker = async () => {
-    while (cursor < ids.length) {
-      const pid = ids[cursor];
-      cursor += 1;
-      const parts = {};
-      for (const part of HOST_PARTS) {
-        try {
-          const value = await hostJSON(pathFor(part, pid));
-          if (!validHostPart(part, value)) throw new ApiError("Malformed host data", { status: 200 });
-          parts[part] = value;
-        } catch (e) {
-          parts[part] = null;
-          failures.push({ profileId: pid, part, status: hostStatusOf(e) });
-        }
+    while (cursor < tasks.length) {
+      const { pid, part } = tasks[cursor++];
+      try {
+        const value = await readHostPart(pathFor(part, pid));
+        if (!validHostPart(part, value)) throw new ApiError("Malformed host data", { status: 200 });
+        host.profiles[pid][part] = value;
+      } catch (e) {
+        failures.push({ profileId: pid, part, status: hostStatusOf(e) });
       }
-      host.profiles[pid] = parts;
     }
   };
-  const width = Math.max(1, Math.min(limit, ids.length || 1));
-  await Promise.all(Array.from({ length: ids.length ? width : 0 }, worker));
+  const width = Math.max(1, Math.min(3, Number(limit) || 3, tasks.length || 1));
+  await Promise.all(Array.from({ length: tasks.length ? width : 0 }, worker));
   return { host, failures };
 }
 

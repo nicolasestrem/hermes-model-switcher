@@ -851,6 +851,8 @@
 .hms-root .hms-apply-progress [data-step-status="applied"] { color: var(--success-color, #3fb950); }
 .hms-root .hms-apply-progress [data-step-status="failed"],
 .hms-root .hms-apply-progress [data-step-status="recovery_required"] { color: var(--danger-color, #e5534b); }
+.hms-root .hms-apply-progress [data-step-status="compensated"],
+.hms-root .hms-apply-progress [data-step-status="conflict"],
 .hms-root .hms-apply-progress [data-step-status="awaiting_host"],
 .hms-root .hms-apply-progress [data-step-status="confirm"],
 .hms-root .hms-host-notice:not([data-state="loading"]) { color: var(--warning-color, #d29922); }

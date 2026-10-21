@@ -156,10 +156,10 @@ test("price matrix renders exact display strings, free badges only for free, and
   await expect(included.locator(".hms-badge-free")).toHaveCount(0);
 
   const unknown = row(page, "nous", "hermes-unknown");
-  await expect(unknown.locator('[data-column="input"]')).toHaveText("—");
+  await expect(unknown.locator('[data-column="input"]')).toHaveText("price not published");
   await expect(unknown.locator('[data-column="input"] .hms-catalog-unknown'))
     .toHaveAttribute("title", /no list price in the installed catalog; never treated as free/);
-  await expect(unknown.locator('[data-column="output"]')).toHaveText("—");
+  await expect(unknown.locator('[data-column="output"]')).toHaveText("price not published");
   await expect(unknown.locator('[data-column="status"]')).toHaveText("unknown");
 
   // Exactly the one free fixture model wears the badge, and the default
@@ -192,7 +192,7 @@ test("a provider-stated zero or 'free' rate for one direction is real data, neve
 
   // (b) absent cost stays unknown with the never-treated-as-free explanation.
   const unknown = row(page, "nous", "hermes-unknown");
-  await expect(unknown.locator('[data-column="input"]')).toHaveText("—");
+  await expect(unknown.locator('[data-column="input"]')).toHaveText("price not published");
   await expect(unknown.locator('[data-column="input"] .hms-catalog-unknown'))
     .toHaveAttribute("title", "no list price in the installed catalog; never treated as free");
 

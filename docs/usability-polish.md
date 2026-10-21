@@ -124,6 +124,41 @@ still applies.
   (Tab / Shift+Tab cycle inside), **Escape closes** it, and focus **returns** to
   the opening control — or to **Refresh state** when the opener is disabled.
 
+## Public host-seam state matrix
+
+This is the implementation/verification matrix, not a visual-QA verdict. Mock
+keyboard, request and state assertions exercise the compiled bundle. Screenshot
+review and final integration belong to the integrating owner; no live host write
+or real-provider pricing claim is implied here.
+
+| Surface | State | 1440 px | 768 px | 375 px |
+| --- | --- | --- | --- | --- |
+| Host data notice | loading | Muted polite live line; matrix usable | Same, wrapping | Same, wrapping; no blocked selectors |
+| Host data notice | partial | Missing part named; valid parts retained | Same | Same; no horizontal overflow |
+| Host data notice | unavailable / older-host 404 | Warning line; config-only state retained | Same | Same |
+| Apply progress | pending | Ordered journal-step list beside Apply | Stacked list | Wrapped labels, vertical flow |
+| Apply progress | awaiting host | Running step named; subsequent steps pending | Same | Same |
+| Apply progress | confirm | Running step says confirm; one modal owns focus | Same | Same; viewport gutters |
+| Apply progress | done | Backend readback statuses, never inferred host success | Same | Same |
+| Apply progress | failed / rolled back | Danger failure or warning rollback text; consumed review | Same | Same |
+| Apply progress | recovery_required / interrupted | Fixed error, recovery control; further mutations blocked | Same | Same; control stays reachable |
+| Host confirmation | open / confirm | Neutral title, verbatim text, Confirm/Cancel | Maximum width 520 px | 16 px gutters; vertical scroll |
+| Host confirmation | keyboard / Escape | Initial Confirm focus, Tab cycle; Escape declines | Same | Same; reduced-motion unchanged |
+| Host confirmation | closed | Return to Apply; final summary drawer then returns to Apply on close | Same | Same |
+| Host apply error | non-2xx or ok:false | Inline danger message + polite live announcement; numeric status only reported | Same | Same |
+| Catalog refresh | loading / completed | Explicit refresh=1 options refetch; refresh-requested provenance | Same | Same; existing controls wrap |
+| Catalog provenance | no fetch timestamp | “from Hermes picker cache”; no invented time or default stale warning | Same | Same |
+| Model prices | priced / free / unknown / pending | Verbatim host displays; unknown says price not published, sorts last | Same | Table owns horizontal scroll |
+| Provider evidence | unauthenticated / provider error | Existing sign-in/error row, never labelled free | Same | Wrapped notice |
+
+No decorative animation is introduced. New surfaces disable transitions and
+animation under prefers-reduced-motion. Native selects, first-Tab target,
+matrix columns, exact provider/model IDs and plugin success-envelope rules stay
+unchanged. A journal result is a step, not a profile aggregate: multiple results
+for the same profile have unique React keys, and counts labelled “profiles” use
+unique profile IDs. Known no-write revision conflicts remain reviewable;
+ambiguous interrupted writes never replay a host instruction automatically.
+
 ## Preserved gates
 
 The polish does not relax the review pipeline:

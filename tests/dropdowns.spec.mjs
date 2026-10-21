@@ -88,8 +88,8 @@ test("catalog line is one compact summary; freshness detail stays collapsed; Ref
   await expect(page.locator('[data-provider-freshness="opencode-go"]')).toContainText("stale");
 
   await page.getByTestId("refresh-catalog").click();
+  await expect.poll(async () => (await catalogRequests(page)).length).toBe(2);
   const refreshed = await catalogRequests(page);
-  expect(refreshed.length).toBe(2);
   expect(refreshed[1].body.refresh).toBe(true);
   await expect(page.locator('[data-provider-freshness="nous"]')).toContainText("2026-10-18T18:00:00Z");
 });

@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { setRoute, modelExact } from "./route-helpers.mjs";
+import { api, loadHostBundle, validateHostCall, validHostPart } from "../ui/src/api.js";
 
 // Section E: the plugin's host seam. The tab reads Hermes' own model routes
 // (/api/model/options|auxiliary|moa) through the dashboard SDK, sends that host
@@ -93,21 +94,26 @@ test("apply performs two host steps plus a mixed backend step, shown per step", 
   // envelope handed out; the status is numeric only.
   const results = (await requests(page)).filter((r) => r.path.endsWith("/host-result"));
   expect(results.map((r) => r.body)).toEqual([
+    { seq: 0, token: "tok-op-1-0", outcome: "ok" },
     { seq: 1, token: "tok-op-1-1", outcome: "ok" },
-    { seq: 2, token: "tok-op-1-2", outcome: "ok" },
   ]);
 
   // One operation request only — the loop lives in the browser, not in a
   // second apply call.
-  expect((await requests(page)).filter((r) => r.path.endsWith("/operations"))).toHaveLength(1);
+  const operationRequests = (await requests(page)).filter((r) => r.path.endsWith("/operations"));
+  expect(operationRequests).toHaveLength(1);
+  const previewRequest = (await requests(page)).find((r) => r.path.endsWith("/preview"));
+  expect(operationRequests[0].body.host).toEqual(previewRequest.body.host);
+  expect(hostSets.every((r) => r.sessionHeader === "fixture-session")).toBe(true);
 
   // Per-step progress, and the final per-profile truth from the DTO.
   await expect(progress).toContainText("Apply progress — finished");
-  await expect(progress.locator("li")).toHaveCount(2);
-  await expect(page.getByTestId("apply-step-step-default")).toHaveAttribute("data-step-status", "applied");
-  await expect(page.getByTestId("apply-step-step-research")).toHaveAttribute("data-step-status", "applied");
+  await expect(progress.locator("li")).toHaveCount(3);
+  for (const seq of [0, 1, 2]) await expect(page.getByTestId(`apply-step-step-${seq}`)).toHaveAttribute("data-step-status", "applied");
   await expect(page.getByTestId("result-default")).toContainText("Applied + read back");
-  await expect(page.getByTestId("result-research")).toContainText("Applied + read back");
+  await expect(page.getByTestId("result-research")).toHaveCount(2);
+  await expect(page.getByTestId("result-research").first()).toContainText("Applied + read back");
+  await expect(page.getByTestId("result-research").last()).toContainText("Applied + read back");
   await expect(page.getByTestId("live-status")).toContainText("finished");
 });
 
@@ -153,7 +159,7 @@ test("the host's expensive-model guard: Confirm applies with confirm_expensive_m
   const declined = (await requests(page)).filter((r) => r.path.endsWith("/host-result")).pop();
   expect(declined.body.outcome).toBe("declined");
   await expect(page.getByTestId("operation-failure")).toHaveAttribute("data-failure-category", "host_declined");
-  await expect(page.getByTestId("operation-failure")).toContainText("declined at the cost confirmation");
+  await expect(page.getByTestId("operation-failure")).toContainText("declined at the model confirmation");
   await expect(page.getByTestId("result-default")).toContainText("Rolled back after failed apply");
 });
 
@@ -165,10 +171,12 @@ test("a host error during apply is reported by fixed category, never the host's 
   await expect(page.getByTestId("operation-drawer")).toBeVisible();
   // The host route answered 500; only the NUMBER crosses into the backend.
   const reported = (await requests(page)).filter((r) => r.path.endsWith("/host-result")).pop();
-  expect(reported.body).toEqual({ seq: 1, token: "tok-op-1-1", outcome: "error", status: 500 });
+  expect(reported.body).toEqual({ seq: 0, token: "tok-op-1-0", outcome: "error", status: 500 });
 
   await expect(page.getByTestId("operation-failure")).toHaveAttribute("data-failure-category", "host_error");
   await expect(page.getByTestId("operation-failure")).toContainText("The host refused the write");
+  await expect(page.getByTestId("visible-status")).toHaveAttribute("data-kind", "error");
+  await expect(page.getByTestId("visible-status")).toHaveCSS("color", "rgb(229, 83, 75)");
   // Nothing was written for this profile: its step is a failed write, never a
   // verified restore.
   await expect(page.getByTestId("result-default")).toContainText("FAILED — not verified");
@@ -199,8 +207,9 @@ test("a missing host route degrades with a notice instead of blocking the tab", 
   expect((await hostRequests(page, "auxiliary")).length).toBeGreaterThan(0);
 });
 
-test("confirmation owns keyboard focus at mobile width and Escape cancels", async ({ page }) => {
-  await page.setViewportSize({ width: 375, height: 812 });
+for (const width of [1440, 768, 375]) test(`confirmation owns keyboard focus at ${width}px and Escape cancels`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 812 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
   await open(page);
   await selectAndReview(page, ["Select default main"], "nous", "hermes-4-405b-max", { exact: true });
   await page.getByTestId("apply-custom").click();
@@ -209,6 +218,10 @@ test("confirmation owns keyboard focus at mobile width and Escape cancels", asyn
   const confirm = page.getByTestId("confirm-accept");
   const cancel = page.getByTestId("confirm-cancel");
   await expect(confirm).toBeFocused();
+  await expect(dialog).toHaveCSS("animation-name", "none");
+  await expect(dialog).toHaveCSS("box-shadow", "none");
+  for (const button of [confirm, cancel]) expect((await button.boundingBox()).height).toBeGreaterThanOrEqual(38);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
   await page.keyboard.press("Tab");
   await expect(cancel).toBeFocused();
   await page.keyboard.press("Shift+Tab");
@@ -232,4 +245,188 @@ test("Refresh catalog refetches the host options with refresh=1 before the trans
   const refreshed = (await requests(page)).filter((r) => r.path.endsWith("/catalog") && r.body.refresh === true);
   expect(refreshed).toHaveLength(1);
   expect(refreshed[0].body.options.providers.length).toBeGreaterThan(0);
+});
+
+for (const part of ["options", "auxiliary", "moa"]) {
+  test(`HTTP-200 malformed ${part} is null evidence, not an empty success`, async ({ page }) => {
+    await open(page, { hostWrongShapeParts: [part] });
+    const notice = page.getByTestId("host-notice");
+    await expect(notice).toHaveAttribute("data-state", "partial");
+    await expect(notice).toContainText(part);
+    await expect.poll(async () => (await requests(page)).filter((r) => r.path.endsWith("/state") && r.method === "POST").length).toBeGreaterThan(0);
+    const sent = (await requests(page)).filter((r) => r.path.endsWith("/state") && r.method === "POST").pop();
+    expect(sent.body.host.profiles.default[part]).toBeNull();
+    await expect(page.getByLabel("Select default main", { exact: true })).toBeEnabled();
+  });
+}
+
+test("host reads are non-blocking, missing routes become unavailable, and notices are live", async ({ page }) => {
+  await open(page, { hostMissing: true, hostDelayMs: 250 });
+  await expect(page.getByRole("heading", { name: "Model Switcher", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Select default main", { exact: true })).toBeEnabled();
+  const notice = page.getByTestId("host-notice");
+  await expect(notice).toHaveAttribute("aria-live", "polite");
+  await expect(notice).toHaveAttribute("data-state", "loading");
+  await expect(notice).toHaveAttribute("data-state", "unavailable");
+});
+
+test("a second host step can fail after the first wrote; only a numeric status leaves the UI", async ({ page }) => {
+  await open(page, { hostFailAfter: 1 });
+  await selectAndReview(page, ["Select default main", "Select research main"], "nous", "hermes-4-405b");
+  await page.getByTestId("apply-custom").click();
+  await expect(page.getByTestId("operation-failure")).toHaveAttribute("data-failure-category", "host_error");
+  const reports = (await requests(page)).filter((r) => r.path.endsWith("/host-result"));
+  expect(reports.map((r) => r.body)).toEqual([
+    { seq: 0, token: "tok-op-1-0", outcome: "ok" },
+    { seq: 1, token: "tok-op-1-1", outcome: "error", status: 503 },
+  ]);
+  expect(JSON.stringify(reports)).not.toContain("private host failure");
+  await expect(page.getByTestId("apply-progress")).toHaveAttribute("aria-live", "polite");
+  await expect(page.getByTestId("apply-progress")).toContainText("rolled back");
+});
+
+test("HTTP-200 ok:false without confirmation is an error, not success or an invented dialog", async ({ page }) => {
+  await open(page, { hostSetBody: { ok: false, message: "private refusal" } });
+  await selectAndReview(page, ["Select default main"], "nous", "hermes-4-405b");
+  await page.getByTestId("apply-custom").click();
+  await expect(page.getByTestId("operation-failure")).toHaveAttribute("data-failure-category", "host_error");
+  await expect(page.getByTestId("confirm-dialog")).toHaveCount(0);
+  const report = (await requests(page)).find((r) => r.path.endsWith("/host-result"));
+  expect(report.body).toEqual({ seq: 0, token: "tok-op-1-0", outcome: "error", status: 200 });
+});
+
+test("retired catalog/model GETs are never used; POSTs carry the exact host bundle", async ({ page }) => {
+  await open(page);
+  await page.getByTestId("catalog-toggle").click();
+  await expect(page.getByTestId("catalog-summary-strip")).toBeVisible();
+  await setRoute(page, "unknown-provider", "unknown-model", { exact: true });
+  await expect.poll(async () => (await requests(page)).filter((r) => r.path.endsWith("/models")).length).toBeGreaterThan(0);
+  const transforms = (await requests(page)).filter((r) => /\/(catalog|models)$/.test(r.path));
+  expect(transforms.every((r) => r.method === "POST")).toBe(true);
+  for (const r of transforms) {
+    expect(r.body.options).toEqual(r.body.host.profiles[r.body.profile].options);
+  }
+});
+
+test("SDK is resolved at request time, injects auth, and is never bypassed by bare host fetch", async () => {
+  const previous = globalThis.__HERMES_PLUGIN_SDK__;
+  const raw = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = () => { throw new Error("bare fetch forbidden"); };
+  try {
+    for (const id of ["first", "replacement"]) {
+      globalThis.__HERMES_PLUGIN_SDK__ = { fetchJSON: async (url, init) => {
+        calls.push({ id, url, init });
+        return { ok: true };
+      }};
+      await api.hostCall({ opId: "op", seq: 0, token: "token", method: "POST", path: "/api/model/set",
+        query: { profile: "default" }, body: { scope: "main", provider: "nous", model: "model" } });
+    }
+    expect(calls.map((c) => c.id)).toEqual(["first", "replacement"]);
+    expect(calls.every((c) => c.url === "/api/model/set?profile=default")).toBe(true);
+    expect(calls[0].init.headers["Content-Type"]).toBe("application/json");
+    globalThis.__HERMES_PLUGIN_SDK__ = undefined;
+    await expect(api.hostCall({ opId: "op", seq: 0, token: "token", method: "POST", path: "/api/model/set",
+      query: { profile: "default" }, body: { scope: "main", provider: "nous", model: "model" } })).rejects.toThrow("SDK unavailable");
+  } finally { globalThis.__HERMES_PLUGIN_SDK__ = previous; globalThis.fetch = raw; }
+});
+
+test("overlapping host bundles cap concurrency at three and validate real response shapes", async () => {
+  const previous = globalThis.__HERMES_PLUGIN_SDK__;
+  let active = 0, peak = 0;
+  const calls = [];
+  globalThis.__HERMES_PLUGIN_SDK__ = { fetchJSON: async (path) => {
+    active += 1; peak = Math.max(peak, active); calls.push(path);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    active -= 1;
+    if (path.includes("/options")) return { provider: "nous", model: "model", providers: [] };
+    if (path.includes("/auxiliary")) return { main: { provider: "nous", model: "model" }, tasks: [] };
+    return { default_preset: "default", active_preset: "", presets: {} };
+  }};
+  try {
+    const results = await Promise.all([loadHostBundle(["default", "research"], { limit: 99 }), loadHostBundle(["archived"])]);
+    expect(peak).toBe(3);
+    expect(calls).toHaveLength(9);
+    expect(results.every((r) => r.failures.length === 0)).toBe(true);
+    for (const part of ["options", "auxiliary", "moa"]) expect(validHostPart(part, {})).toBe(false);
+  } finally { globalThis.__HERMES_PLUGIN_SDK__ = previous; }
+});
+
+test("host instructions fail closed before credentials, profile overrides, or preconfirmation can escape", async () => {
+  const base = { opId: "op", seq: 0, token: "token", method: "POST", path: "/api/model/set",
+    query: { profile: "default" }, body: { scope: "main", provider: "nous", model: "model" } };
+  expect(validateHostCall(base, "op")).toBe(base);
+  for (const override of [
+    { opId: "other" }, { seq: -1 }, { path: "https://foreign.invalid/api/model/set" }, { method: "GET" },
+    { body: { ...base.body, profile: "other" } }, { body: { ...base.body, api_key: "not-allowed" } },
+    { body: { ...base.body, confirm_expensive_model: true } }, { body: { ...base.body, base_url: "https://example.invalid" } },
+    { body: { scope: "auxiliary", provider: "p", model: "m", task: "vision", base_url: "https://u:p@example.invalid" } },
+  ]) expect(() => validateHostCall({ ...base, ...override }, "op")).toThrow("Invalid host step");
+});
+
+
+test("lost host-result response is reconciled, not replayed; earlier host writes roll back", async ({ page }) => {
+  await open(page, { hostResultLoseOnce: true });
+  await selectAndReview(page, ["Select default main", "Select research main"], "nous", "hermes-4-405b");
+  await page.getByTestId("apply-custom").click();
+  await expect(page.getByTestId("operation-drawer")).toBeVisible();
+  await expect(page.getByTestId("live-status")).toContainText("Operation readback: compensated");
+  const recorded = await requests(page);
+  expect(recorded.filter((r) => r.path.endsWith("/set"))).toHaveLength(1);
+  expect(recorded.filter((r) => r.path.endsWith("/host-result"))).toHaveLength(1);
+  expect(recorded.filter((r) => r.path.endsWith("/recover"))).toHaveLength(1);
+  await expect(page.getByTestId("preview-panel")).toHaveCount(0);
+  const configured = await page.evaluate(async () => (await (await fetch("/api/plugins/hermes-model-switcher/state")).json()).slots);
+  const original = configured.find((s) => s.profileId === "default" && s.slotId === "main");
+  expect(original.provider).toBe("anthropic");
+  expect(original.model).toBe("claude-sonnet-4-6");
+});
+
+test("410 catalog/model refusals surface without any fallback GET", async () => {
+  const previous = globalThis.__HERMES_PLUGIN_SDK__;
+  const calls = [];
+  globalThis.__HERMES_PLUGIN_SDK__ = { authedFetch: async (path, init) => {
+    calls.push({ path, method: init.method });
+    return new Response(JSON.stringify({ ok: false, reason: "hostCatalogRequired" }), { status: 410 });
+  }};
+  try {
+    for (const transform of [api.getCatalog, api.getModels]) {
+      await expect(transform({ profileId: "default", host: { profiles: {} } })).rejects.toMatchObject({ status: 410 });
+    }
+    expect(calls).toEqual([
+      { path: "/api/plugins/hermes-model-switcher/catalog", method: "POST" },
+      { path: "/api/plugins/hermes-model-switcher/models", method: "POST" },
+    ]);
+  } finally { globalThis.__HERMES_PLUGIN_SDK__ = previous; }
+});
+
+test("null numeric prices keep host display text and sort after known numeric prices in both directions", async ({ page }) => {
+  await open(page, { catalogNullNumericModel: "hermes-4-405b" });
+  await page.getByTestId("catalog-toggle").click();
+  const row = page.locator('tr[data-provider-id="nous"][data-model-id="hermes-4-405b"]');
+  await expect(row.locator('[data-column="input"]')).toHaveText("$10.00");
+  const payload = await page.evaluate(() => window.__mockApi.lastCatalog);
+  expect(payload.providers.find((p) => p.id === "nous").models.find((m) => m.id === "hermes-4-405b").cost.input).toBeNull();
+  await page.getByTestId("catalog-group-toggle").click();
+  for (const sort of ["price-asc", "price-desc"]) {
+    await page.getByTestId("catalog-sort").selectOption(sort);
+    const models = await page.locator('tr[data-model-id]').evaluateAll((rows) => rows.map((r) => r.dataset.modelId));
+    expect(models.indexOf("deepseek-v4.1-flash")).toBeLessThan(models.indexOf("hermes-4-405b"));
+    expect(models.indexOf("hermes-filler-5")).toBeLessThan(models.indexOf("hermes-4-405b"));
+  }
+  await expect(page.locator('tr[data-model-id="hermes-unknown"] [data-column="input"]')).toHaveText("price not published");
+});
+
+test("cache-only host provenance does not label every provider stale or invent fetch times", async ({ page }) => {
+  await open(page, { catalogPickerCache: true });
+  await page.getByTestId("catalog-toggle").click();
+  const freshness = page.getByTestId("catalog-freshness-details");
+  await expect(freshness.locator("summary")).toContainText("from Hermes picker cache");
+  await expect(freshness.locator("summary")).not.toContainText("marked stale");
+  await expect(page.locator(".hms-catalog-stale")).toHaveCount(0);
+  await expect(page.getByTestId("catalog-summary")).toContainText("from Hermes picker cache");
+  await page.getByTestId("catalog-view-refresh").click();
+  await expect(freshness.locator("summary")).toContainText("refresh requested");
+  await freshness.locator("summary").click();
+  await expect(freshness).toContainText("No provider reported a fetch timestamp");
 });

@@ -210,7 +210,7 @@ test("failed read and ok:false are not success", async ({ page }) => {
   // non-success outcome so "finished" alone never reads as success.
   await expect(page.getByTestId("live-status")).toContainText("finished");
   await expect(page.getByTestId("live-status")).toContainText("recovery_required");
-  expect(await statusColor(page)).toBe("rgb(154, 161, 173)"); // THEME.muted fallback
+  expect(await statusColor(page)).toBe("rgb(229, 83, 75)"); // explicit error kind; no regex severity
   // a failed (non-committed) operation is not undoable through the drawer, even
   // once the guard is acknowledged — the backend assembles this via ``undoable``.
   await expect(page.getByTestId("undo-button")).toBeDisabled();
