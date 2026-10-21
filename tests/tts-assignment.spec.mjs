@@ -1,14 +1,19 @@
 import { test, expect } from '@playwright/test';
-import { setProvider, setModel } from "./route-helpers.mjs";
+import { setProvider, setModel, mockHostReads } from "./route-helpers.mjs";
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 const BASE = '/api/plugins/hermes-model-switcher';
 
 async function openAssignmentFixture(page) {
-  await page.route('**/tests/mock-api.js', r => r.fulfill({ body: '', contentType: 'application/javascript' }));
-  await page.route('**' + BASE + '/catalog?*', r => r.fulfill({ json: {
+  await mockHostReads(page);
+    await page.route('**/tests/mock-api.js', r => r.fulfill({ body: '', contentType: 'application/javascript' }));
+  await page.route('**' + BASE + '/catalog', r => r.fulfill({ json: {
     ok: true, profileId: 'default', providers: [], cost: { pending: false, unavailableProviders: [] }, error: null,
+  } }));
+  await page.route('**' + BASE + '/models', r => r.fulfill({ json: {
+    ok: true, providers: [], models: [], provider: r.request().postDataJSON()?.provider || "",
+    fetchedAt: null, source: "fixture", stale: true, error: null,
   } }));
   await page.route('**' + BASE + '/state', r => r.fulfill({ json: {
     ok: true, profiles: [{ id: 'default', name: 'Default', writable: true }], presets: [],
@@ -86,7 +91,7 @@ for (const viewport of [{ width: 1440, height: 900, theme: 'dark' }, { width: 37
     fs.mkdirSync(root, { recursive: true });
     const image = path.join(root, `tts-${viewport.width}-${viewport.theme}.png`);
     await page.screenshot({ path: image, fullPage: true });
-    const files = ['ui/src/main.jsx', 'ui/src/styles.css', 'dashboard/dist/index.js', 'dashboard/dist/style.css'];
+    const files = ['ui/src/main.jsx', 'ui/src/api.js', 'ui/src/styles.css', 'dashboard/dist/index.js', 'dashboard/dist/style.css'];
     const digest = crypto.createHash('sha256');
     for (const file of files) digest.update(fs.readFileSync(file));
     fs.writeFileSync(path.join(root, `tts-${viewport.width}-${viewport.theme}.json`), JSON.stringify({

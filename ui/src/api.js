@@ -145,37 +145,213 @@ function asPresent(v) {
   return v === undefined || v === null || v === "" ? null : v;
 }
 
-// Provider-aware model catalog query. The endpoint is scoped to a provider (and
-// optionally a profile) so the picker never offers models that cannot be routed
-// there. `refresh` forces a live re-fetch instead of a cached catalog.
-// Exported so the URL contract is unit-testable without a browser.
-export function modelsUrl({ provider, profileId, refresh } = {}) {
+// ---------------------------------------------------------------------------
+// Host data: Hermes' own public model routes
+// ---------------------------------------------------------------------------
+// These are NOT plugin routes. They live on the host (`/api/model/...`), so
+// they are called through the dashboard SDK's `fetchJSON` (session token, base
+// path and auth all handled by the shell) with an EXPLICIT `?profile=`, never
+// through the plugin prefix and never through a helper that defaults to the
+// "management profile" — the switcher must read the profile it is showing.
+export const HOST_ROUTES = {
+  options: "/api/model/options",
+  auxiliary: "/api/model/auxiliary",
+  moa: "/api/model/moa",
+  set: "/api/model/set",
+};
+
+// The profile name `/state` reports ("default" for the root home — verified
+// against the host's `_config_profile_scope`/`_resolve_profile_dir`, where
+// "default" is the alias for ~/.hermes).
+export function hostOptionsPath(profileId, { refresh = false } = {}) {
   const qs = new URLSearchParams();
-  if (provider) qs.set("provider", provider);
-  if (profileId) qs.set("profileId", profileId);
+  if (profileId) qs.set("profile", profileId);
+  // Dashboard surfaces keep the full provider universe (setup affordances).
+  qs.set("include_unconfigured", "1");
   if (refresh) qs.set("refresh", "1");
-  const s = qs.toString();
-  return "/models" + (s ? "?" + s : "");
+  return HOST_ROUTES.options + "?" + qs.toString();
 }
 
-// Aggregate provider -> models -> cost catalog for one profile. The frozen DTO
-// is ``{ok, profileId, providers:[{id,label,authenticated,configured,isCurrent,
-// modelCount,fetchedAt,stale,warning,models:[{id,label,pricingStatus,cost}]}],
-// cost:{pending,unavailableProviders}, error}``. ``refresh=1`` is reserved for
-// an explicit user refresh — never sent on first open or on mount.
-// Exported so the URL contract is unit-testable without a browser.
-export function catalogUrl({ profileId, provider, refresh } = {}) {
+export function hostAuxiliaryPath(profileId) {
   const qs = new URLSearchParams();
-  if (profileId) qs.set("profileId", profileId);
-  if (provider) qs.set("provider", provider);
-  if (refresh) qs.set("refresh", "1");
+  if (profileId) qs.set("profile", profileId);
   const s = qs.toString();
-  return "/catalog" + (s ? "?" + s : "");
+  return HOST_ROUTES.auxiliary + (s ? "?" + s : "");
+}
+
+export function hostMoaPath(profileId) {
+  const qs = new URLSearchParams();
+  if (profileId) qs.set("profile", profileId);
+  const s = qs.toString();
+  return HOST_ROUTES.moa + (s ? "?" + s : "");
+}
+
+// Numeric HTTP status of anything a host call threw. The SDK throws an
+// `ApiError` carrying `status`; the fixture SDK throws `Error("<status>: ...")`.
+// Anything else (network failure) is 0. Only the NUMBER ever leaves this
+// module — host response text is never forwarded anywhere.
+export function hostStatusOf(err) {
+  if (!err) return 0;
+  const direct = Number(err.status);
+  if (Number.isFinite(direct) && direct > 0) return Math.trunc(direct);
+  const m = /^\s*(\d{3})\b/.exec(String(err.message || ""));
+  return m ? Number(m[1]) : 0;
+}
+
+// A failed host part, as a fixed category the UI can show: the route name and
+// the numeric status. Never the host's message.
+export function hostFailureText(failures) {
+  const list = Array.isArray(failures) ? failures : [];
+  if (!list.length) return "";
+  const routes = [...new Set(list.map((f) => f.part))];
+  const statuses = [...new Set(list.map((f) => f.status))];
+  const routeText = routes.join(", ");
+  const statusText = statuses.filter((s) => s > 0).map((s) => "HTTP " + s).join(", ") || "unreachable";
+  return "Host data unavailable (" + routeText + " — " + statusText + "). " +
+    "Catalog and assignment details may be incomplete.";
+}
+
+// SDK.fetchJSON injects the session token. Resolve the SDK on every request;
+// missing SDK is unavailable evidence, never permission for a bare host fetch.
+function hostTransport() {
+  const sdk = globalThis.__HERMES_PLUGIN_SDK__;
+  if (sdk && typeof sdk.fetchJSON === "function") {
+    return (url, init) => sdk.fetchJSON(url, init);
+  }
+  throw new ApiError("Dashboard SDK unavailable", { status: 0 });
+}
+
+// Validate real host read shapes, not the plugin's {ok:true} envelope.
+const record = (v) => Boolean(v && typeof v === "object" && !Array.isArray(v));
+const routePair = (v) => record(v) && typeof v.provider === "string" && typeof v.model === "string";
+export function validHostPart(part, value) {
+  if (!record(value)) return false;
+  if (part === "options") return Array.isArray(value.providers) &&
+    typeof value.provider === "string" && typeof value.model === "string" &&
+    value.providers.every((p) => record(p) && typeof p.slug === "string" &&
+      typeof p.name === "string" && Array.isArray(p.models) && p.models.every((m) => typeof m === "string"));
+  if (part === "auxiliary") return Array.isArray(value.tasks) && routePair(value.main) &&
+    value.tasks.every((t) => routePair(t) && typeof t.task === "string" && typeof t.base_url === "string");
+  if (part === "moa") return typeof value.default_preset === "string" &&
+    typeof value.active_preset === "string" && record(value.presets) &&
+    Object.values(value.presets).every((preset) => record(preset) &&
+      Array.isArray(preset.reference_models) && preset.reference_models.every(routePair) && routePair(preset.aggregator));
+  return false;
+}
+
+// Fail closed before an authenticated write. Body profile overrides query on
+// the host; a preconfirmed body would bypass the user's confirmation dialog.
+export function validateHostCall(call, operationId) {
+  const fail = () => { throw new ApiError("Invalid host step", { status: 0 }); };
+  if (!record(call) || call.opId !== operationId || !Number.isInteger(call.seq) || call.seq < 0 ||
+      typeof call.token !== "string" || !call.token || call.method !== "POST" || call.path !== HOST_ROUTES.set ||
+      !record(call.query) || Object.keys(call.query).some((k) => k !== "profile") ||
+      typeof call.query.profile !== "string" || !call.query.profile || !record(call.body)) fail();
+  const b = call.body;
+  const allowed = ["scope", "provider", "model", "task", "base_url", "reasoning_effort"];
+  if (Object.keys(b).some((k) => !allowed.includes(k)) || !["main", "auxiliary"].includes(b.scope) ||
+      typeof b.provider !== "string" || typeof b.model !== "string") fail();
+  if (b.scope === "main" && ("base_url" in b || "task" in b || "reasoning_effort" in b)) fail();
+  if (b.scope === "auxiliary" && (typeof b.task !== "string" || !b.task)) fail();
+  if ("base_url" in b) {
+    try { const u = new URL(b.base_url); if (u.username || u.password || u.search || u.hash || !["http:", "https:"].includes(u.protocol)) fail(); }
+    catch { fail(); }
+  }
+  return call;
+}
+
+// One host request. Always resolves to the parsed body or throws ApiError
+// (with a numeric status); the caller decides what a failure means.
+export async function hostJSON(path, init) {
+  try {
+    return await hostTransport()(path, {
+      ...init, cache: "no-store",
+      headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
+    });
+  } catch (e) {
+    if (e instanceof ApiError) throw e;
+    throw new ApiError("HTTP " + hostStatusOf(e), { status: hostStatusOf(e) });
+  }
+}
+
+// Every host part one profile can contribute, keyed exactly as the backend's
+// `host` bundle expects. A missing part stays `null` (never `{}`): the backend
+// reads null as "no evidence", which is different from "empty evidence".
+export const HOST_PARTS = ["options", "auxiliary", "moa"];
+
+export function emptyHostBundle() {
+  return { profiles: {} };
+}
+
+// Bound read concurrency across overlapping mount/catalog requests too.
+const hostReadQueue = [];
+let hostReadsActive = 0;
+async function readHostPart(path) {
+  await new Promise((resolve) => {
+    const enter = () => { hostReadsActive += 1; resolve(); };
+    if (hostReadsActive < 3) enter(); else hostReadQueue.push(enter);
+  });
+  try { return await hostJSON(path); }
+  finally { hostReadsActive -= 1; hostReadQueue.shift()?.(); }
+}
+
+// Each profile's options/auxiliary/MoA reads run in parallel, capped at three
+// concurrent reads. No short timeout: custom endpoints may take over 15s.
+export async function loadHostBundle(profileIds, { refresh = false, limit = 3 } = {}) {
+  const ids = [...new Set((profileIds || []).filter((id) => typeof id === "string" && id))];
+  const host = emptyHostBundle();
+  for (const id of ids) host.profiles[id] = { options: null, auxiliary: null, moa: null };
+  const tasks = ids.flatMap((pid) => HOST_PARTS.map((part) => ({ pid, part })));
+  const failures = [];
+  const pathFor = (part, pid) => (part === "options" ? hostOptionsPath(pid, { refresh })
+    : part === "auxiliary" ? hostAuxiliaryPath(pid) : hostMoaPath(pid));
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < tasks.length) {
+      const { pid, part } = tasks[cursor++];
+      try {
+        const value = await readHostPart(pathFor(part, pid));
+        if (!validHostPart(part, value)) throw new ApiError("Malformed host data", { status: 200 });
+        host.profiles[pid][part] = value;
+      } catch (e) {
+        failures.push({ profileId: pid, part, status: hostStatusOf(e) });
+      }
+    }
+  };
+  const width = Math.max(1, Math.min(3, Number(limit) || 3, tasks.length || 1));
+  await Promise.all(Array.from({ length: tasks.length ? width : 0 }, worker));
+  return { host, failures };
+}
+
+// `POST /catalog` / `POST /models` body: the profile, the optional provider
+// filter, the explicit refresh flag, and the host OPTIONS payload for that
+// profile (the catalog is a pure transform of it). The whole host bundle rides
+// along so the backend can evidence credentials without another round trip.
+export function catalogBody({ profileId, provider, refresh, host } = {}) {
+  const pid = profileId || "";
+  const body = {
+    profile: pid,
+    options: (host && host.profiles && host.profiles[pid] && host.profiles[pid].options) || null,
+    host: host || null,
+  };
+  if (provider) body.provider = provider;
+  if (refresh) body.refresh = true;
+  return body;
+}
+
+export function modelsBody(opts) {
+  return catalogBody(opts);
 }
 
 export const api = {
-  loadState: () => request("/state"),
-  preview: (changes) => request("/preview", { method: "POST", body: JSON.stringify({ changes }) }),
+  // `GET /state` is config-only; `POST /state {host}` returns the same DTO
+  // enriched with host-derived rows (plugin auxiliary tasks, credential
+  // status). The UI paints from GET first and upgrades when host data lands.
+  loadState: (host) => (host && host.profiles
+    ? request("/state", { method: "POST", body: JSON.stringify({ host }) })
+    : request("/state")),
+  preview: (changes, host) => request("/preview", {
+    method: "POST", body: JSON.stringify(host && host.profiles ? { changes, host } : { changes }) }),
   savePreset: (preset) => request("/presets", { method: "POST", body: JSON.stringify(preset) }),
   // `allowUnknownCost` is the explicit, checked acknowledgement for the current
   // review; the backend enforces the cost-approval policy, so the UI never
@@ -187,11 +363,42 @@ export const api = {
     method: "POST", body: JSON.stringify(payload), preserveOperationFailure: true }),
   getOperation: (id) => request("/operations/" + encodeURIComponent(id),
     { preserveOperationFailure: true }),
+  recover: (id) => request("/operations/" + encodeURIComponent(id) + "/recover",
+    { method: "POST", preserveOperationFailure: true }),
   undo: (id) => request("/operations/" + encodeURIComponent(id) + "/undo",
     { method: "POST", preserveOperationFailure: true }),
-  // GET /models?provider=&profileId=&refresh=1 →
+  // `POST /models {profile, provider, options, refresh, host}` →
   // { ok:true, provider, models:[{id,name}], fetchedAt, source, stale, error }
-  getModels: (opts) => request(modelsUrl(opts)),
-  // GET /catalog?profileId=&provider=&refresh=1 → frozen aggregate DTO above.
-  getCatalog: (opts) => request(catalogUrl(opts)),
+  getModels: (opts) => request("/models", { method: "POST", body: JSON.stringify(modelsBody(opts)) }),
+  // `POST /catalog {profile, provider, options, refresh, host}` → frozen
+  // aggregate DTO {ok, profileId, providers:[...], cost:{...}, error}.
+  getCatalog: (opts) => request("/catalog", { method: "POST", body: JSON.stringify(catalogBody(opts)) }),
+  // One step of the host half of a backend operation. `call` is the envelope's
+  // `hostCall` (`{opId, seq, token, method, path, query, body}`); the profile is
+  // the query value, URL-encoded, and the body is sent as JSON.
+  hostCall: (call, { confirmExpensiveModel = false } = {}) => {
+    validateHostCall(call, call && call.opId);
+    const qs = new URLSearchParams();
+    const query = call.query && typeof call.query === "object" ? call.query : {};
+    for (const [key, value] of Object.entries(query)) {
+      if (value === undefined || value === null || value === "") continue;
+      qs.set(key, String(value));
+    }
+    const search = qs.toString();
+    const body = { ...(call.body && typeof call.body === "object" ? call.body : {}) };
+    if (confirmExpensiveModel) body.confirm_expensive_model = true;
+    return hostJSON(String(call.path) + (search ? "?" + search : ""), {
+      method: call.method || "POST",
+      body: JSON.stringify(body),
+    });
+  },
+  // Report the host step's outcome. `status` is the numeric HTTP status only —
+  // the backend classifies it; host response text is never forwarded.
+  hostResult: (opId, { seq, token, outcome, status }) => request(
+    "/operations/" + encodeURIComponent(opId) + "/host-result",
+    {
+      method: "POST",
+      body: JSON.stringify(status ? { seq, token, outcome, status } : { seq, token, outcome }),
+      preserveOperationFailure: true,
+    }),
 };

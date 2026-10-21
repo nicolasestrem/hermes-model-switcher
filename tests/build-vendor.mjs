@@ -59,7 +59,8 @@ await esbuild.build({
         api: {},
         fetchJSON: async (url, init) => {
           window.__sdkFetchCalls.fetchJSON += 1;
-          const res = await fetch(url, { ...init, credentials: "include" });
+          const res = await fetch(url, { ...init, credentials: "include",
+            headers: { ...init?.headers, "X-Hermes-Session-Token": "fixture-session" } });
           if (!res.ok) {
             const text = await res.text().catch(() => res.statusText);
             throw new Error(res.status + ": " + (text || res.statusText));

@@ -1,11 +1,12 @@
 import { test, expect } from '@playwright/test';
+import { mockHostReads } from './route-helpers.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
 const out = path.join(process.env.TMPDIR, 'model-switcher-polish');
-const files = ['ui/src/main.jsx', 'ui/src/styles.css', 'dashboard/dist/index.js', 'dashboard/dist/style.css'];
+const files = ['ui/src/main.jsx', 'ui/src/api.js', 'ui/src/styles.css', 'dashboard/dist/index.js', 'dashboard/dist/style.css'];
 const sourceDigest = crypto.createHash('sha256');
 for (const file of files) sourceDigest.update(fs.readFileSync(file));
 const lineage = { repository: process.cwd(), branch: execFileSync('git', ['branch', '--show-current'], { encoding: 'utf8' }).trim(),
@@ -28,7 +29,8 @@ for (const theme of ['dark', 'light']) {
         const html = (await response.text()).replace('</head>', `<style>:root{${colors}}body{background:var(--background);color:var(--midground)}</style></head>`);
         await route.fulfill({ response, body: html });
       });
-      await page.route('**/tests/mock-api.js', route => route.fulfill({ body: '', contentType: 'application/javascript' }));
+      await mockHostReads(page);
+    await page.route('**/tests/mock-api.js', route => route.fulfill({ body: '', contentType: 'application/javascript' }));
       const profiles = ['default', 'research', 'advisor-active-runtime-resolution-long-profile-name'].map(id => ({ id, name: id, writable: true }));
       const slots = profiles.flatMap(p => [
         { profileId: p.id, slotId: 'main', family: 'main', provider: 'openai', model: 'provider-native/exact-model-identifier', state: 'configured', writable: true, lastObserved: null },

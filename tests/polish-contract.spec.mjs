@@ -95,7 +95,7 @@ test('a multi-change, multi-diff preview renders every keyed row without duplica
 
 test('a pinned OpenRouter selection loads the catalog without touching the disabled provider', async ({ page }) => {
   const catalogHits = [];
-  await page.route('**' + BASE + '/catalog?*', route => {
+  await page.route('**' + BASE + '/catalog', route => {
     catalogHits.push(route.request().url());
     return route.fulfill({ json: { ok: true, profileId: 'default', cost: { pending: false }, providers: [
       { id: 'openrouter', label: 'OpenRouter', authenticated: true, fetchedAt: null, stale: false, models: [

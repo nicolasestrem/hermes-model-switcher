@@ -21,6 +21,19 @@
     <div data-plugin-root="hermes-model-switcher"></div>
   </main>
   <script src="tests/vendor.js"></script>
+  <script>
+    // Even the standalone mount uses authenticated host transport. The mock
+    // refuses host calls lacking this synthetic session header.
+    window.__HERMES_PLUGIN_SDK__ = {
+      fetchJSON: async (url, init) => {
+        const res = await fetch(url, { ...init, headers: {
+          ...init?.headers, "X-Hermes-Session-Token": "fixture-session"
+        }});
+        if (!res.ok) { const error = new Error("Host request refused"); error.status = res.status; throw error; }
+        return res.json();
+      }
+    };
+  </script>
   <script src="ui/dist/plugin.js"></script>
 </body>
 </html>
