@@ -254,6 +254,11 @@ function CatalogRow({ provider, model, pending, groupBy, routeIndex, onUse, prof
   const useId = `catalog-use-${provider.id}-${model.id}`;
   const flat = groupBy === "none";
   const lab = labOf(provider.id, model.id);
+  // The Lab column names the vendor. A namespaced id already carries it: an
+  // unknown namespace falls back to its own slug (`mistralai`), never to the
+  // serving provider's label — OpenRouter routes to Mistral, it is not the lab.
+  // Only a bare id (no namespace) belongs to the provider that serves it.
+  const labFallback = modelNamespace(model.id) ? "" : provider.label || provider.id;
   // Under Lab grouping the vendor prefix is already the group header, so the id
   // line carries only the leaf and the full id stays in the title. In the other
   // modes the id line appears only when it adds information beyond the label.
@@ -280,7 +285,7 @@ function CatalogRow({ provider, model, pending, groupBy, routeIndex, onUse, prof
           )}
         </td>
       )}
-      {flat && <td data-column="lab">{labLabel(lab, provider.label || provider.id)}</td>}
+      {flat && <td data-column="lab">{labLabel(lab, labFallback)}</td>}
       <td className="hms-catalog-price" data-column="input">
         <CatalogPriceCell model={model} field="input" pending={pending} />
       </td>
@@ -596,6 +601,11 @@ function ModelCatalogView({
     setFreeOnly(false);
   };
 
+  // Provider-level failure notices. Provider grouping can show them on the
+  // group header, but Lab and None grouping have no per-provider header — and a
+  // provider that failed before publishing anything contributes no lab group at
+  // all, so its message would vanish with it. Those modes carry the notices
+  // above the table instead, for every affected provider, rows or no rows.
   const noticeProviders = providers.filter((p) => p.warning || unavailable.has(p.id));
 
   // The catalog's sticky stack: the column header pins at the top of the scroll
@@ -868,7 +878,7 @@ function ModelCatalogView({
             </p>
           )}
 
-          {groupBy === "none" && noticeProviders.length > 0 && (
+          {groupBy !== "provider" && noticeProviders.length > 0 && (
             <div className="hms-catalog-notices" data-testid="catalog-provider-notices"
               role="group" aria-label="Provider catalog notices">
               {providers.filter((p) => p.warning).map((p) => (
@@ -894,6 +904,7 @@ function ModelCatalogView({
             </label>
             <label className="hms-catalog-filter">Lab
               <select data-testid="catalog-lab" aria-label="Filter by lab"
+                title="Counts cover the whole catalog, including providers not set up. Group headers count only the set-up rows shown under that group."
                 value={labActive} onChange={(e) => setLabFilter(e.target.value)}>
                 <option value="all">All labs</option>
                 {labs.map(({ lab, label, count }) => (

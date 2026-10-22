@@ -221,6 +221,52 @@ export function realisticFixture({ prices = false, signedOutModels = false } = {
   };
 }
 
+// Two shapes the audited profile did not have, both of which a real catalog can
+// emit and which the Lab column/grouping must render truthfully:
+//  - an aggregator serving vendors the vendored LAB_NAMES table does not name
+//    (`mistralai`), and the duplicate-label alias of a named one (`deepseek-ai`,
+//    which reads "DeepSeek" exactly like `deepseek`);
+//  - a signed-in provider whose catalog fetch failed: a warning and zero models.
+export const VENDOR_SHAPES = {
+  providerId: "openrouter",
+  models: [
+    { id: "mistralai/mistral-large", label: "Mistral Large" },
+    { id: "deepseek-ai/deepseek-chat", label: "DeepSeek Chat (alias)" },
+  ],
+};
+
+export const WARNING_ONLY_PROVIDER = {
+  providerId: "labs-down",
+  label: "Labs Down",
+  warning: "Catalog fetch failed: upstream 503",
+};
+
+/**
+ * `realisticFixture()` plus the two vendor shapes above. Kept separate so every
+ * existing count (258 models, the Lab option list) stays the audited profile's
+ * literal numbers.
+ */
+export function vendorShapeFixture() {
+  const fixture = realisticFixture();
+  const providers = fixture.providers.default;
+  const aggregator = providers.find((p) => p.id === VENDOR_SHAPES.providerId);
+  aggregator.models.push(...VENDOR_SHAPES.models.map((model) => ({
+    ...model, pricingStatus: "unknown", cost: null,
+  })));
+  providers.push({
+    id: WARNING_ONLY_PROVIDER.providerId,
+    label: WARNING_ONLY_PROVIDER.label,
+    authenticated: true,
+    configured: true,
+    isCurrent: false,
+    fetchedAt: "2026-10-20T08:00:00Z",
+    stale: false,
+    warning: WARNING_ONLY_PROVIDER.warning,
+    models: [],
+  });
+  return fixture;
+}
+
 // Counts the specs assert against without hard-coding them twice.
 export const REALISTIC = {
   setUpProviderIds: SET_UP_SPECS.map((spec) => spec.id),

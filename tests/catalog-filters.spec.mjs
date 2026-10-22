@@ -1,5 +1,8 @@
 import { test, expect } from "@playwright/test";
-import { realisticFixture, REALISTIC, SIGNED_OUT_PUBLISHER } from "./fixtures/catalog-realistic.js";
+import {
+  realisticFixture, REALISTIC, SIGNED_OUT_PUBLISHER, VENDOR_SHAPES, WARNING_ONLY_PROVIDER,
+  vendorShapeFixture,
+} from "./fixtures/catalog-realistic.js";
 import { labOf } from "../ui/src/labs.js";
 
 // The Model Catalog against a fixture shaped like the audited live default
@@ -504,4 +507,83 @@ test("the editor names a catalog profile that differs from the write targets", a
 
   await page.getByTestId("catalog-profile-select").selectOption("default");
   await expect(page.getByTestId("picker-scope-note")).toHaveCount(0);
+});
+
+// --- m6: the Lab column names the vendor, never the router -------------------
+
+const labCell = (page, modelId) =>
+  page.locator(`[data-model-id="${modelId}"] [data-column="lab"]`);
+
+test("the flat Lab column names a namespaced vendor's own slug, not the serving provider", async ({ page }) => {
+  await openRealistic(page, { fixture: vendorShapeFixture() });
+  await page.getByTestId("catalog-group-select").selectOption("none");
+
+  // An aggregator serving a vendor the LAB_NAMES table does not name: the lab
+  // is the vendor, so the slug stands in — "OpenRouter" is the router, and the
+  // Lab filter offers `mistralai` for the same row.
+  await page.getByTestId("catalog-search").fill("mistral-large");
+  await expect(rows(page)).toHaveCount(1);
+  await expect(labCell(page, "mistralai/mistral-large")).toHaveText("mistralai");
+  await expect(page.locator('[data-model-id="mistralai/mistral-large"] [data-column="provider"]'))
+    .toContainText("OpenRouter");
+  await expect(page.getByTestId("catalog-lab").locator('option[value="mistralai"]'))
+    .toHaveText("mistralai (1)");
+
+  // A bare id carries no vendor, so the serving provider still names the lab.
+  await page.getByTestId("catalog-search").fill("opencode-go-model-1");
+  await expect(labCell(page, "opencode-go-model-1")).toHaveText("opencode go");
+});
+
+test("the Lab select offers one DeepSeek option when a catalog uses two DeepSeek slugs", async ({ page }) => {
+  await openRealistic(page, { fixture: vendorShapeFixture() });
+  const labSelect = page.getByTestId("catalog-lab");
+  // `deepseek` and `deepseek-ai` both read "DeepSeek": one option, one count,
+  // and the aliased row is reachable through it.
+  const deepseekOptions = labSelect.locator("option").filter({ hasText: /^DeepSeek \(/ });
+  const expected = LABS.find((entry) => entry.lab === "deepseek").count +
+    VENDOR_SHAPES.models.filter((model) => model.id.startsWith("deepseek-ai/")).length;
+  await expect(deepseekOptions).toHaveCount(1);
+  await expect(deepseekOptions).toHaveText(`DeepSeek (${expected})`);
+  await expect(labSelect.locator('option[value="deepseek-ai"]')).toHaveCount(0);
+  // No two options may share a label, whatever slugs a catalog sends.
+  const optionTexts = await labSelect.locator("option").allTextContents();
+  expect(new Set(optionTexts).size).toBe(optionTexts.length);
+
+  await labSelect.selectOption("deepseek");
+  await expect(rows(page)).toHaveCount(expected);
+  await expect(page.locator('[data-model-id="deepseek-ai/deepseek-chat"]')).toBeVisible();
+});
+
+test("Lab grouping keeps a provider whose catalog failed, notice and all", async ({ page }) => {
+  await openRealistic(page, { fixture: vendorShapeFixture() });
+  await page.getByTestId("catalog-group-select").selectOption("lab");
+
+  // It publishes nothing, so it owns no lab group: the notice above the table
+  // is the only place it can exist, and it must exist.
+  const notices = page.getByTestId("catalog-provider-notices");
+  await expect(notices).toBeVisible();
+  const warning = notices.locator(`[data-provider-warning="${WARNING_ONLY_PROVIDER.providerId}"]`);
+  await expect(warning).toContainText(WARNING_ONLY_PROVIDER.label);
+  await expect(warning).toContainText(WARNING_ONLY_PROVIDER.warning);
+  await expect(page.locator(`[data-lab-group="${WARNING_ONLY_PROVIDER.providerId}"]`)).toHaveCount(0);
+
+  // The same notice survives the flat view.
+  await page.getByTestId("catalog-group-select").selectOption("none");
+  await expect(notices.locator(`[data-provider-warning="${WARNING_ONLY_PROVIDER.providerId}"]`))
+    .toBeVisible();
+
+  // Provider grouping names it on its own header instead, so the block is not
+  // duplicated there.
+  await page.getByTestId("catalog-group-select").selectOption("provider");
+  await expect(page.getByTestId("catalog-provider-notices")).toHaveCount(0);
+  await expect(page.locator(`[data-provider-group="${WARNING_ONLY_PROVIDER.providerId}"] [data-provider-warning]`))
+    .toContainText(WARNING_ONLY_PROVIDER.warning);
+});
+
+test("the Lab select says its counts cover the whole catalog, not just set-up rows", async ({ page }) => {
+  await openRealistic(page);
+  const labSelect = page.getByTestId("catalog-lab");
+  await expect(labSelect).toHaveAttribute("title", /whole catalog/);
+  await expect(labSelect).toHaveAttribute("title", /providers not set up/);
+  await expect(labSelect).toHaveAttribute("title", /set-up rows/);
 });

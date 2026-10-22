@@ -30,6 +30,29 @@ const LAB_NAMES = {
   "deepseek-ai": "DeepSeek",
 };
 
+// Two keys can share one display label (`deepseek` and `deepseek-ai` both read
+// "DeepSeek"). Left alone they become two Lab options with identical text — an
+// unusable select, and a filter that hides half the vendor's rows. Fold every
+// duplicate onto the first key declared above, so the canonical key is stable
+// (declaration order, not catalog order) whichever slug a catalog happens to
+// use. Derived from LAB_NAMES so a future duplicate is joined automatically.
+const LAB_ALIASES = (() => {
+  const canonicalByLabel = new Map();
+  const aliases = new Map();
+  for (const [key, label] of Object.entries(LAB_NAMES)) {
+    const canonical = canonicalByLabel.get(label);
+    if (canonical) aliases.set(key, canonical);
+    else canonicalByLabel.set(label, key);
+  }
+  return aliases;
+})();
+
+/** Canonical key for a lab: duplicate-label slugs join their first key. */
+export function canonicalLab(lab) {
+  const key = String(lab || "").toLowerCase();
+  return LAB_ALIASES.get(key) || key;
+}
+
 /** Model id with surrounding whitespace removed (never null/undefined). */
 export function normalizeModelId(modelId) {
   return typeof modelId === "string" ? modelId.trim() : "";
@@ -48,11 +71,12 @@ export function modelNamespace(modelId) {
  * Keys are lower-cased so one lab is one key: a catalog that sends
  * `Anthropic/x` and `anthropic/y` must not offer two options that both read
  * "Anthropic". Model ids are case-insensitive in practice, so folding here
- * loses nothing.
+ * loses nothing. Duplicate-label slugs are joined too (see LAB_ALIASES), so
+ * `deepseek-ai/x` and `deepseek/y` are one lab, not two.
  */
 export function labOf(providerId, modelId) {
   const lab = modelNamespace(modelId) || normalizeModelId(providerId);
-  return lab.toLowerCase();
+  return canonicalLab(lab);
 }
 
 /**

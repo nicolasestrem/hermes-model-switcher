@@ -117,6 +117,31 @@
   remove a specific route" disclosure contributes only its summary line.
   `tests/catalog-layout.spec.mjs` measures all of it at 768px and 1440px.
 
+### Catalog review fixes: the Lab column's vendor, and notices under Lab grouping
+
+- The flat table's Lab column now names the vendor a model id carries, and an
+  unknown namespace falls back to its own slug — `mistralai/mistral-large`
+  served by openrouter reads `mistralai`, not `OpenRouter`, matching what the
+  Lab filter offers for that row. Only an id with no namespace takes the
+  serving provider's label, which is what a bare id (opencode-go, copilot)
+  actually means.
+- Provider notices (a `warning`, or prices unavailable) render for Lab and
+  None grouping, not just None. A provider that failed before publishing
+  anything owns no lab group, so under Lab grouping its message is the only
+  place it can appear — it no longer disappears with the group it never had.
+  Provider grouping still names each notice on its own header, so nothing is
+  duplicated.
+- Lab keys whose display label is identical are joined: `deepseek-ai` and
+  `deepseek` are one lab, derived from the label table rather than hard-coded,
+  so the Lab select can never offer two options reading `DeepSeek`. The Lab
+  select's title states that its counts cover the whole catalog (including
+  providers not set up) while group headers count the set-up rows shown, which
+  is why the two numbers can differ.
+- `tests/fixtures/catalog-realistic.js` gained a `vendorShapeFixture()` shape —
+  an aggregator serving an unnamed vendor plus a duplicate-label alias, and a
+  signed-in provider with a warning and zero models — so
+  `tests/catalog-filters.spec.mjs` pins all four cases.
+
 ### Documentation
 
 - README, DESIGN.md §5 and the technical reference now describe the picker's
