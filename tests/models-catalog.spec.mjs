@@ -354,7 +354,7 @@ test("Use pre-fills the editor, scrolls it into view, and announces the route", 
   await expect(providerInput(page)).toHaveValue("nous");
   await expect(modelInput(page)).toHaveValue("hermes-4-405b");
   await expect(page.getByTestId("change-type")).toHaveValue("set");
-  await expect(page.getByTestId("live-status")).toContainText("Route set to nous/hermes-4-405b");
+  await expect(page.getByTestId("live-status")).toContainText("Route set to nous · hermes-4-405b");
   await expect(page.getByLabel("I acknowledge unknown-cost routes")).not.toBeChecked();
   await expect.poll(async () => {
     const box = await page.getByTestId("change-editor").boundingBox();

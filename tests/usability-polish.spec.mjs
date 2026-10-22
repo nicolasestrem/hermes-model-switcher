@@ -207,7 +207,7 @@ test("exact removal stays functional behind the advanced block", async ({ page }
   const removal = page.getByLabel("Exact provider/model to remove");
   await removal.fill("anthropic/claude-sonnet-4-6");
   await page.getByRole("button", { name: "Preview changes" }).click();
-  await expect(page.getByTestId("preview-panel")).toContainText("remove anthropic/claude-sonnet-4-6");
+  await expect(page.getByTestId("preview-panel")).toContainText("remove anthropic · claude-sonnet-4-6");
 });
 
 test("layout: editor before matrix in DOM; wide view is matrix + rail; narrow stacks without overflow", async ({ page }) => {

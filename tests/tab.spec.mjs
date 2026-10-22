@@ -25,7 +25,7 @@ test("select → preview → save → apply → readback → undo", async ({ pag
   // preview runs automatically on review; one-click apply becomes available
   await expect(page.getByTestId("preview-panel")).toBeVisible();
   await expect(page.getByTestId("preview-panel")).toContainText("default");
-  await expect(page.getByTestId("preview-panel")).toContainText("→ zhipu/glm-5.3-flash");
+  await expect(page.getByTestId("preview-panel")).toContainText("→ zhipu · glm-5.3-flash");
   await expect(page.getByTestId("live-status")).toContainText("Preview ready");
   await expect(page.getByTestId("apply-preset")).toBeEnabled();
 
@@ -166,7 +166,7 @@ test("exact-model removal only matches exact identity", async ({ page }) => {
   await page.getByLabel("Exact provider/model to remove").fill("anthropic/claude-sonnet-4-6");
   await expect(page.getByRole("note")).toContainText("1 selected configured slot");
   await page.getByRole("button", { name: "Preview changes" }).click();
-  await expect(page.getByTestId("preview-panel")).toContainText("remove anthropic/claude-sonnet-4-6");
+  await expect(page.getByTestId("preview-panel")).toContainText("remove anthropic · claude-sonnet-4-6");
 });
 
 test("failed read and ok:false are not success", async ({ page }) => {

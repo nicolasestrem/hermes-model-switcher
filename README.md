@@ -14,8 +14,11 @@ what is configured and check a change before writing it.
 
 ## What you can do
 
-- Inspect supported routes across profiles in one filterable matrix. Configured
-  routes stay separate from recorded usage; an open session may still use its old model.
+- Inspect supported routes across profiles in one filterable matrix. A route reads
+  `provider · model` — the model id exactly as Hermes spells it (e.g.
+  `primalabs · primalabs-ai/DeepSeek-V4.1-Flash-1017`), never prefixed a second
+  time. Configured routes stay separate from recorded usage; an open session may
+  still use its old model.
 - See what you could switch to in the model catalog: a bird's-eye, provider-grouped
   view of the host-listed models, with list prices per 1M tokens, free and unknown-price
   entries marked distinctly, and which slots already use each model. A listing is not a routability test.

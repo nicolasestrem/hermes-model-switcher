@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Route display: `provider · model`, never a doubled provider prefix
+
+- Configured, observed, summary, preview and announcement routes render
+  `provider · model` (U+00B7 with single spaces), the notation Hermes' own Models
+  page uses (`${eff.provider} · ${eff.model}`). Hermes model ids usually carry
+  their own vendor namespace, so the old `${provider}/${model}` composition
+  printed `primalabs/primalabs-ai/DeepSeek-V4.1-Flash-1017` and
+  `openrouter/openrouter/pareto-code`. The model id now renders verbatim and is
+  never prefixed again; a missing provider shows the model alone, and
+  `routeText`'s existing inherit / disabled / unset-auto fallbacks are unchanged.
+- The write path is untouched: preview, apply and host bodies still carry
+  `{provider, model}` as separate fields. New `tests/route-display.spec.mjs`
+  pins both halves — rendered and announced text, and the unprefixed request
+  body — against a `namespacedRoutes` mock fixture.
+- Typed inputs keep the `provider/model` syntax they parse: fallback-chain lines
+  and "Exact route to remove" split on the first slash, so a provider slug that
+  contains a colon (`custom:my-endpoint`) still works there and is not
+  reinterpreted as a displayed route.
+
 ### Documentation
 
 - README and image-README preview captions now state that the preview shows

@@ -132,8 +132,8 @@ test("selecting a model announces and previews the exact route", async ({ page }
   await page.getByLabel("Select default main", { exact: true }).check();
   await providerSelect(page).selectOption("nous");
   await modelSelect(page).selectOption("hermes-filler-11");
-  await expect(page.getByTestId("live-status")).toContainText("Route set to nous/hermes-filler-11");
-  await expect(page.getByTestId("route-summary")).toHaveText("Route: nous/hermes-filler-11");
+  await expect(page.getByTestId("live-status")).toContainText("Route set to nous · hermes-filler-11");
+  await expect(page.getByTestId("route-summary")).toHaveText("Route: nous · hermes-filler-11");
 
   await modelSelect(page).selectOption("hermes-4-405b");
   await page.getByLabel("I acknowledge unknown-cost routes").check();
@@ -155,7 +155,7 @@ test("Other keeps exact hand-typed provider slugs and model ids", async ({ page 
 
   await setModel(page, "provider-native/custom:id");
   await expect(modelExact(page)).toHaveValue("provider-native/custom:id");
-  await expect(page.getByTestId("route-summary")).toHaveText("Route: custom:my-endpoint/provider-native/custom:id");
+  await expect(page.getByTestId("route-summary")).toHaveText("Route: custom:my-endpoint · provider-native/custom:id");
 
   await page.getByLabel("I acknowledge unknown-cost routes").check();
   await page.getByRole("button", { name: "Preview changes", exact: true }).click();
@@ -289,7 +289,7 @@ for (const viewport of [{ width: 375, height: 812 }, { width: 768, height: 900 }
     }
     // Long model labels are cut by the select, never by page overflow; the
     // full route stays readable in the summary line.
-    await expect(page.getByTestId("route-summary")).toHaveText("Route: nous/hermes-4-405b");
+    await expect(page.getByTestId("route-summary")).toHaveText("Route: nous · hermes-4-405b");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   });
 }
