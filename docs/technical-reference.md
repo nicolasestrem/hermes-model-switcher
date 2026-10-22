@@ -68,6 +68,11 @@ transform that host payload. Their old GET forms return HTTP 410 with
 not write configuration, presets or the operation journal and remain useful in
 read-only mode when host evidence is available.
 
+`Configured in` and `In use` join catalog rows to configured slot routes by exact
+provider/model identity, including object entries in explicitly configured fallback
+chains. Each slot counts once per route, even with repeated entries. Inherited
+chains and recorded usage do not add configured assignments.
+
 Provider and model dropdowns share this data; an "Other" entry preserves exact-ID
 manual entry. IDs are not portable across providers: Nous may use
 `deepseek/deepseek-v4.1-flash` while OpenCode Go uses `deepseek-v4.1-flash`.

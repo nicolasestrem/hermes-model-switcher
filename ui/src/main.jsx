@@ -221,8 +221,25 @@ function catalogStatusText(status) {
   return ["priced", "free", "included", "unknown"].includes(status) ? status : "unknown";
 }
 
+// /state slot routes join to catalog rows on EXACT provider+model identity.
+// One key shape, built one way, for the index, the In-use predicate and the
+// "Configured in" cell — a separator that cannot occur inside a provider or
+// model id keeps `a` + `b/c` from colliding with `a/b` + `c`.
+const CATALOG_ROUTE_SEP = "\u0000";
+
+function catalogRouteKey(provider, model) {
+  return String(provider) + CATALOG_ROUTE_SEP + String(model);
+}
+
+// A route id only counts when it is a NON-EMPTY STRING. Hermes' runtime
+// inventory drops bare provider strings from chains, and a `{provider, model}`
+// entry that lost either half is not a route the profile can be said to use.
+function isRouteId(value) {
+  return typeof value === "string" && value.trim() !== "";
+}
+
 function catalogConfiguredText(routeIndex, providerId, modelId) {
-  const matches = routeIndex.get(providerId + "\u0000" + modelId) || [];
+  const matches = routeIndex.get(catalogRouteKey(providerId, modelId)) || [];
   if (!matches.length) {
     return { text: "—", title: "No loaded profile slot routes to this provider/model." };
   }
@@ -409,13 +426,39 @@ function ModelCatalogView({
   // One pass over the loaded /state slots: provider+model exact identity is
   // the join key. 9k-model catalogs stay responsive because rows only look up
   // a prebuilt map instead of rescanning every slot.
+  // Configured fallback routes live in slot.chain, not top-level fields.
+  // Inherited chains also carry a list, but it belongs to the parent slot;
+  // exclude them and observed/effective routes from this configured-only join.
   const routeIndex = useMemo(() => {
     const index = new Map();
     for (const slot of slots || []) {
-      if (!slot || !slot.provider || !slot.model) continue;
-      const key = slot.provider + "\u0000" + slot.model;
-      if (!index.has(key)) index.set(key, []);
-      index.get(key).push(slot);
+      if (!slot) continue;
+      const keys = new Set();
+      // Top-level route: unchanged behaviour for every scalar and route-dict
+      // slot. A chain slot normally has none, but a stale payload that carries
+      // both must not lose the scalar route.
+      if (isRouteId(slot.provider) && isRouteId(slot.model)) {
+        keys.add(catalogRouteKey(slot.provider, slot.model));
+      }
+      if (normalizeState(slot.state) === "configured" && Array.isArray(slot.chain)) {
+        for (const entry of slot.chain) {
+          // Objects only: a bare `provider/model` string is dropped by the
+          // runtime inventory, and a half-filled or non-string entry is not a
+          // route. Skipping them keeps one malformed row from failing the view.
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+          if (!isRouteId(entry.provider) || !isRouteId(entry.model)) continue;
+          keys.add(catalogRouteKey(entry.provider, entry.model));
+        }
+      }
+      // `matches.length` IS the "Configured in" count, so ONE slot contributes
+      // at most once per route: a chain that repeats a route, or a slot whose
+      // top-level route also appears in its chain, must not inflate the count
+      // or repeat its label.
+      for (const key of keys) {
+        const bucket = index.get(key);
+        if (bucket) bucket.push(slot);
+        else index.set(key, [slot]);
+      }
     }
     return index;
   }, [slots]);
@@ -445,7 +488,7 @@ function ModelCatalogView({
     if (statusFilter === "setup" && provider.authenticated === false) return false;
     if (statusFilter === "signin" && provider.authenticated !== false) return false;
     if (labActive !== "all" && labOf(provider.id, model.id) !== labActive) return false;
-    if (inUseOnly && !routeIndex.has(provider.id + "\u0000" + model.id)) return false;
+    if (inUseOnly && !routeIndex.has(catalogRouteKey(provider.id, model.id))) return false;
     if (fastOnly && !(showFast && model.capabilities && model.capabilities.fast === true)) return false;
     if (canDisableOnly &&
       !(showCanDisable && model.capabilities && model.capabilities.canDisableReasoning === true)) return false;

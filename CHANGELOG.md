@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Catalog: configured fallback-chain usage
+
+- `In use` and `Configured in` now include valid provider/model entries from
+  explicitly configured main and delegation fallback chains. Inherited chains
+  and observed-only routes are not counted as this slot's configuration.
+- Repeated entries count once per slot; provider/model identity stays exact.
+  Browser regressions cover both chain types, counts and titles, malformed
+  entries, provider isolation, and disabled/unset/inherited states.
+
 ### Catalog: price-cell prose wraps, prices never do
 
 - The catalog's price columns keep `white-space: nowrap` for numbers (`$10.00`),
