@@ -136,13 +136,35 @@ export const PICKER_PROVIDERS = [openrouterProvider(), primalabsProvider(), open
 
 export const LAB_COUNTS = { anthropic: 9, deepseek: 5, openai: 11, openrouter: 1, "z-ai": 4 };
 
+// The same catalog with openrouter's Z.ai rows withdrawn: openrouter still spans
+// several labs (anthropic 9, deepseek 5, openai 11, openrouter 1 = 26 rows), it
+// simply no longer offers `z-ai`. That is the shape a catalog scope switch or a
+// refresh produces for a lab pick that was legitimate a moment ago.
+export function withdrawnZaiProviders() {
+  return PICKER_PROVIDERS.map((provider) => (provider.id !== "openrouter" ? provider : {
+    ...provider,
+    models: provider.models.filter((model) => !model.id.startsWith("z-ai/")),
+  }));
+}
+
 // Install the fixture catalog. Call after page.goto("/fixture.html") and before
 // any dropdown interaction: the catalog is fetched lazily on first focus.
-export async function installPickerMultilab(page) {
-  await page.evaluate((providers) => {
+//
+// `profiles` serves a different provider list per catalog profile (`{research:
+// withdrawnZaiProviders()}`), and `refreshed` serves a different list after an
+// explicit refresh (`refresh: true` in the request body) — the two ways a lab
+// option can disappear while the same provider stays selected.
+export async function installPickerMultilab(page, { profiles = {}, refreshed = {} } = {}) {
+  await page.evaluate(({ defaultProviders, byProfile, byRefresh }) => {
     if (window.__pickerMultilab) return;
     const original = window.fetch;
     window.__pickerMultilab = { served: null };
+    const providersFor = (request) => {
+      const body = request && request.body ? JSON.parse(request.body) : {};
+      const profile = body.profile || "default";
+      const table = body.refresh ? byRefresh : byProfile;
+      return table[profile] || byProfile[profile] || defaultProviders;
+    };
     window.fetch = async function patchedFetch(url, opts) {
       const res = await original.call(this, url, opts);
       const path = new URL(url, location.origin).pathname;
@@ -150,6 +172,7 @@ export async function installPickerMultilab(page) {
       if (!path.endsWith("/catalog") || method !== "POST") return res;
       const body = await res.clone().json();
       if (!body || body.ok !== true) return res;
+      const providers = providersFor(opts);
       const served = {
         ...body,
         providers: providers.map((p) => ({ ...p, modelCount: p.models.length })),
@@ -161,5 +184,5 @@ export async function installPickerMultilab(page) {
         headers: { "Content-Type": "application/json" },
       });
     };
-  }, PICKER_PROVIDERS);
+  }, { defaultProviders: PICKER_PROVIDERS, byProfile: profiles, byRefresh: refreshed });
 }

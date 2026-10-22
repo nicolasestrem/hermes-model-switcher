@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { modelSelect, OTHER, providerSelect, ensureCatalog } from "./route-helpers.mjs";
-import { installPickerMultilab } from "./fixtures/picker-multilab.js";
+import { installPickerMultilab, withdrawnZaiProviders } from "./fixtures/picker-multilab.js";
 
 // Lab + filter contract for the routing panel's Model dropdown. A provider whose
 // model ids span several vendor namespaces (openrouter, nous) gets a native Lab
@@ -194,6 +194,54 @@ test("changing the provider resets the lab and the filter", async ({ page }) => 
   await expect(filterInput(page)).toHaveValue("");
   await expect(modelSelect(page).locator("option").first()).toHaveText("Choose a model (30)…");
   expect((await optionValues(modelSelect(page))).length).toBe(30);
+});
+
+// A lab pick belongs to the options it was chosen from. A catalog scope switch
+// or a refresh can withdraw that lab while the provider stays multi-lab: the
+// pick must not outlive its option, or the select reads "All labs" over a list
+// narrowed to a lab that no longer exists.
+async function pickZai(page) {
+  await chooseProvider(page, "openrouter");
+  await labSelect(page).selectOption("z-ai");
+  await expect(labSelect(page)).toHaveValue("z-ai");
+  await expect(modelSelect(page).locator("option").first()).toHaveText("Choose a model (4 of 30)…");
+  await expect(matchCount(page)).toHaveText("4 of 30 models");
+}
+
+test("a lab the new catalog scope no longer offers stops narrowing the model list", async ({ page }) => {
+  await page.goto("/fixture.html");
+  await expect(providerSelect(page)).toBeVisible();
+  // `research` serves the same openrouter with its Z.ai rows withdrawn: still
+  // anthropic, deepseek, openai and its own passthrough id, no `z-ai`.
+  await installPickerMultilab(page, { profiles: { research: withdrawnZaiProviders() } });
+  await ensureCatalog(page);
+  await pickZai(page);
+
+  await page.getByLabel("Profile Research", { exact: true }).check();
+  // The picker loads the new scope lazily, exactly as a user's next focus does.
+  await providerSelect(page).focus();
+  await expect(labSelect(page)).toHaveValue("");
+  await expect(labSelect(page).locator("option:checked")).toHaveText("All labs (26)");
+  await expect(modelSelect(page).locator("option").first()).toHaveText("Choose a model (26)…");
+  expect((await optionValues(modelSelect(page))).length).toBe(26);
+  await expect(matchCount(page)).toHaveCount(0);
+});
+
+test("a refresh that withdraws the chosen lab clears the pick, not just the rows", async ({ page }) => {
+  await page.goto("/fixture.html");
+  await expect(providerSelect(page)).toBeVisible();
+  await installPickerMultilab(page, { refreshed: { default: withdrawnZaiProviders() } });
+  await ensureCatalog(page);
+  await pickZai(page);
+
+  await page.getByTestId("refresh-catalog").click();
+  await expect(labSelect(page)).toHaveValue("");
+  await expect(labSelect(page).locator("option:checked")).toHaveText("All labs (26)");
+  await expect(modelSelect(page).locator("option").first()).toHaveText("Choose a model (26)…");
+  await expect(matchCount(page)).toHaveCount(0);
+  // The cleared pick leaves a working control: narrowing again counts honestly.
+  await labSelect(page).selectOption("deepseek");
+  await expect(modelSelect(page).locator("option").first()).toHaveText("Choose a model (5 of 26)…");
 });
 
 test("a single-lab provider keeps today's flat full-id list and one price note", async ({ page }) => {

@@ -509,6 +509,30 @@ test("the editor names a catalog profile that differs from the write targets", a
   await expect(page.getByTestId("picker-scope-note")).toHaveCount(0);
 });
 
+test("the scope note warns when any write target's profile differs from the catalog's", async ({ page }) => {
+  await openRealistic(page);
+  const note = page.getByTestId("picker-scope-note");
+  // Two targets in two profiles while the catalog browses `default`: the route
+  // goes to both, and only `default` was ever checked for availability. One
+  // matching target must not silence the other.
+  await page.getByLabel("Select default main", { exact: true }).check();
+  await page.getByLabel("Select research main", { exact: true }).check();
+  await expect(note).toBeVisible();
+  await expect(note).toContainText("Browsing the catalog for profile default");
+  await expect(note).toContainText("your targets are in default, research");
+
+  // The same single target as the browsed profile: nothing to warn about (the
+  // bulk case above is what the note is for, not every selection).
+  await page.getByLabel("Select research main", { exact: true }).uncheck();
+  await expect(note).toHaveCount(0);
+
+  // And one target in the other profile keeps the original warning.
+  await page.getByLabel("Select research main", { exact: true }).check();
+  await page.getByLabel("Select default main", { exact: true }).uncheck();
+  await expect(note).toBeVisible();
+  await expect(note).toContainText("your targets are in research");
+});
+
 // --- m6: the Lab column names the vendor, never the router -------------------
 
 const labCell = (page, modelId) =>

@@ -1701,7 +1701,22 @@ function ChangeEditor({
     setPick({ key: modelProvider, lab: "", text: "" });
   }
   const activePick = pick.key === modelProvider ? pick : null;
-  const labPick = multiLab && activePick ? activePick.lab : "";
+  // The pick also belongs to the OPTIONS it was chosen from: switching the
+  // catalog profile (the picker, GET /models and the catalog's Use gate all
+  // read that scope) or a refresh can withdraw a lab while the provider stays
+  // multi-lab. Validating against this render's options — the same render-time
+  // clamp the catalog applies to its own lab/provider filters — keeps the Lab
+  // select from reading "All labs" over a list narrowed by a lab that no longer
+  // exists. The stale value is written back so nothing survives to narrow a
+  // later catalog. Rows are the guard for a load that has not landed yet: with
+  // no options here there is nothing to validate against, and wiping the pick
+  // would punish a scope switch that keeps the lab.
+  const labAvailable = Boolean(activePick && activePick.lab) &&
+    labOptions.some((l) => l.lab === activePick.lab);
+  if (activePick && activePick.lab && modelRows.length > 0 && !labAvailable) {
+    setPick({ key: modelProvider, lab: "", text: activePick.text });
+  }
+  const labPick = multiLab && labAvailable ? activePick.lab : "";
   const filterText = showModelFilter && activePick ? activePick.text : "";
   const needle = filterText.trim().toLowerCase();
   const narrowed = Boolean(labPick) || Boolean(needle);
@@ -1841,11 +1856,12 @@ function ChangeEditor({
 
   // The picker, GET /models and the catalog's Use gate all read the CATALOG
   // profile, while preview/apply write to the selected slots' profiles. When
-  // those differ, say so: a route that exists in the browsed profile may not
-  // exist in the one about to be written.
+  // ANY of those differs, say so: a route that exists in the browsed profile
+  // may not exist in one about to be written. A bulk edit that also touches the
+  // browsed profile is still a bulk edit — one matching target must not vouch
+  // for the others.
   const targetProfiles = [...new Set(writableSelected.map((s) => s.profileId).filter(Boolean))].sort();
-  const catalogScopeDiffers = Boolean(catalog.data) && targetProfiles.length > 0 &&
-    !targetProfiles.includes(catalogProfileId);
+  const catalogScopeDiffers = Boolean(catalog.data) && targetProfiles.some((p) => p !== catalogProfileId);
 
   return (
     <section aria-label="Custom change editor" data-testid="change-editor" data-empty={!writableSelected.length}
