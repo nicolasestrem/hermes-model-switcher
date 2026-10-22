@@ -4,6 +4,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "shims/react.js";
 import { createRoot } from "shims/react-dom-client.js";
 import { api, ApiError, catalogErrorText, hostFailureText, hostStatusOf, HOST_RESTART_REQUIRED, loadHostBundle, validateHostCall } from "./api.js";
+import { isMultiLab, labCounts, labLabel, labOf, modelLeaf, modelNamespace } from "./labs.js";
 import { resolveOpaqueSurface } from "./theme.js";
 
 const t = (v, fb) => `var(--${v}, ${fb})`;
@@ -41,6 +42,19 @@ function useOpaqueSurface() {
     return () => obs.disconnect();
   }, []);
   return bg;
+}
+
+// Screen readers get ONE sentence per settled typing burst, never one per
+// keystroke: a live region bound to the raw count fires on every character
+// ("24 of 260" → "23 of 260" → …), burying the useful announcement. The text
+// itself stays visible and immediate; only the announcement waits.
+function useSettledText(text, delay = 500) {
+  const [settled, setSettled] = useState(text);
+  useEffect(() => {
+    const id = setTimeout(() => setSettled(text), delay);
+    return () => clearTimeout(id);
+  }, [text, delay]);
+  return settled;
 }
 
 // ---------- Native route dropdowns ----------
@@ -88,6 +102,18 @@ function priceHint(catalogModel) {
     }
   }
   return unknown;
+}
+
+// Price suffix for one model option. Only a real catalog price, "free" and
+// "included in subscription" are stated per row: an unknown price is the same
+// sentence on every row of a 62-model provider, so it is dropped here and said
+// once under the Model select ("No list prices published for this provider.").
+// The row never renders "$0.00" or free for unknown data — the suffix is empty.
+function priceSuffix(catalogModel) {
+  const hint = priceHint(catalogModel);
+  if (hint.kind === "unknown") return "";
+  if (hint.kind === "priced") return ` — ${hint.text.replace(/^→\s*/, "").replace(/ (in|out)$/, "/1M $1")}`;
+  return ` — ${hint.text}`;
 }
 
 function freshnessText(value) {
@@ -195,8 +221,25 @@ function catalogStatusText(status) {
   return ["priced", "free", "included", "unknown"].includes(status) ? status : "unknown";
 }
 
+// /state slot routes join to catalog rows on EXACT provider+model identity.
+// One key shape, built one way, for the index, the In-use predicate and the
+// "Configured in" cell — a separator that cannot occur inside a provider or
+// model id keeps `a` + `b/c` from colliding with `a/b` + `c`.
+const CATALOG_ROUTE_SEP = "\u0000";
+
+function catalogRouteKey(provider, model) {
+  return String(provider) + CATALOG_ROUTE_SEP + String(model);
+}
+
+// A route id only counts when it is a NON-EMPTY STRING. Hermes' runtime
+// inventory drops bare provider strings from chains, and a `{provider, model}`
+// entry that lost either half is not a route the profile can be said to use.
+function isRouteId(value) {
+  return typeof value === "string" && value.trim() !== "";
+}
+
 function catalogConfiguredText(routeIndex, providerId, modelId) {
-  const matches = routeIndex.get(providerId + "\u0000" + modelId) || [];
+  const matches = routeIndex.get(catalogRouteKey(providerId, modelId)) || [];
   if (!matches.length) {
     return { text: "—", title: "No loaded profile slot routes to this provider/model." };
   }
@@ -207,22 +250,59 @@ function catalogConfiguredText(routeIndex, providerId, modelId) {
   };
 }
 
-function CatalogRow({ provider, model, pending, grouped, routeIndex, onUse, profileId }) {
+// A `:free` id is OpenRouter's free-tier *naming*, not a price field: every
+// model in the audited profile has pricingStatus "unknown", so this toggle can
+// only ever match the suffix and must never be read as a price claim.
+const CATALOG_FREE_ID_RE = /:free$/i;
+const CATALOG_PRICE_NOTE = "No list prices in this catalog — price filters hidden.";
+const CATALOG_GROUP_MODES = [
+  { id: "provider", label: "Provider" },
+  { id: "lab", label: "Lab" },
+  { id: "none", label: "None" },
+];
+
+function isCatalogFreeVariant(modelId) {
+  return CATALOG_FREE_ID_RE.test(String(modelId || "").trim());
+}
+
+function CatalogRow({ provider, model, pending, groupBy, routeIndex, onUse, profileId }) {
   const configured = catalogConfiguredText(routeIndex, provider.id, model.id);
   const blocked = provider.authenticated === false;
   const useId = `catalog-use-${provider.id}-${model.id}`;
+  const flat = groupBy === "none";
+  const lab = labOf(provider.id, model.id);
+  // The Lab column names the vendor. A namespaced id already carries it: an
+  // unknown namespace falls back to its own slug (`mistralai`), never to the
+  // serving provider's label — OpenRouter routes to Mistral, it is not the lab.
+  // Only a bare id (no namespace) belongs to the provider that serves it.
+  const labFallback = modelNamespace(model.id) ? "" : provider.label || provider.id;
+  // Under Lab grouping the vendor prefix is already the group header, so the id
+  // line carries only the leaf and the full id stays in the title. In the other
+  // modes the id line appears only when it adds information beyond the label.
+  const leafId = groupBy === "lab" && modelNamespace(model.id) ? modelLeaf(model.id) : "";
+  const showIdLine = groupBy === "lab" ? Boolean(leafId) : Boolean(model.label && model.label !== model.id);
   return (
     <tr data-model-row data-provider-id={provider.id} data-model-id={model.id}
       data-pricing-status={catalogStatusText(model.pricingStatus)}>
       <td data-column="model">
         <span className="hms-catalog-model-label">{model.label || model.id}</span>
-        {/* Real catalogs often send label === id; the id line only earns its
-            place when it adds information. */}
-        {model.label && model.label !== model.id && (
-          <code className="hms-catalog-model-id">{model.id}</code>
+        {showIdLine && (
+          <code className="hms-catalog-model-id"
+            title={groupBy === "lab" ? model.id : undefined}>{groupBy === "lab" ? leafId : model.id}</code>
         )}
-        {!grouped && <span className="hms-catalog-provider-tag">{provider.id}</span>}
+        {groupBy === "lab" && (
+          <span className="hms-catalog-provider-tag">{provider.label || provider.id}</span>
+        )}
       </td>
+      {flat && (
+        <td data-column="provider">
+          <span className="hms-catalog-model-label">{provider.label || provider.id}</span>
+          {provider.label && provider.label !== provider.id && (
+            <code className="hms-catalog-model-id">{provider.id}</code>
+          )}
+        </td>
+      )}
+      {flat && <td data-column="lab">{labLabel(lab, labFallback)}</td>}
       <td className="hms-catalog-price" data-column="input">
         <CatalogPriceCell model={model} field="input" pending={pending} />
       </td>
@@ -245,14 +325,23 @@ function CatalogRow({ provider, model, pending, grouped, routeIndex, onUse, prof
   );
 }
 
-function ModelCatalogView({ catalog, profileId, slots, onRefresh, onRetry, onCollapse, onUse }) {
+function ModelCatalogView({
+  catalog, profileId, profiles = [], slots, onRefresh, onRetry, onCollapse, onUse, onProfileChange,
+}) {
   const stickyBg = useOpaqueSurface();
   const searchRef = useRef(null);
   const [query, setQuery] = useState("");
   const [freeOnly, setFreeOnly] = useState(false);
   const [pricedOnly, setPricedOnly] = useState(false);
-  const [grouped, setGrouped] = useState(true);
+  const [groupBy, setGroupBy] = useState("provider");
   const [sort, setSort] = useState("price-asc");
+  const [labFilter, setLabFilter] = useState("all");
+  const [providerFilter, setProviderFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [inUseOnly, setInUseOnly] = useState(false);
+  const [fastOnly, setFastOnly] = useState(false);
+  const [canDisableOnly, setCanDisableOnly] = useState(false);
+  const [freeIdsOnly, setFreeIdsOnly] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState(() => new Set());
   const [showAllFlat, setShowAllFlat] = useState(false);
 
@@ -282,8 +371,25 @@ function ModelCatalogView({ catalog, profileId, slots, onRefresh, onRetry, onCol
       : [],
   );
 
+  // Set-up providers lead, in host order, with the profile's current provider
+  // first; every `authenticated: false` provider moves into ONE collapsed
+  // "Not set up" section at the bottom instead of interleaving empty headers
+  // through the list (in the audited profile 45 of 54 providers are that shape).
+  const setUpProviders = useMemo(() => {
+    const list = providers.filter((p) => p.authenticated !== false);
+    return [...list.filter((p) => p.isCurrent), ...list.filter((p) => !p.isCurrent)];
+  }, [providers]);
+  const notSetUpProviders = useMemo(
+    () => providers.filter((p) => p.authenticated === false), [providers]);
+  const providerLabels = useMemo(() => {
+    const labels = {};
+    for (const provider of providers) labels[provider.id] = provider.label || provider.id;
+    return labels;
+  }, [providers]);
+  const allModels = useMemo(() => providers.flatMap((p) => catalogModelsOf(p)), [providers]);
+
   const stats = useMemo(() => {
-    const models = providers.flatMap((p) => catalogModelsOf(p));
+    const models = allModels;
     const priced = models.filter((m) => m.pricingStatus === "priced").length;
     const free = models.filter((m) => m.pricingStatus === "free").length;
     const unknown = models.filter((m) => m.pricingStatus === "unknown").length;
@@ -298,63 +404,217 @@ function ModelCatalogView({ catalog, profileId, slots, onRefresh, onRetry, onCol
       unknown,
       included,
       pricedProviders,
+      setUp: setUpProviders.length,
+      freeIds: models.filter((m) => isCatalogFreeVariant(m.id)).length,
       cheapest: catalogCheapestInput(models),
       stale: providers.filter((p) => p.stale).length,
       withFetchTime: providers.filter((p) => Boolean(p.fetchedAt)).length,
       pending,
     };
-  }, [data, pending]);
+  }, [providers, allModels, setUpProviders, pending]);
+
+  // Price controls are only honest when the catalog actually carries a priced
+  // or free status. The audited profiles have none at all (every one of 1,584
+  // models is "unknown"), so a price filter there would silently empty the
+  // table; hide it, say why, and fall back to Name instead of a dead sort.
+  const hasPrices = stats.priced > 0 || stats.free > 0;
+  const effectiveSort = hasPrices || !String(sort).startsWith("price-") ? sort : "name";
+  const showFast = allModels.some((m) => m.capabilities && typeof m.capabilities.fast === "boolean");
+  const showCanDisable = allModels.some((m) =>
+    m.capabilities && typeof m.capabilities.canDisableReasoning === "boolean");
 
   // One pass over the loaded /state slots: provider+model exact identity is
   // the join key. 9k-model catalogs stay responsive because rows only look up
   // a prebuilt map instead of rescanning every slot.
+  // Configured fallback routes live in slot.chain, not top-level fields.
+  // Inherited chains also carry a list, but it belongs to the parent slot;
+  // exclude them and observed/effective routes from this configured-only join.
   const routeIndex = useMemo(() => {
     const index = new Map();
     for (const slot of slots || []) {
-      if (!slot || !slot.provider || !slot.model) continue;
-      const key = slot.provider + "\u0000" + slot.model;
-      if (!index.has(key)) index.set(key, []);
-      index.get(key).push(slot);
+      if (!slot) continue;
+      const keys = new Set();
+      // Top-level route: unchanged behaviour for every scalar and route-dict
+      // slot. A chain slot normally has none, but a stale payload that carries
+      // both must not lose the scalar route.
+      if (isRouteId(slot.provider) && isRouteId(slot.model)) {
+        keys.add(catalogRouteKey(slot.provider, slot.model));
+      }
+      if (normalizeState(slot.state) === "configured" && Array.isArray(slot.chain)) {
+        for (const entry of slot.chain) {
+          // Objects only: a bare `provider/model` string is dropped by the
+          // runtime inventory, and a half-filled or non-string entry is not a
+          // route. Skipping them keeps one malformed row from failing the view.
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+          if (!isRouteId(entry.provider) || !isRouteId(entry.model)) continue;
+          keys.add(catalogRouteKey(entry.provider, entry.model));
+        }
+      }
+      // `matches.length` IS the "Configured in" count, so ONE slot contributes
+      // at most once per route: a chain that repeats a route, or a slot whose
+      // top-level route also appears in its chain, must not inflate the count
+      // or repeat its label.
+      for (const key of keys) {
+        const bucket = index.get(key);
+        if (bucket) bucket.push(slot);
+        else index.set(key, [slot]);
+      }
     }
     return index;
   }, [slots]);
 
   const q = query.trim().toLowerCase();
+  // Lab counts describe the whole loaded catalog (not the current narrowing),
+  // so the select can never offer a lab that would empty the table by itself.
+  const labs = useMemo(() => labCounts(
+    providers.flatMap((p) => catalogModelsOf(p).map((m) => ({ providerId: p.id, modelId: m.id }))),
+    providerLabels,
+  ), [providers, providerLabels]);
+
+  // A filter whose option no longer exists — switching the catalog profile can
+  // remove labs, providers and capability flags — is dropped in the SAME render
+  // that makes it impossible, so a select can never read "All labs" while a
+  // stale lab still empties the table. The effect below writes the normalised
+  // value back into state; these are the values the predicates use.
+  const labActive = labFilter !== "all" && labs.some((l) => l.lab === labFilter) ? labFilter : "all";
+  const providerActive =
+    providerFilter !== "all" && setUpProviders.some((p) => p.id === providerFilter)
+      ? providerFilter : "all";
+
   const matches = (provider, model) => {
     if (freeOnly && model.pricingStatus !== "free") return false;
     if (pricedOnly && model.pricingStatus !== "priced") return false;
+    if (providerActive !== "all" && provider.id !== providerActive) return false;
+    if (statusFilter === "setup" && provider.authenticated === false) return false;
+    if (statusFilter === "signin" && provider.authenticated !== false) return false;
+    if (labActive !== "all" && labOf(provider.id, model.id) !== labActive) return false;
+    if (inUseOnly && !routeIndex.has(catalogRouteKey(provider.id, model.id))) return false;
+    if (fastOnly && !(showFast && model.capabilities && model.capabilities.fast === true)) return false;
+    if (canDisableOnly &&
+      !(showCanDisable && model.capabilities && model.capabilities.canDisableReasoning === true)) return false;
+    if (freeIdsOnly && !isCatalogFreeVariant(model.id)) return false;
     if (!q) return true;
-    return [provider.id, provider.label, model.id, model.label]
+    return [provider.id, provider.label, model.id, model.label,
+      labLabel(labOf(provider.id, model.id), providerLabels[labOf(provider.id, model.id)])]
       .some((value) => String(value || "").toLowerCase().includes(q));
   };
 
-  const rowsByProvider = useMemo(() => providers.map((provider) => ({
-    provider,
-    rows: catalogSortRows(
-      catalogModelsOf(provider).filter((m) => matches(provider, m))
-        .map((m) => ({ provider, model: m })),
-      sort,
-    ),
-  })), [providers, q, freeOnly, pricedOnly, sort]);
+  const rowsFor = useMemo(() => {
+    const map = new Map();
+    for (const provider of providers) {
+      map.set(provider.id, catalogSortRows(
+        catalogModelsOf(provider).filter((m) => matches(provider, m))
+          .map((m) => ({ provider, model: m })),
+        effectiveSort,
+      ));
+    }
+    return map;
+  }, [providers, q, freeOnly, pricedOnly, labActive, providerActive, statusFilter,
+    inUseOnly, fastOnly, canDisableOnly, freeIdsOnly, effectiveSort, routeIndex,
+    showFast, showCanDisable]);
 
-  const narrowing = Boolean(q) || freeOnly || pricedOnly;
-  const orderedGroups = sort === "provider"
-    ? [...rowsByProvider].sort((a, b) =>
-      String(a.provider.label || a.provider.id).localeCompare(String(b.provider.label || b.provider.id)) ||
-      String(a.provider.id).localeCompare(String(b.provider.id)))
-    : rowsByProvider;
-  const groups = narrowing ? orderedGroups.filter((g) => g.rows.length > 0) : orderedGroups;
+  useEffect(() => {
+    // Nothing to clamp before this profile's catalog is in hand: an unloaded
+    // view has no labs, prices or capability flags yet, and would wipe the
+    // user's choices while the profile is still loading.
+    if (!data) return;
+    // Controls disappear with the data; their filters must not outlive them.
+    // Written to state (not just display) so coming back to a priced profile
+    // does not resurrect a hidden price filter or a price sort.
+    if (!hasPrices) {
+      if (freeOnly) setFreeOnly(false);
+      if (pricedOnly) setPricedOnly(false);
+      if (String(sort).startsWith("price-")) setSort("name");
+    }
+    if (labActive !== labFilter) setLabFilter("all");
+    if (providerActive !== providerFilter) setProviderFilter("all");
+    if (!showFast && fastOnly) setFastOnly(false);
+    if (!showCanDisable && canDisableOnly) setCanDisableOnly(false);
+    if (stats.freeIds === 0 && freeIdsOnly) setFreeIdsOnly(false);
+  }, [data, hasPrices, sort, freeOnly, pricedOnly, labActive, labFilter, providerActive,
+    providerFilter, showFast, fastOnly, showCanDisable, canDisableOnly,
+    stats.freeIds, freeIdsOnly]);
 
-  const flatAll = useMemo(() => {
-    if (grouped) return [];
-    return catalogSortRows(
-      providers.flatMap((provider) => catalogModelsOf(provider)
-        .filter((m) => matches(provider, m))
-        .map((m) => ({ provider, model: m }))),
-      sort,
-    );
-  }, [grouped, providers, q, freeOnly, pricedOnly, sort]);
-  const flatShown = showAllFlat ? flatAll : flatAll.slice(0, CATALOG_FLAT_PAGE_SIZE);
+  const narrowing = Boolean(q) || freeOnly || pricedOnly || labActive !== "all" ||
+    providerActive !== "all" || statusFilter !== "all" || inUseOnly ||
+    fastOnly || canDisableOnly || freeIdsOnly;
+
+  const setUpGroups = setUpProviders
+    .map((provider) => ({ provider, rows: rowsFor.get(provider.id) || [] }))
+    .filter((group) => group.rows.length > 0 || !narrowing);
+
+  // Per-lab totals for the set-up table: what a lab header compares against
+  // when a filter is active. (The Lab select's own counts cover the whole
+  // catalog, including rows that live in the not-set-up section.)
+  const labTotals = useMemo(() => {
+    const totals = new Map();
+    for (const provider of setUpProviders) {
+      for (const model of catalogModelsOf(provider)) {
+        const lab = labOf(provider.id, model.id);
+        totals.set(lab, (totals.get(lab) || 0) + 1);
+      }
+    }
+    return totals;
+  }, [setUpProviders]);
+
+  const labGroups = useMemo(() => {
+    const map = new Map();
+    for (const provider of setUpProviders) {
+      for (const row of rowsFor.get(provider.id) || []) {
+        const lab = labOf(provider.id, row.model.id);
+        if (!map.has(lab)) map.set(lab, { lab, label: labLabel(lab, providerLabels[lab]), rows: [] });
+        map.get(lab).rows.push(row);
+      }
+    }
+    return [...map.values()]
+      .map((group) => ({ ...group, rows: catalogSortRows(group.rows, effectiveSort) }))
+      .sort((a, b) => a.label.localeCompare(b.label) || a.lab.localeCompare(b.lab));
+  }, [setUpProviders, rowsFor, providerLabels, effectiveSort]);
+
+  const setUpFlat = useMemo(() => catalogSortRows(
+    setUpProviders.flatMap((provider) => rowsFor.get(provider.id) || []), effectiveSort),
+  [setUpProviders, rowsFor, effectiveSort]);
+  const flatShown = showAllFlat ? setUpFlat : setUpFlat.slice(0, CATALOG_FLAT_PAGE_SIZE);
+
+  // The collapsed section is provider-shaped even in Lab/None mode: sign-in is
+  // a provider property, and these rows must stay readable without inventing a
+  // lab group for a provider that publishes no models.
+  const unsetupGroups = useMemo(() => {
+    if (statusFilter === "setup") return [];
+    // Price, capability and in-use narrowing are questions about models, and a
+    // provider that is not set up cannot be routed to: the whole section drops
+    // out, and `visibleModels` below stops counting its rows.
+    if (inUseOnly || fastOnly || canDisableOnly || freeIdsOnly || freeOnly || pricedOnly) return [];
+    return notSetUpProviders
+      .filter((provider) => {
+        if (providerActive !== "all" && provider.id !== providerActive) return false;
+        const providerRows = rowsFor.get(provider.id) || [];
+        // Lab narrowing is decided by the rows this provider would render: a
+        // lab is a property of a model id, never of a provider slug. A
+        // not-set-up provider that publishes anthropic/* rows belongs under
+        // Lab = Anthropic exactly like a set-up one does.
+        if (labActive !== "all" && providerRows.length === 0) return false;
+        if (q && providerRows.length === 0 && ![provider.id, provider.label].some((value) =>
+          String(value || "").toLowerCase().includes(q))) return false;
+        return true;
+      })
+      .map((provider) => ({ provider, rows: rowsFor.get(provider.id) || [] }));
+  }, [notSetUpProviders, rowsFor, providerActive, labActive, q, statusFilter,
+    inUseOnly, fastOnly, canDisableOnly, freeIdsOnly, freeOnly, pricedOnly]);
+
+  // Count only rows the view renders: set-up rows plus the rows carried by the
+  // (possibly collapsed) not-set-up section. A section that was dropped must
+  // never keep inflating the match line.
+  const visibleModels =
+    setUpProviders.reduce((n, p) => n + (rowsFor.get(p.id) || []).length, 0) +
+    unsetupGroups.reduce((n, group) => n + group.rows.length, 0);
+  const matchText =
+    `Showing ${visibleModels} of ${stats.models} models${narrowing ? " (filtered)" : ""}.`;
+  const settledMatchText = useSettledText(matchText);
+  const columnCount = groupBy === "none" ? 8 : 6;
+  const mainSectionCount = groupBy === "provider" ? setUpGroups.length
+    : groupBy === "lab" ? labGroups.length : flatShown.length;
+  const hasRows = mainSectionCount + unsetupGroups.length > 0;
 
   const toggleGroup = (id) => {
     setExpandedGroups((old) => {
@@ -367,6 +627,13 @@ function ModelCatalogView({ catalog, profileId, slots, onRefresh, onRetry, onCol
     setQuery("");
     setFreeOnly(false);
     setPricedOnly(false);
+    setLabFilter("all");
+    setProviderFilter("all");
+    setStatusFilter("all");
+    setInUseOnly(false);
+    setFastOnly(false);
+    setCanDisableOnly(false);
+    setFreeIdsOnly(false);
   };
   const toggleFree = () => {
     setFreeOnly((v) => !v);
@@ -377,12 +644,174 @@ function ModelCatalogView({ catalog, profileId, slots, onRefresh, onRetry, onCol
     setFreeOnly(false);
   };
 
+  // Provider-level failure notices. Provider grouping can show them on the
+  // group header, but Lab and None grouping have no per-provider header — and a
+  // provider that failed before publishing anything contributes no lab group at
+  // all, so its message would vanish with it. Those modes carry the notices
+  // above the table instead, for every affected provider, rows or no rows.
   const noticeProviders = providers.filter((p) => p.warning || unavailable.has(p.id));
 
+  // The catalog's sticky stack: the column header pins at the top of the scroll
+  // region (top: 0) and every group header pins directly beneath it, so rows
+  // are never visible without the header that names them. The header height is
+  // declared here rather than measured, so the two offsets cannot drift.
+  const CATALOG_THEAD_HEIGHT = 30;
   const theadStyle = {
     textAlign: "left", borderBottom: `1px solid ${THEME.border}`, padding: 4,
+    height: CATALOG_THEAD_HEIGHT, boxSizing: "border-box",
     position: "sticky", top: 0, background: stickyBg, zIndex: 2,
   };
+  const groupHeadStyle = {
+    position: "sticky", top: CATALOG_THEAD_HEIGHT, zIndex: 1, background: stickyBg,
+    boxShadow: `0 -1px 0 ${THEME.border}`,
+  };
+  // Inline so the sticky Use column can paint an opaque cell over the rows
+  // scrolling underneath it, with the same theme-reactive surface as the head.
+  const scrollStyle = { "--hms-catalog-sticky-bg": stickyBg };
+
+  const tableHead = (
+    <thead>
+      <tr>
+        <th scope="col" data-column="model" style={theadStyle}
+          aria-sort={effectiveSort === "name" ? "ascending" : "none"}>Model</th>
+        {groupBy === "none" && <th scope="col" data-column="provider" style={theadStyle}>Provider</th>}
+        {groupBy === "none" && <th scope="col" data-column="lab" style={theadStyle}>Lab</th>}
+        <th scope="col" data-column="input" style={{ ...theadStyle, textAlign: "right" }}
+          aria-label="Input price, US dollars per million tokens"
+          aria-sort={effectiveSort === "price-asc" ? "ascending" : effectiveSort === "price-desc" ? "descending" : "none"}>
+          Input $/1M
+        </th>
+        <th scope="col" data-column="output" style={{ ...theadStyle, textAlign: "right" }}
+          aria-label="Output price, US dollars per million tokens"
+          aria-sort="none">Output $/1M</th>
+        <th scope="col" data-column="status" style={theadStyle}>Status</th>
+        <th scope="col" data-column="configured" style={theadStyle}>Configured in</th>
+        <th scope="col" data-column="use" style={theadStyle}>Action</th>
+      </tr>
+    </thead>
+  );
+
+  const renderRow = (row) => (
+    <CatalogRow key={row.provider.id + "/" + row.model.id}
+      provider={row.provider} model={row.model} pending={pending}
+      groupBy={groupBy} routeIndex={routeIndex} onUse={onUse} profileId={profileId} />
+  );
+
+  const renderProviderGroup = (provider, rows, keyPrefix = "") => {
+    const models = catalogModelsOf(provider);
+    const range = catalogPriceRange(models);
+    const key = keyPrefix + provider.id;
+    const expanded = expandedGroups.has(key);
+    const shownRows = expanded ? rows : rows.slice(0, CATALOG_PAGE_SIZE);
+    // A filtered group must not claim the provider's whole catalog: with a lab
+    // or search narrowing active the header reads "N of M" (rows rendered of
+    // models published), and stays "M models" when nothing was removed.
+    const totalModels = provider.modelCount ?? models.length;
+    const countLabel = narrowing && rows.length !== totalModels
+      ? `${rows.length} of ${totalModels} models`
+      : `${totalModels} models`;
+    return (
+      <tbody key={key} data-provider-group={provider.id}>
+        <tr className="hms-catalog-group">
+          <th scope="colgroup" colSpan={columnCount} style={groupHeadStyle}>
+            <span className="hms-catalog-group-head">
+              <strong>{provider.label || provider.id}</strong>
+              <code>{provider.id}</code>
+              <span>{countLabel}</span>
+              {range && <span className="hms-catalog-range">range {range}</span>}
+              <span className="hms-catalog-group-status"
+                data-auth={provider.authenticated === false ? "no" : "yes"}>
+                {provider.authenticated === false
+                  ? "not authenticated — sign-in needed"
+                  : "authenticated"}
+                {provider.configured === false ? " · not configured in this profile" : ""}
+              </span>
+              {provider.stale && provider.fetchedAt && (
+                <span className="hms-catalog-stale">
+                  stale snapshot{provider.fetchedAt ? ` · fetched ${provider.fetchedAt}` : ""}
+                </span>
+              )}
+            </span>
+            {provider.warning && (
+              <span className="hms-catalog-warning" role="note"
+                data-provider-warning={provider.id}>{provider.warning}</span>
+            )}
+            {unavailable.has(provider.id) && (
+              <span className="hms-catalog-unavailable" role="note"
+                data-unavailable-provider={provider.id}>
+                Prices unavailable for this provider — no price is shown, and
+                nothing is treated as free.
+              </span>
+            )}
+          </th>
+        </tr>
+        {shownRows.map(renderRow)}
+        {rows.length === 0 && (
+          <tr data-empty-provider={provider.id}>
+            <td colSpan={columnCount} className="hms-catalog-no-models">
+              No models published for this provider. This is not evidence of
+              free access.
+            </td>
+          </tr>
+        )}
+        {rows.length > CATALOG_PAGE_SIZE && (
+          <tr data-cap-row={provider.id}>
+            <td colSpan={columnCount}>
+              <button type="button" data-testid={`catalog-show-all-${provider.id}`}
+                aria-expanded={expanded} onClick={() => toggleGroup(key)}>
+                {expanded ? "Show fewer" : `Show all ${rows.length}`}
+              </button>
+            </td>
+          </tr>
+        )}
+      </tbody>
+    );
+  };
+
+  const renderLabGroup = ({ lab, label, rows }) => {
+    const key = "lab:" + lab;
+    const expanded = expandedGroups.has(key);
+    const shownRows = expanded ? rows : rows.slice(0, CATALOG_PAGE_SIZE);
+    const totalModels = labTotals.get(lab) ?? rows.length;
+    const countLabel = narrowing && rows.length !== totalModels
+      ? `${rows.length} of ${totalModels} models`
+      : `${totalModels} models`;
+    return (
+      <tbody key={key} data-lab-group={lab}>
+        <tr className="hms-catalog-group">
+          <th scope="colgroup" colSpan={columnCount} style={groupHeadStyle}>
+            <span className="hms-catalog-group-head">
+              <strong>{label}</strong>
+              <span>{countLabel}</span>
+            </span>
+          </th>
+        </tr>
+        {shownRows.map(renderRow)}
+        {rows.length > CATALOG_PAGE_SIZE && (
+          <tr data-cap-row={key}>
+            <td colSpan={columnCount}>
+              <button type="button" data-testid={`catalog-show-all-lab-${lab}`}
+                aria-expanded={expanded} onClick={() => toggleGroup(key)}>
+                {expanded ? "Show fewer" : `Show all ${rows.length}`}
+              </button>
+            </td>
+          </tr>
+        )}
+      </tbody>
+    );
+  };
+
+  const unsetupSummary = (
+    <summary data-testid="catalog-unsetup-summary">
+      Not set up ({unsetupGroups.length}
+      {narrowing && unsetupGroups.length !== notSetUpProviders.length
+        ? ` of ${notSetUpProviders.length}` : ""}) — sign-in needed, not evidence of free access
+    </summary>
+  );
+  // `open` is passed only for the Needs-sign-in filter so that choosing it
+  // shows the matching providers instead of hiding them behind a closed
+  // disclosure; every other state starts collapsed (native <details>).
+  const unsetupOpen = statusFilter === "signin" ? true : undefined;
 
   return (
     <div className="hms-catalog-view" data-testid="catalog-view">
@@ -391,8 +820,8 @@ function ModelCatalogView({ catalog, profileId, slots, onRefresh, onRetry, onCol
           <h3 id="hms-catalog-title">Model catalog — what this profile can route to</h3>
           {data ? (
             <p className="hms-catalog-provenance" data-testid="catalog-provenance">
-              List prices per 1M tokens from the installed Hermes catalog ·{" "}
-              {stats.priced} of {stats.models} models priced
+              List prices per 1M tokens from the installed Hermes catalog · profile{" "}
+              <code>{profileId}</code> · {stats.priced} of {stats.models} models priced
               {pending ? ` · ${CATALOG_PENDING_TEXT}` : ""}
               {stats.unknown ? ` · ${stats.unknown} with no list price — never treated as free` : ""}
             </p>
@@ -401,12 +830,28 @@ function ModelCatalogView({ catalog, profileId, slots, onRefresh, onRetry, onCol
               Reading the installed Hermes catalog for profile <code>{profileId}</code>…
             </p>
           )}
+          <p className="hms-note hms-catalog-scope" data-testid="catalog-scope-summary">
+            {stats.setUp} set up · {stats.providers} providers · {stats.models} models
+          </p>
           <p className="hms-note hms-catalog-readonly">
             Profile scope: <code>{profileId}</code> · Read-only: browsing this catalog never
             changes configuration or costs.
           </p>
         </div>
         <div className="hms-catalog-actions">
+          <label className="hms-catalog-filter hms-catalog-profile">Catalog for profile
+            <select data-testid="catalog-profile-select" aria-label="Catalog for profile"
+              value={profileId} onChange={(e) => onProfileChange?.(e.target.value)}>
+              {(profiles.length ? profiles : [{ id: profileId, name: profileId }]).map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name && p.name !== p.id ? `${p.name} (${p.id})` : p.id}
+                </option>
+              ))}
+              {profiles.length > 0 && !profiles.some((p) => p.id === profileId) && (
+                <option value={profileId}>{profileId}</option>
+              )}
+            </select>
+          </label>
           <button type="button" data-testid="catalog-view-refresh"
             aria-label="Refresh catalog for this profile"
             disabled={Boolean(catalog && catalog.loading)}
@@ -476,7 +921,7 @@ function ModelCatalogView({ catalog, profileId, slots, onRefresh, onRetry, onCol
             </p>
           )}
 
-          {!grouped && noticeProviders.length > 0 && (
+          {groupBy !== "provider" && noticeProviders.length > 0 && (
             <div className="hms-catalog-notices" data-testid="catalog-provider-notices"
               role="group" aria-label="Provider catalog notices">
               {providers.filter((p) => p.warning).map((p) => (
@@ -500,26 +945,96 @@ function ModelCatalogView({ catalog, profileId, slots, onRefresh, onRetry, onCol
                 placeholder="provider, model id, or model name…"
                 value={query} onChange={(e) => setQuery(e.target.value)} />
             </label>
-            <div className="hms-catalog-toggles">
-              <button type="button" data-testid="catalog-free-only" aria-pressed={freeOnly}
-                onClick={toggleFree}>Free only</button>
-              <button type="button" data-testid="catalog-priced-only" aria-pressed={pricedOnly}
-                onClick={togglePriced}>Priced only</button>
-              <button type="button" data-testid="catalog-group-toggle" aria-pressed={grouped}
-                onClick={() => setGrouped((v) => !v)}>Group by provider</button>
-            </div>
+            <label className="hms-catalog-filter">Lab
+              <select data-testid="catalog-lab" aria-label="Filter by lab"
+                title="Counts cover the whole catalog, including providers not set up. Group headers count only the set-up rows shown under that group."
+                value={labActive} onChange={(e) => setLabFilter(e.target.value)}>
+                <option value="all">All labs</option>
+                {labs.map(({ lab, label, count }) => (
+                  <option key={lab} value={lab}>{label} ({count})</option>
+                ))}
+              </select>
+            </label>
+            <label className="hms-catalog-filter">Provider
+              <select data-testid="catalog-provider" aria-label="Filter by provider"
+                value={providerActive} onChange={(e) => setProviderFilter(e.target.value)}>
+                <option value="all">All providers</option>
+                {setUpProviders.map((p) => (
+                  <option key={p.id} value={p.id}>{p.label || p.id}</option>
+                ))}
+              </select>
+            </label>
+            <label className="hms-catalog-filter">Status
+              <select data-testid="catalog-status" aria-label="Filter by setup status"
+                value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+                <option value="all">All statuses</option>
+                <option value="setup">Set up</option>
+                <option value="signin">Needs sign-in</option>
+              </select>
+            </label>
+            <label className="hms-catalog-filter">Group by
+              <select data-testid="catalog-group-select" aria-label="Group catalog rows by"
+                value={groupBy} onChange={(e) => setGroupBy(e.target.value)}>
+                {CATALOG_GROUP_MODES.map((mode) => (
+                  <option key={mode.id} value={mode.id}>{mode.label}</option>
+                ))}
+              </select>
+            </label>
             <label className="hms-catalog-sort">Sort
               <select data-testid="catalog-sort" aria-label="Sort model catalog"
-                value={sort} onChange={(e) => setSort(e.target.value)}>
-                <option value="price-asc">Price ↑</option>
-                <option value="price-desc">Price ↓</option>
+                value={effectiveSort} onChange={(e) => setSort(e.target.value)}>
+                {hasPrices && <option value="price-asc">Price ↑</option>}
+                {hasPrices && <option value="price-desc">Price ↓</option>}
                 <option value="name">Name</option>
                 <option value="provider">Provider</option>
               </select>
             </label>
+            <div className="hms-catalog-toggles">
+              {hasPrices && (
+                <button type="button" data-testid="catalog-free-only" aria-pressed={freeOnly}
+                  onClick={toggleFree}>Free only</button>
+              )}
+              {hasPrices && (
+                <button type="button" data-testid="catalog-priced-only" aria-pressed={pricedOnly}
+                  onClick={togglePriced}>Priced only</button>
+              )}
+              <button type="button" data-testid="catalog-in-use" aria-pressed={inUseOnly}
+                title="Models already assigned in a loaded profile slot"
+                onClick={() => setInUseOnly((v) => !v)}>In use</button>
+              {showFast && (
+                <button type="button" data-testid="catalog-fast-only" aria-pressed={fastOnly}
+                  title="Models the catalog marks as fast"
+                  onClick={() => setFastOnly((v) => !v)}>Fast</button>
+              )}
+              {showCanDisable && (
+                <button type="button" data-testid="catalog-can-disable-only"
+                  aria-pressed={canDisableOnly}
+                  title="Models whose reasoning can be turned off"
+                  onClick={() => setCanDisableOnly((v) => !v)}>Can disable reasoning</button>
+              )}
+              {stats.freeIds > 0 && (
+                <button type="button" data-testid="catalog-free-ids" aria-pressed={freeIdsOnly}
+                  title="Matches model ids ending in :free (OpenRouter free-tier naming). This is an id pattern, not a price claim."
+                  onClick={() => setFreeIdsOnly((v) => !v)}>OpenRouter :free ids</button>
+              )}
+            </div>
+            {!hasPrices && (
+              <p className="hms-note" data-testid="catalog-price-note">{CATALOG_PRICE_NOTE}</p>
+            )}
+            {narrowing && (
+              <button type="button" data-testid="catalog-clear-filters-control"
+                onClick={clearNarrowing}>Clear search and filters</button>
+            )}
           </div>
+          <p className="hms-note hms-catalog-match-count" data-testid="catalog-match-count">
+            {matchText}
+          </p>
+          {/* Announcements wait for typing to settle: one sentence per query,
+              not one per keystroke (DESIGN §8). */}
+          <p style={CATALOG_SR_ONLY} role="status" aria-live="polite"
+            data-testid="catalog-match-announce">{settledMatchText}</p>
 
-          {groups.length === 0 || (!grouped && flatAll.length === 0) ? (
+          {!hasRows ? (
             <div className="hms-catalog-panel" data-testid="catalog-view-empty-matches" role="status">
               <span>
                 {q
@@ -532,115 +1047,57 @@ function ModelCatalogView({ catalog, profileId, slots, onRefresh, onRetry, onCol
               </button>
             </div>
           ) : (
-            <div className="hms-catalog-scroll" data-testid="catalog-scroll" role="region"
-              aria-label="Scrollable model catalog" tabIndex={0}>
-              <table className="hms-catalog-table" data-testid="catalog-table">
-                <caption style={CATALOG_SR_ONLY}>
-                  Model catalog: providers, per-million-token prices, and configuration status
-                </caption>
-                <thead>
-                  <tr>
-                    <th scope="col" style={theadStyle}
-                      aria-sort={sort === "name" ? "ascending" : "none"}>Model</th>
-                    <th scope="col" style={{ ...theadStyle, textAlign: "right" }}
-                      aria-label="Input price, US dollars per million tokens"
-                      aria-sort={sort === "price-asc" ? "ascending" : sort === "price-desc" ? "descending" : "none"}>
-                      Input $/1M
-                    </th>
-                    <th scope="col" style={{ ...theadStyle, textAlign: "right" }}
-                      aria-label="Output price, US dollars per million tokens"
-                      aria-sort="none">Output $/1M</th>
-                    <th scope="col" style={theadStyle}>Status</th>
-                    <th scope="col" style={theadStyle}>Configured in</th>
-                    <th scope="col" style={theadStyle}>Action</th>
-                  </tr>
-                </thead>
-                {grouped ? groups.map(({ provider, rows }) => {
-                  const models = catalogModelsOf(provider);
-                  const range = catalogPriceRange(models);
-                  const expanded = expandedGroups.has(provider.id);
-                  const shownRows = expanded ? rows : rows.slice(0, CATALOG_PAGE_SIZE);
-                  return (
-                    <tbody key={provider.id} data-provider-group={provider.id}>
-                      <tr className="hms-catalog-group">
-                        <th scope="colgroup" colSpan={6}>
-                          <span className="hms-catalog-group-head">
-                            <strong>{provider.label || provider.id}</strong>
-                            <code>{provider.id}</code>
-                            <span>{provider.modelCount ?? models.length} models</span>
-                            {range && <span className="hms-catalog-range">range {range}</span>}
-                            <span className="hms-catalog-group-status"
-                              data-auth={provider.authenticated === false ? "no" : "yes"}>
-                              {provider.authenticated === false
-                                ? "not authenticated — sign-in needed"
-                                : "authenticated"}
-                              {provider.configured === false ? " · not configured in this profile" : ""}
-                            </span>
-                            {provider.stale && provider.fetchedAt && (
-                              <span className="hms-catalog-stale">
-                                stale snapshot{provider.fetchedAt ? ` · fetched ${provider.fetchedAt}` : ""}
-                              </span>
-                            )}
-                          </span>
-                          {provider.warning && (
-                            <span className="hms-catalog-warning" role="note"
-                              data-provider-warning={provider.id}>{provider.warning}</span>
-                          )}
-                          {unavailable.has(provider.id) && (
-                            <span className="hms-catalog-unavailable" role="note"
-                              data-unavailable-provider={provider.id}>
-                              Prices unavailable for this provider — no price is shown, and
-                              nothing is treated as free.
-                            </span>
-                          )}
-                        </th>
-                      </tr>
-                      {shownRows.map(({ provider: rowProvider, model }) => (
-                        <CatalogRow key={rowProvider.id + "/" + model.id}
-                          provider={rowProvider} model={model} pending={pending}
-                          grouped routeIndex={routeIndex} onUse={onUse} profileId={profileId} />
-                      ))}
-                      {rows.length === 0 && (
-                        <tr data-empty-provider={provider.id}>
-                          <td colSpan={6} className="hms-catalog-no-models">
-                            No models published for this provider. This is not evidence of
-                            free access.
-                          </td>
-                        </tr>
-                      )}
-                      {rows.length > CATALOG_PAGE_SIZE && (
-                        <tr data-cap-row={provider.id}>
-                          <td colSpan={6}>
-                            <button type="button" data-testid={`catalog-show-all-${provider.id}`}
-                              aria-expanded={expanded} onClick={() => toggleGroup(provider.id)}>
-                              {expanded ? "Show fewer" : `Show all ${rows.length}`}
-                            </button>
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  );
-                }) : (
-                  <tbody>
-                    {flatShown.map(({ provider, model }) => (
-                      <CatalogRow key={provider.id + "/" + model.id}
-                        provider={provider} model={model} pending={pending}
-                        grouped={false} routeIndex={routeIndex} onUse={onUse} profileId={profileId} />
-                    ))}
-                    {flatAll.length > CATALOG_FLAT_PAGE_SIZE && (
-                      <tr data-cap-row="flat">
-                        <td colSpan={6}>
-                          <button type="button" data-testid="catalog-show-all-flat"
-                            aria-expanded={showAllFlat} onClick={() => setShowAllFlat((v) => !v)}>
-                            {showAllFlat ? "Show fewer" : `Show all ${flatAll.length}`}
-                          </button>
-                        </td>
-                      </tr>
+            <>
+              {mainSectionCount > 0 && (
+                <div className="hms-catalog-scroll" data-testid="catalog-scroll" role="region"
+                  aria-label="Scrollable model catalog" tabIndex={0} style={scrollStyle}>
+                  <table className="hms-catalog-table" data-testid="catalog-table">
+                    <caption style={CATALOG_SR_ONLY}>
+                      Model catalog: providers, per-million-token prices, and configuration status
+                    </caption>
+                    {tableHead}
+                    {groupBy === "provider" ? setUpGroups.map(({ provider, rows }) =>
+                      renderProviderGroup(provider, rows)) : groupBy === "lab" ? labGroups.map(renderLabGroup) : (
+                      <tbody>
+                        {flatShown.map(renderRow)}
+                        {setUpFlat.length > CATALOG_FLAT_PAGE_SIZE && (
+                          <tr data-cap-row="flat">
+                            <td colSpan={columnCount}>
+                              <button type="button" data-testid="catalog-show-all-flat"
+                                aria-expanded={showAllFlat} onClick={() => setShowAllFlat((v) => !v)}>
+                                {showAllFlat ? "Show fewer" : `Show all ${setUpFlat.length}`}
+                              </button>
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
                     )}
-                  </tbody>
-                )}
-              </table>
-            </div>
+                  </table>
+                </div>
+              )}
+              {unsetupGroups.length > 0 && (
+                <details className="hms-catalog-unsetup" data-testid="catalog-unsetup" open={unsetupOpen}>
+                  {unsetupSummary}
+                  <p className="hms-note">
+                    These providers are not set up in profile <code>{profileId}</code> — no
+                    credential is configured, so nothing here can be routed to. Their rows stay
+                    listed truthfully when expanded; nothing here is treated as free.
+                  </p>
+                  <div className="hms-catalog-scroll" data-testid="catalog-unsetup-scroll"
+                    role="region" aria-label="Scrollable catalog for providers not set up" tabIndex={0}
+                    style={scrollStyle}>
+                    <table className="hms-catalog-table" data-testid="catalog-unsetup-table">
+                      <caption style={CATALOG_SR_ONLY}>
+                        Providers not set up in this profile
+                      </caption>
+                      {tableHead}
+                      {unsetupGroups.map(({ provider, rows }) =>
+                        renderProviderGroup(provider, rows, "unsetup-"))}
+                    </table>
+                  </div>
+                </details>
+              )}
+            </>
           )}
         </>
       )}
@@ -1259,12 +1716,122 @@ function ChangeEditor({
   });
   const showModelOther = modelOther || (Boolean(editor.model) && !modelInList && !modelLoading && Boolean(modelProvider));
 
+  // ---- Lab + filter for the Model list -----------------------------------
+  // An aggregator's ids carry their vendor namespace (`anthropic/claude-…`,
+  // `z-ai/glm-…`), so openrouter's 62 models and nous's 67 open on the same two
+  // labs and bury everything else. When the list spans two or more labs every
+  // id is namespaced (labs.js::isMultiLab), so a Lab select can narrow it
+  // honestly; a long flat list (>20) keeps its full ids and only gains the
+  // filter. Both are native controls: the browser owns keyboard and
+  // screen-reader behaviour and nothing pops outside the plugin root.
+  const multiLab = useMemo(() => isMultiLab(modelRows.map((m) => m.id)), [modelRows]);
+  const showModelFilter = multiLab || modelRows.length > 20;
+  const labOptions = useMemo(
+    () => labCounts(modelRows.map((m) => ({ providerId: modelProvider, modelId: m.id }))),
+    [modelRows, modelProvider],
+  );
+  // Lab and filter belong to the provider they were chosen for: a provider
+  // change must show that provider's whole list again. The reset is part of the
+  // render (a stale key reads as "no lab, no filter"), so no frame ever shows
+  // one provider's rows narrowed by another provider's lab.
+  const [pick, setPick] = useState({ key: null, lab: "", text: "" });
+  const [pickProvider, setPickProvider] = useState(modelProvider);
+  if (pickProvider !== modelProvider) {
+    // Adjusting state during render (the React-documented prop-change pattern):
+    // the list is drawn once, already un-narrowed, and a later switch back to
+    // the previous provider cannot resurrect the old lab/filter.
+    setPickProvider(modelProvider);
+    setPick({ key: modelProvider, lab: "", text: "" });
+  }
+  const activePick = pick.key === modelProvider ? pick : null;
+  // The pick also belongs to the OPTIONS it was chosen from: switching the
+  // catalog profile (the picker, GET /models and the catalog's Use gate all
+  // read that scope) or a refresh can withdraw a lab while the provider stays
+  // multi-lab. Validating against this render's options — the same render-time
+  // clamp the catalog applies to its own lab/provider filters — keeps the Lab
+  // select from reading "All labs" over a list narrowed by a lab that no longer
+  // exists. The stale value is written back so nothing survives to narrow a
+  // later catalog. Rows are the guard for a load that has not landed yet: with
+  // no options here there is nothing to validate against, and wiping the pick
+  // would punish a scope switch that keeps the lab.
+  const labAvailable = Boolean(activePick && activePick.lab) &&
+    labOptions.some((l) => l.lab === activePick.lab);
+  if (activePick && activePick.lab && modelRows.length > 0 && !labAvailable) {
+    setPick({ key: modelProvider, lab: "", text: activePick.text });
+  }
+  const labPick = multiLab && labAvailable ? activePick.lab : "";
+  const filterText = showModelFilter && activePick ? activePick.text : "";
+  const needle = filterText.trim().toLowerCase();
+  const narrowed = Boolean(labPick) || Boolean(needle);
+  const visibleRows = useMemo(() => {
+    if (!multiLab && !needle) return modelRows;
+    return modelRows.filter((m) => {
+      if (labPick && labOf(modelProvider, m.id) !== labPick) return false;
+      if (!needle) return true;
+      return m.id.toLowerCase().includes(needle) || String(m.name || "").toLowerCase().includes(needle);
+    });
+  }, [modelRows, multiLab, needle, labPick, modelProvider]);
+  // The count is visible immediately; only the announcement waits for typing
+  // to settle, so a screen reader hears one sentence per query instead of one
+  // per keystroke.
+  const pickerMatchText = narrowed ? `${visibleRows.length} of ${modelRows.length} models` : "";
+  const settledPickerMatch = useSettledText(pickerMatchText);
+  // Grouped only while several labs are on screen: one optgroup per lab for
+  // "All labs". Once a lab is chosen its name is already in the Lab select, so
+  // the rows are a flat leaf-named list. Counts are the rows on screen.
+  const visibleGroups = useMemo(() => {
+    if (!multiLab) return [];
+    const groups = new Map();
+    for (const m of visibleRows) {
+      const lab = labOf(modelProvider, m.id);
+      if (!groups.has(lab)) groups.set(lab, { lab, label: labLabel(lab), rows: [] });
+      groups.get(lab).rows.push(m);
+    }
+    return [...groups.values()].sort((a, b) => a.label.localeCompare(b.label) || a.lab.localeCompare(b.lab));
+  }, [multiLab, visibleRows, modelProvider]);
+  // The chosen model never vanishes from its own <select>: a filtered-out
+  // selection stays selectable (with its lab named) so the editor cannot lose
+  // the value behind the user's back. Options are excluded from the groups, so
+  // no id is ever listed twice.
+  const selectedRow = editor.model ? modelRows.find((m) => m.id === editor.model) || null : null;
+  const pinnedRow = selectedRow && !visibleRows.some((m) => m.id === selectedRow.id) ? selectedRow : null;
+  // Every model of this provider without a published price: state it once
+  // instead of ending every row with the same sentence.
+  const allPricesUnknown = modelRows.length > 0 && modelRows.every(
+    (m) => priceHint(catalogModelMap.get(`${modelProvider}\u0000${m.id}`)).kind === "unknown",
+  );
+  const showNoMatch = modelRows.length > 0 && visibleRows.length === 0;
+
+  const modelPlaceholder = !modelProvider && !scalarPinned ? "Choose a provider first"
+    : providerTyping ? "Finish the provider slug to list its models"
+      : modelLoading ? "Loading models…"
+        : !modelRows.length ? "No listed models — choose Other"
+          : narrowed ? `Choose a model (${visibleRows.length} of ${modelRows.length})…`
+            : `Choose a model (${modelRows.length})…`;
+
+  const catalogModelOf = (m) => catalogModelMap.get(`${modelProvider}\u0000${m.id}`);
+  // Under a lab the leaf is unambiguous; a bare id is already the whole model
+  // name. The full id always rides in the option's title and in the Route line.
   const modelOptionText = (m) => {
-    const hint = priceHint(catalogModelMap.get(`${modelProvider}\u0000${m.id}`));
-    const price = hint.kind === "unknown" ? "price not published"
-      : hint.kind === "priced" ? hint.text.replace(/^→\s*/, "").replace(/ (in|out)$/, "/1M $1") : hint.text;
+    const price = priceSuffix(catalogModelOf(m));
+    if (multiLab) return routeOptionText(`${modelLeaf(m.id)}${price}`, 72);
     const name = m.name && m.name !== m.id ? ` (${m.name})` : "";
-    return routeOptionText(`${m.id}${name} — ${price}`, 90);
+    return routeOptionText(`${m.id}${name}${price}`, 90);
+  };
+  const pinnedOptionText = (m) => {
+    const price = priceSuffix(catalogModelOf(m));
+    if (!multiLab) return modelOptionText(m);
+    return routeOptionText(`${labLabel(labOf(modelProvider, m.id))} · ${modelLeaf(m.id)}${price}`, 72);
+  };
+
+  const chooseLab = (value) => {
+    setPick({ key: modelProvider, lab: value, text: filterText });
+    if (!value) {
+      announce?.(`All labs — ${modelRows.length} models`);
+      return;
+    }
+    const lab = labOptions.find((l) => l.lab === value);
+    announce?.(`Lab set to ${lab ? lab.label : value} — ${lab ? lab.count : 0} of ${modelRows.length} models`);
   };
 
   const chooseProvider = (value) => {
@@ -1330,6 +1897,15 @@ function ChangeEditor({
         : "");
   })();
 
+  // The picker, GET /models and the catalog's Use gate all read the CATALOG
+  // profile, while preview/apply write to the selected slots' profiles. When
+  // ANY of those differs, say so: a route that exists in the browsed profile
+  // may not exist in one about to be written. A bulk edit that also touches the
+  // browsed profile is still a bulk edit — one matching target must not vouch
+  // for the others.
+  const targetProfiles = [...new Set(writableSelected.map((s) => s.profileId).filter(Boolean))].sort();
+  const catalogScopeDiffers = Boolean(catalog.data) && targetProfiles.some((p) => p !== catalogProfileId);
+
   return (
     <section aria-label="Custom change editor" data-testid="change-editor" data-empty={!writableSelected.length}
       style={{ marginTop: 0 }}>
@@ -1353,6 +1929,13 @@ function ChangeEditor({
 
         {editor.changeType === "set" && (
           <div className="hms-route-picks" data-testid="route-picks">
+            {catalogScopeDiffers && (
+              <p className="hms-note hms-scope-note" role="note" data-testid="picker-scope-note">
+                Browsing the catalog for profile <code>{catalogProfileId}</code>; your targets are
+                in <code>{targetProfiles.join(", ")}</code>. A provider or model that profile does
+                not list will fail there, so check the route before previewing.
+              </p>
+            )}
             <label className="hms-route-field">Provider
               <select aria-label="New provider" data-testid="provider-select"
                 value={scalarOnly ? "openrouter" : (showProviderOther ? OTHER_VALUE : modelProvider)}
@@ -1396,6 +1979,38 @@ function ChangeEditor({
               </div>
             )}
 
+            {(multiLab || showModelFilter) && (
+              <div className="hms-picker-narrow" data-testid="picker-filters">
+                {multiLab && (
+                  <label className="hms-route-field">Lab
+                    <select aria-label="Lab" data-testid="lab-select" value={labPick}
+                      onChange={(e) => chooseLab(e.target.value)}>
+                      <option value="">All labs ({modelRows.length})</option>
+                      {labOptions.map((l) => (
+                        <option key={l.lab} value={l.lab} data-testid={`lab-option-${l.lab}`}>
+                          {`${l.label} (${l.count})`}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                {showModelFilter && (
+                  <label className="hms-route-field">Filter models
+                    <input type="search" aria-label="Filter models" data-testid="model-filter"
+                      value={filterText} placeholder="Match a model id or name"
+                      onChange={(e) => setPick({ key: modelProvider, lab: labPick, text: e.target.value })} />
+                  </label>
+                )}
+                {narrowed && (
+                  <span className="hms-note hms-picker-match" data-testid="picker-match-count">
+                    {pickerMatchText}
+                  </span>
+                )}
+                <span style={CATALOG_SR_ONLY} role="status" aria-live="polite"
+                  data-testid="picker-match-announce">{settledPickerMatch}</span>
+              </div>
+            )}
+
             <label className="hms-route-field">Model
               <select aria-label="New model" data-testid="model-select"
                 value={showModelOther ? OTHER_VALUE : editor.model}
@@ -1403,18 +2018,34 @@ function ChangeEditor({
                 onFocus={() => onEnsureCatalog?.()}
                 onPointerEnter={() => onEnsureCatalog?.()}
                 onChange={(e) => chooseModel(e.target.value)}>
-                <option value="">
-                  {!modelProvider && !scalarOnly ? "Choose a provider first"
-                    : providerTyping ? "Finish the provider slug to list its models"
-                    : modelLoading ? "Loading models…"
-                    : modelRows.length ? `Choose a model (${modelRows.length})…` : "No listed models — choose Other"}
-                </option>
-                {modelRows.map((m) => (
-                  <option key={m.id} value={m.id} data-testid={`model-option-${m.id}`}>{modelOptionText(m)}</option>
-                ))}
+                <option value="">{modelPlaceholder}</option>
+                {showNoMatch && <option value="__no_match__" disabled>No models match</option>}
+                {pinnedRow && (
+                  <option value={pinnedRow.id} data-testid={`model-option-${pinnedRow.id}`}
+                    data-pinned="true" title={pinnedRow.id}>{pinnedOptionText(pinnedRow)}</option>
+                )}
+                {multiLab && !labPick
+                  ? visibleGroups.map((g) => (
+                    <optgroup key={g.lab} label={`${g.label} · ${g.rows.length}`}
+                      data-testid={`model-group-${g.lab}`}>
+                      {g.rows.map((m) => (
+                        <option key={m.id} value={m.id} data-testid={`model-option-${m.id}`}
+                          title={m.id}>{modelOptionText(m)}</option>
+                      ))}
+                    </optgroup>
+                  ))
+                  : visibleRows.map((m) => (
+                    <option key={m.id} value={m.id} data-testid={`model-option-${m.id}`}
+                      title={m.id}>{modelOptionText(m)}</option>
+                  ))}
                 <option value={OTHER_VALUE}>Other — type an exact model id…</option>
               </select>
             </label>
+            {allPricesUnknown && (
+              <p className="hms-note hms-picker-price-note" data-testid="model-price-note">
+                No list prices published for this provider.
+              </p>
+            )}
             {showModelOther && (
               <label className="hms-route-field hms-route-exact">Exact model id
                 <input data-testid="model-exact" value={editor.model}
@@ -2117,6 +2748,9 @@ function App() {
   const [selection, setSelection] = useState(new Map()); // key -> slot
   const [expanded, setExpanded] = useState({});
   const [filters, setFilters] = useState({ profileIds: [], family: "all", subfamily: "all", provider: "", model: "", state: "all" });
+  // Explicit catalog profile choice ("" = no override yet, so the single
+  // checked matrix profile or `default` seeds it).
+  const [catalogProfileChoice, setCatalogProfileChoice] = useState("");
   const [reviewedPreset, setReviewPreset] = useState(null);
   const [preview, setPreview] = useState(null);
   const [previewFor, setPreviewFor] = useState(""); // fingerprint of change-set the preview belongs to
@@ -2309,9 +2943,12 @@ function App() {
   useEffect(() => { load(); }, []);
 
   const slots = state ? state.slots : [];
-  // Scope for /catalog and /models: the single checked profile, else default
-  // (same rule the retired picker used). The freshness line states the scope.
-  const catalogProfileId = filters.profileIds.length === 1 ? filters.profileIds[0] : "default";
+  const profiles = state ? state.profiles || [] : [];
+  // Catalog scope is explicit and visible: a single checked profile seeds the
+  // initial choice, otherwise `default`, and the catalog's own labelled select
+  // overrides it. The old silent fallback hid which profile was being read.
+  const seededCatalogProfileId = filters.profileIds.length === 1 ? filters.profileIds[0] : "default";
+  const catalogProfileId = catalogProfileChoice || seededCatalogProfileId;
   // Derive optionsFailure for the editor's profile scope from the cached
   // failure categories, so /models (which doesn't go through ensureHostFor)
   // can still carry the fixed token on a cache hit.
@@ -2741,7 +3378,12 @@ function App() {
       <section id="hms-model-catalog" className="hms-catalog" data-testid="catalog-section"
         aria-label="Model catalog" hidden={!catalogOpen}>
         {catalogOpen && (
-          <ModelCatalogView catalog={catalog} profileId={catalogProfileId} slots={slots}
+          <ModelCatalogView catalog={catalog} profileId={catalogProfileId}
+            profiles={profiles} slots={slots}
+            onProfileChange={(pid) => {
+              setCatalogProfileChoice(pid);
+              announce(`Catalog profile set to ${pid}`);
+            }}
             onRefresh={() => loadCatalog({ refresh: true })}
             onRetry={() => loadCatalog({ force: true })}
             onCollapse={() => setCatalogOpen(false)}

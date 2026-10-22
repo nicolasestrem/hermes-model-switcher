@@ -57,7 +57,14 @@ test("real catalog: one on-demand fetch, payload-shaped groups/rows, and honest 
   // Provider groups and per-group row counts mirror the real DTO exactly.
   const groupIds = await page.locator("[data-provider-group]").evaluateAll(
     (nodes) => nodes.map((node) => node.getAttribute("data-provider-group")));
-  expect(groupIds).toEqual(payload.providers.map((p) => p.id));
+  // Provider groups mirror the real DTO; set-up providers lead (current one
+  // first), and every authenticated:false provider sits in the one collapsed
+  // "Not set up" section rendered after the main table.
+  const setUpIds = payload.providers.filter((p) => p.authenticated !== false)
+    .sort((a, b) => Number(Boolean(b.isCurrent)) - Number(Boolean(a.isCurrent)))
+    .map((p) => p.id);
+  const notSetUpIds = payload.providers.filter((p) => p.authenticated === false).map((p) => p.id);
+  expect(groupIds).toEqual([...setUpIds, ...notSetUpIds]);
   expect(await page.locator("[data-model-row]").count()).toBe(totalModels);
   for (const provider of payload.providers) {
     await expect(page.locator(`[data-provider-group="${provider.id}"] [data-model-row]`))
@@ -113,8 +120,12 @@ test("real catalog: one on-demand fetch, payload-shaped groups/rows, and honest 
   }
 
   // Providers with no published models say so; silence is not free access.
+  // An unauthenticated provider's empty row is inside the collapsed section.
   const emptyProvider = payload.providers.find((p) => p.models.length === 0);
   if (emptyProvider) {
+    if (emptyProvider.authenticated === false) {
+      await page.getByTestId("catalog-unsetup-summary").click();
+    }
     const emptyRow = page.locator(`[data-empty-provider="${emptyProvider.id}"]`);
     await expect(emptyRow).toBeVisible();
     await expect(emptyRow).toContainText("not evidence of free access");
@@ -154,20 +165,16 @@ test("real catalog: browsing and Use prefill never change config bytes or send a
 
   await openCatalog(page);
   await page.getByTestId("catalog-search").fill("gpt");
-  await page.getByTestId("catalog-free-only").click();
-  await page.getByTestId("catalog-priced-only").click();
-  await page.getByTestId("catalog-group-toggle").click();
+  await page.getByTestId("catalog-group-select").selectOption("none");
   await page.getByTestId("catalog-sort").selectOption("name");
   await page.getByTestId("catalog-search").fill("");
-  await page.getByTestId("catalog-priced-only").click();
-  await page.getByTestId("catalog-group-toggle").click();
+  await page.getByTestId("catalog-group-select").selectOption("provider");
 
   // Use pre-fills the editor only; nothing is previewed or applied.
   const enabledUse = page.locator("[data-model-row] [data-column=\"use\"] button:not([disabled])").first();
-  if (await enabledUse.count()) {
-    await enabledUse.click();
-    await expect(page.getByTestId("live-status")).toContainText("Route set to");
-  }
+  expect(await enabledUse.count(), "an authenticated provider publishes a usable row").toBeGreaterThan(0);
+  await enabledUse.click();
+  await expect(page.getByTestId("live-status")).toContainText("Route set to");
   await expect(page.getByLabel("I acknowledge unknown-cost routes")).not.toBeChecked();
 
   await page.waitForTimeout(300);
@@ -176,4 +183,36 @@ test("real catalog: browsing and Use prefill never change config bytes or send a
   expect(requests.filter((r) => r.method !== "GET" &&
     !/\/(state|catalog|models)$/.test(r.url))).toHaveLength(0);
   expect(requests.filter((r) => /\/(preview|operations|presets)(\?|$)/.test(r.url))).toHaveLength(0);
+});
+
+test("real catalog: price filters narrow the real payload, or say why they are absent", async ({ page }) => {
+  await openReal(page);
+  const payload = await openCatalog(page);
+  const priced = payload.providers.flatMap((p) => p.models)
+    .filter((m) => m.pricingStatus === "priced" || m.pricingStatus === "free");
+  const total = payload.providers.reduce((n, p) => n + p.models.length, 0);
+
+  if (priced.length === 0) {
+    // No price data in this lab home: the controls are hidden and one note says
+    // why (asserted here, not skipped silently).
+    await expect(page.getByTestId("catalog-free-only")).toHaveCount(0);
+    await expect(page.getByTestId("catalog-priced-only")).toHaveCount(0);
+    await expect(page.getByTestId("catalog-price-note")).toBeVisible();
+    await expect(page.getByTestId("catalog-sort")).toHaveValue("name");
+    test.skip(true, "lab home publishes no priced/free row: the price FILTER path cannot be exercised on real data");
+  }
+
+  const pricedOnly = priced.filter((m) => m.pricingStatus === "priced").length;
+  // Sections that a price filter drops must not keep inflating the count.
+  await page.getByTestId("catalog-priced-only").click();
+  await expect(page.getByTestId("catalog-match-count"))
+    .toHaveText(`Showing ${pricedOnly} of ${total} models (filtered).`);
+  await expect(page.locator('[data-model-row][data-pricing-status="priced"]')).toHaveCount(pricedOnly);
+  await page.getByTestId("catalog-priced-only").click();
+
+  await page.getByTestId("catalog-free-only").click();
+  const freeOnly = priced.length - pricedOnly;
+  await expect(page.getByTestId("catalog-match-count"))
+    .toHaveText(`Showing ${freeOnly} of ${total} models (filtered).`);
+  await expect(page.locator('[data-model-row][data-pricing-status="free"]')).toHaveCount(freeOnly);
 });

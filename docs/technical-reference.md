@@ -68,11 +68,25 @@ transform that host payload. Their old GET forms return HTTP 410 with
 not write configuration, presets or the operation journal and remain useful in
 read-only mode when host evidence is available.
 
+`Configured in` and `In use` join catalog rows to configured slot routes by exact
+provider/model identity, including object entries in explicitly configured fallback
+chains. Each slot counts once per route, even with repeated entries. Inherited
+chains and recorded usage do not add configured assignments.
+
 Provider and model dropdowns share this data; an "Other" entry preserves exact-ID
 manual entry. IDs are not portable across providers: Nous may use
 `deepseek/deepseek-v4.1-flash` while OpenCode Go uses `deepseek-v4.1-flash`.
 A listed model is not proof it is routable. Credential and billing policy are
 checked for each target profile, and cost remains unknown without evidence.
+
+Each model entry may carry an optional `capabilities` object — `fast`,
+`reasoning`, `canDisableReasoning`, booleans only — taken from the host's
+row-level capability map for that exact model id. The key is present only when
+the host reported at least one of those flags; an unknown model carries no
+`capabilities` key at all rather than three false ones, non-boolean values are
+dropped, and other host capability keys are not forwarded. Catalog rows are
+ordered set-up providers first, and providers reporting `authenticated: false`
+are grouped into one collapsed disclosure rather than interleaved.
 
 ## Preview, Apply and recovery
 

@@ -115,14 +115,22 @@ test("provider groups and row counts mirror the /catalog payload exactly", async
   await expect.poll(() => page.evaluate(() => Boolean(window.__mockApi.lastCatalog))).toBe(true);
   const payload = await page.evaluate(() => window.__mockApi.lastCatalog);
 
-  expect(await catalogProviderIds(page)).toEqual(payload.providers.map((p) => p.id));
+  // Set-up providers keep host order with the current provider leading; every
+  // authenticated:false provider is in the ONE collapsed "Not set up" section
+  // at the bottom (portal), so DOM order is set-up groups then that section.
+  const setUpIds = payload.providers.filter((p) => p.authenticated !== false).map((p) => p.id);
+  const notSetUpIds = payload.providers.filter((p) => p.authenticated === false).map((p) => p.id);
+  expect(await catalogProviderIds(page)).toEqual([...setUpIds, ...notSetUpIds]);
   expect(await groups(page).count()).toBe(payload.providers.length);
   expect(await rows(page).count()).toBe(15);
   for (const provider of payload.providers) {
     await expect(page.locator(`[data-provider-group="${provider.id}"] [data-model-row]`))
       .toHaveCount(provider.models.length);
   }
-  // Providers with zero published models still get an honest group row.
+  // Providers with zero published models still get an honest group row. Portal
+  // is not set up, so its empty row lives in the collapsed section: expand it.
+  await expect(page.getByTestId("catalog-unsetup")).not.toHaveAttribute("open", "");
+  await page.getByTestId("catalog-unsetup-summary").click();
   await expect(page.locator('[data-empty-provider="portal"]')).toBeVisible();
   await expect(page.locator('[data-empty-provider="broken-provider"]')).toBeVisible();
   // Group headers summarize the model count and the priced range they saw.
@@ -318,7 +326,7 @@ test("sort select orders by price, name and provider with unknowns last and aria
   const inputHeader = page.getByRole("columnheader", { name: /Input price, US dollars per million tokens/ });
   await expect(inputHeader).toHaveAttribute("aria-sort", "ascending");
 
-  await page.getByTestId("catalog-group-toggle").click(); // flatten for global ordering
+  await page.getByTestId("catalog-group-select").selectOption("none"); // flatten for global ordering
   await expect(rows(page).first()).toHaveAttribute("data-pricing-status", "free");
 
   await sort.selectOption("price-desc");
@@ -389,7 +397,7 @@ test("provider warnings and unavailable-price notes stay visible beside healthy 
   await expect(row(page, "nous", "hermes-4-405b")).toBeVisible();
 
   // Flattening removes group headers; the same notices must survive above the table.
-  await page.getByTestId("catalog-group-toggle").click();
+  await page.getByTestId("catalog-group-select").selectOption("none");
   await expect(page.getByTestId("catalog-provider-notices")).toBeVisible();
   await expect(page.getByTestId("catalog-provider-notices")).toContainText("upstream timeout");
   await expect(page.getByTestId("catalog-provider-notices")).toContainText("prices unavailable");
@@ -560,11 +568,22 @@ for (const width of [375, 768]) {
     expect(sectionBox.x).toBeGreaterThanOrEqual(0);
     expect(sectionBox.x + sectionBox.width).toBeLessThanOrEqual(width + 0.5);
 
+    // The scroll region is the table's own boundary: wherever the columns do
+    // not fit, it scrolls sideways (keyboard included) instead of the page;
+    // where they do fit, nothing is hidden behind a scrollbar. 375px is
+    // narrower than the columns' minimums, 768px fits them.
     const region = page.getByTestId("catalog-scroll");
-    await region.focus();
-    await page.keyboard.press("ArrowRight");
-    await expect.poll(() => region.evaluate((node) => node.scrollLeft)).toBeGreaterThan(0);
-    await region.evaluate((node) => { node.scrollLeft = 0; });
+    const overflow = await region.evaluate((node) => node.scrollWidth - node.clientWidth);
+    if (width === 375) {
+      expect(overflow, "the table must overflow the 375px region").toBeGreaterThan(1);
+      await region.focus();
+      await page.keyboard.press("ArrowRight");
+      await expect.poll(() => region.evaluate((node) => node.scrollLeft)).toBeGreaterThan(0);
+      await region.evaluate((node) => { node.scrollLeft = 0; });
+    } else {
+      // The whole table is visible at 768px, so there is nothing to scroll to.
+      expect(overflow, "the table must fit its region at 768px").toBeLessThanOrEqual(1);
+    }
 
     if (width === 375) {
       const toggleCols = await page.getByTestId("catalog-free-only").evaluate((node) => {

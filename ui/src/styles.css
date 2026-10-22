@@ -285,6 +285,13 @@
   padding: 4px 0;
 }
 
+/* A closed disclosure contributes ONLY its summary line: hidden children must
+   never keep a laid-out box, whatever a host stylesheet says about siblings, so
+   nothing can overlap the tools row underneath it. */
+.hms-root details[data-testid="removal-advanced"]:not([open]) > *:not(summary) {
+  display: none;
+}
+
 .hms-root h2 {
   font-size: 22px;
   font-weight: 600;
@@ -469,6 +476,42 @@
   padding-inline-start: 8px;
   font-weight: 400;
   font-size: 13px;
+}
+
+/* Lab + filter for a long Model list (aggregators such as openrouter/nous).
+   Both span the pick grid so the reading order stays provider → lab → filter →
+   model; they sit side by side while there is room and stack when there is
+   not. Counts are muted text, never a colour-only signal. */
+.hms-root .hms-picker-narrow {
+  grid-column: 1 / -1;
+  display: grid;
+  /* Two columns only while each one can hold "Match a model id or name": in the
+     360px editor rail they stack instead of clipping the placeholder. */
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.hms-root .hms-picker-match {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-weight: 400;
+  font-size: 13px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+.hms-root .hms-picker-price-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-weight: 400;
+}
+
+/* The catalog profile scopes the picker; the write targets may live in other
+   profiles. The note spans the grid so it never squeezes the selects. */
+.hms-root .hms-scope-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-weight: 400;
 }
 
 .hms-root .hms-route-status {
@@ -659,6 +702,9 @@
   flex-wrap: wrap;
   gap: 8px 12px;
   align-items: flex-end;
+  /* A trailing gutter so the last control (Sort) never sits flush against the
+     panel edge. */
+  padding-inline-end: 8px;
 }
 
 .hms-root .hms-catalog-controls > * {
@@ -688,6 +734,59 @@
   font-weight: 600;
 }
 
+/* Labelled native selects: the catalog's real filters (lab, provider, setup
+   status, grouping, profile). Each keeps a 38px target and wraps as a unit. */
+.hms-root .hms-catalog-filter {
+  display: grid;
+  gap: 4px;
+  flex: 1 1 160px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.hms-root .hms-catalog-filter select {
+  min-height: 38px;
+  max-width: 100%;
+}
+
+.hms-root .hms-catalog-profile {
+  flex: 0 1 auto;
+}
+
+.hms-root .hms-catalog-profile select {
+  max-width: 240px;
+}
+
+.hms-root .hms-catalog-match-count {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
+/* Providers that are authenticated: false live in ONE native disclosure at the
+   bottom instead of interleaving empty headers through the catalog. */
+.hms-root .hms-catalog-unsetup {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--hms-border);
+  padding-top: 8px;
+}
+
+.hms-root .hms-catalog-unsetup > summary {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.hms-root .hms-catalog-unsetup > p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted-color, var(--midground, #9aa1ad));
+}
+
 .hms-root .hms-catalog-sort {
   display: grid;
   gap: 4px;
@@ -696,6 +795,9 @@
 
 .hms-root .hms-catalog-sort select {
   min-height: 38px;
+  /* Wide enough for "Price ↑" / "Provider" without truncating; the flex row can
+     still shrink the label column, never this control's text. */
+  min-width: 128px;
 }
 
 .hms-root .hms-catalog-scroll {
@@ -715,7 +817,11 @@
 .hms-root .hms-catalog-table {
   border-collapse: collapse;
   width: 100%;
-  min-width: 780px;
+  /* The table fits the pane instead of forcing 780px through a 708px scroll
+     region (which pushed the Action column off-screen at 768px). Columns keep
+     their own minimums, and anything narrower than those still scrolls with the
+     Use column pinned. */
+  min-width: 0;
   font-size: 13px;
 }
 
@@ -725,6 +831,42 @@
   vertical-align: top;
   text-align: left;
   border-bottom: 1px solid var(--hms-border);
+}
+
+/* Short, enumerable tokens never break mid-word: "unknown" must not render as
+   "unkno/wn" when the pane squeezes the column. */
+.hms-root .hms-catalog-table [data-column="status"],
+.hms-root .hms-catalog-table [data-column="configured"] {
+  white-space: nowrap;
+}
+
+.hms-root .hms-catalog-table [data-column="model"] {
+  min-width: 180px;
+}
+
+/* The Use column stays reachable at any pane width: pinned to the right edge of
+   the scroll region, painted with the same opaque surface as the header so the
+   rows scrolling underneath never show through. */
+.hms-root .hms-catalog-table td[data-column="use"] {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  background: var(--hms-catalog-sticky-bg, var(--hms-surface));
+  border-left: 1px solid var(--hms-border);
+}
+
+.hms-root .hms-catalog-table td[data-column="use"] button {
+  white-space: nowrap;
+  /* The generic button padding (14px horizontal) is sized for wide rails; in
+     the 40px pinned Action column it forces the single-word label to wrap
+     vertically at 768px. 4px keeps "Use" on one line inside the column. */
+  padding-inline: 4px;
+  min-width: 0;
+}
+
+.hms-root .hms-catalog-table tbody tr:hover td[data-column="use"] {
+  background: color-mix(in srgb,
+    var(--midground, #e6e8ee) 8%, var(--hms-catalog-sticky-bg, var(--hms-surface)));
 }
 
 .hms-root .hms-catalog-table thead th {
@@ -740,6 +882,19 @@
   text-align: right !important;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+
+/* A price cell holds one of two very different things: a number ("$10.00",
+   which must stay on one line) or a prose fallback ("price not published",
+   "included in subscription"). Left nowrap, the sentence's full unwrapped
+   width becomes the table's min-content — at 768px that pushed the table 39px
+   past its 708px scroll region under the runner's slightly wider font stack,
+   while the same fixture passed on the narrower local font. Numbers keep
+   nowrap; prose wraps, so the column stays narrow under either font. */
+.hms-root .hms-catalog-price .hms-catalog-unknown,
+.hms-root .hms-catalog-price .hms-catalog-included,
+.hms-root .hms-catalog-price .hms-catalog-pending {
+  white-space: normal;
 }
 
 .hms-root .hms-catalog-model-label {
@@ -887,6 +1042,9 @@
   }
   .hms-root .hms-catalog-sort {
     flex: 1 1 100%;
+  }
+  .hms-root .hms-catalog-filter {
+    flex-basis: 100%;
   }
 }
 

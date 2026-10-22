@@ -14,6 +14,13 @@ free status still requires the host's explicit flag. Pending pricing or
 entitlement makes all affected models unknown, even with a stale pricing map.
 No host billing-route evidence means no subscription-included classification.
 
+Per-model capability flags are reduced to an allowlist too: the host's
+row-level ``capabilities`` map (keyed by the exact model id, each entry
+``{fast, reasoning[, can_disable_reasoning]}``) becomes a camelCased object of
+booleans on the model entry. A model the host reports nothing about carries no
+``capabilities`` object at all — missing means unknown, never a default — and
+non-boolean values are dropped rather than coerced.
+
 Display text is retained; source is "picker", not a claim about the host's
 upstream source. The host supplies no timestamp or pricing version, so these
 remain None and freshness is unproven. Refresh belongs to the caller's host
@@ -37,6 +44,7 @@ __all__ = [
     "CATALOG_RESULT_KEYS",
     "PROVIDER_KEYS",
     "MODEL_KEYS",
+    "CAPABILITY_KEYS",
     "COST_KEYS",
     "COST_DISPLAY_KEYS",
     "PRICING_STATUSES",
@@ -69,7 +77,19 @@ RESULT_KEYS = ("ok", "provider", "models", "fetchedAt", "source", "stale",
 CATALOG_RESULT_KEYS = ("ok", "profileId", "providers", "cost", "error")
 PROVIDER_KEYS = ("id", "label", "authenticated", "configured", "isCurrent",
                  "modelCount", "fetchedAt", "stale", "warning", "models")
-MODEL_KEYS = ("id", "label", "pricingStatus", "cost")
+MODEL_KEYS = ("id", "label", "pricingStatus", "cost", "capabilities")
+#: Per-model capability flags the DTO may carry (camelCased). ``capabilities``
+#: itself is optional on a model entry: absent means the host reported nothing,
+#: which is unknown — never False.
+CAPABILITY_KEYS = ("fast", "reasoning", "canDisableReasoning")
+#: Host capability keys (``hermes_cli/inventory.py::_apply_capabilities``) and
+#: their DTO names. Anything else the host adds — ``ultrafast``,
+#: ``supported_efforts`` — is deliberately not forwarded.
+_HOST_CAPABILITY_KEYS = (
+    ("fast", "fast"),
+    ("reasoning", "reasoning"),
+    ("can_disable_reasoning", "canDisableReasoning"),
+)
 COST_KEYS = ("unit", "input", "output", "cacheRead", "display", "free",
              "source", "pricingVersion")
 COST_DISPLAY_KEYS = ("input", "output", "cache")
@@ -263,6 +283,30 @@ def _model_cost(row: dict, model_id: str) -> dict:
     return _display_cost(entry)
 
 
+def _model_capabilities(row: dict, model_id: str) -> Optional[dict]:
+    """Allowlisted capability flags the host reported for ``model_id``.
+
+    The host emits one ``capabilities`` map per provider row, keyed by the exact
+    model id it listed (``hermes_cli/inventory.py::_apply_capabilities``). Each
+    entry is ``{fast, reasoning}`` plus ``can_disable_reasoning`` when the
+    serving catalog reports it. Only booleans survive the allowlist: a row with
+    no map, no entry for this model, or no boolean value yields ``None`` so the
+    DTO omits the object — unknown is never rendered as False.
+    """
+    caps = row.get("capabilities")
+    if not isinstance(caps, dict):
+        return None
+    entry = caps.get(model_id)
+    if not isinstance(entry, dict):
+        return None
+    supplied = {}
+    for host_key, dto_key in _HOST_CAPABILITY_KEYS:
+        value = entry.get(host_key)
+        if isinstance(value, bool):
+            supplied[dto_key] = value
+    return supplied or None
+
+
 def _pricing_unavailable(row: dict, ids: List[str]) -> bool:
     """Whether this provider's models arrived with no usable pricing at all.
 
@@ -290,12 +334,16 @@ def _provider_dto(row: dict) -> dict:
     models = []
     for model_id in ids:
         resolved = _model_cost(row, model_id)
-        models.append({
+        entry: Dict[str, Any] = {
             "id": model_id,
             "label": model_id,
             "pricingStatus": resolved["pricingStatus"],
             "cost": resolved["cost"],
-        })
+        }
+        capabilities = _model_capabilities(row, model_id)
+        if capabilities is not None:
+            entry["capabilities"] = capabilities
+        models.append(entry)
     return {
         "id": slug,
         "label": _row_name(row),
@@ -473,7 +521,14 @@ def models_response(
     native_slug = _row_id(row) or requested
     ids = _model_ids(row)
     result["provider"] = native_slug
-    result["models"] = [{"id": m, "name": m} for m in ids]
+    entries = []
+    for model_id in ids:
+        entry: Dict[str, Any] = {"id": model_id, "name": model_id}
+        capabilities = _model_capabilities(row, model_id)
+        if capabilities is not None:
+            entry["capabilities"] = capabilities
+        entries.append(entry)
+    result["models"] = entries
     source = row.get("source")
     result["source"] = str(source) if source else "unknown"
     result["ok"] = True

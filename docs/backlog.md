@@ -40,6 +40,13 @@ public-seams refactor; they are not carried forward as 0.3.0 acceptance (see
   category (`src/model_switcher/engine.py`, the failure category is set from the last
   attempt). Not reachable through the Dashboard API, which always plans a fresh operation;
   relevant only to direct engine callers.
+- **`routeText` throws on a `null` chain entry.** The matrix route renderer reads
+  `route.provider` on every chain entry without a null guard (`ui/src/main.jsx`,
+  the chain branch of `routeText`; present since `d8a96cc` landed on `main`). The
+  backend's `_public_diff_value` passes non-dict entries through, so a payload
+  carrying `chain: [..., null, ...]` crashes the row render. Pre-existing on
+  `main`, not introduced by the catalog/picker work; the fix is a one-line guard
+  plus a regression case, recorded here rather than slipped into an unrelated PR.
 
 ## Deferred UI
 

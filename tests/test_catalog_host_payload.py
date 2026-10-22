@@ -203,7 +203,40 @@ def test_absent_host_payload_is_the_fixed_reason():
 def test_whole_payload_never_leaks_host_row_chrome(host_payload):
     body = host_payload()
     dumped = json.dumps(mc.catalog_response(body))
-    for forbidden in ("capabilities", "api_url", "usage", "limit",
-                      "featured", "key_env", "auth_type", "http://",
-                      "is_user_defined", "total_models"):
+    for forbidden in ("api_url", "usage", "limit", "featured", "key_env",
+                      "auth_type", "http://", "is_user_defined", "total_models",
+                      "can_disable_reasoning"):
         assert forbidden not in dumped
+    # ``capabilities`` is in the DTO by design now — only ever as the
+    # allowlisted object, never the host's raw per-model dict.
+    host_caps = _row(body, "nous")["capabilities"]["lab-alpha"]
+    alpha = next(m for m in _dto(body, "nous")["models"] if m["id"] == "lab-alpha")
+    assert alpha["capabilities"] == {"fast": host_caps["fast"],
+                                     "reasoning": host_caps["reasoning"]}
+    for provider in mc.catalog_response(body)["providers"]:
+        for model in provider["models"]:
+            caps = model.get("capabilities", {})
+            assert set(caps) <= set(mc.CAPABILITY_KEYS)
+            assert all(isinstance(value, bool) for value in caps.values())
+
+
+def test_real_host_capability_flags_survive_the_transform(host_payload):
+    """The real picker payload is the contract: per-model flags arrive keyed by
+    the exact model id and only allowlisted booleans reach the DTO."""
+    body = host_payload()
+    caps = _row(body, "nous")["capabilities"]
+    assert set(caps) == set(NOUS_MODELS)
+    assert all(isinstance(entry.get("fast"), bool) for entry in caps.values())
+    assert all(isinstance(entry.get("reasoning"), bool) for entry in caps.values())
+    dto = {m["id"]: m for m in _dto(body, "nous")["models"]}
+    for model_id, host_entry in caps.items():
+        expected = {dto_key: host_entry[host_key]
+                    for host_key, dto_key in (("fast", "fast"),
+                                              ("reasoning", "reasoning"),
+                                              ("can_disable_reasoning",
+                                               "canDisableReasoning"))
+                    if isinstance(host_entry.get(host_key), bool)}
+        if expected:
+            assert dto[model_id]["capabilities"] == expected
+        else:
+            assert "capabilities" not in dto[model_id]

@@ -15,6 +15,10 @@
       catalogPending: false, catalogEmpty: false, catalogDuplicateModel: false,
       catalogManyModels: false, catalogPortalModels: false, catalogLinkedSlots: false,
       catalogNoPrices: false, catalogZeroPriced: false,
+      // Serve window.__HMS_CATALOG_FIXTURE (tests/fixtures/catalog-realistic.js)
+      // for /catalog, /models and /api/model/options. Set before load (the flag
+      // is read from sessionStorage; profiles/slots are registered at load).
+      catalogRealistic: false,
       // Real provider catalogs (e.g. Nous Portal) send label === id (true);
       // "missing" drops the label entirely.
       catalogIdLabels: false,
@@ -76,6 +80,28 @@
     mk("default", "auxiliary.compiler", "auxiliary", "primalabs", "primalabs-ai/DeepSeek-V4.1-Flash-1017"),
     mk("research", "auxiliary.scout", "auxiliary", "openrouter", "openrouter/pareto-code"),
   );
+
+  // ---- optional realistic catalog fixture --------------------------------
+  // A spec injects window.__HMS_CATALOG_FIXTURE (tests/fixtures/catalog-realistic.js)
+  // before load and sets `catalogRealistic`; the fixture's profiles join the
+  // discovered set and its slots join /state, so the catalog's "In use" join
+  // and the profile select see real rows instead of inventing them.
+  const realisticFixture = window.__HMS_CATALOG_FIXTURE || null;
+  const realisticOn = () => Boolean(window.__mockApi.catalogRealistic && realisticFixture);
+  const realisticProviders = (profileId) =>
+    (realisticOn() && realisticFixture.providers
+      ? realisticFixture.providers[profileId] || null
+      : null);
+  if (realisticFixture && window.__mockApi.catalogRealistic) {
+    for (const profile of realisticFixture.profiles || []) {
+      if (!profiles.some((p) => p.id === profile.id)) profiles.push(profile);
+    }
+    for (const slot of realisticFixture.slots || []) {
+      const next = mk(slot.profileId, slot.slotId, slot.family, slot.provider, slot.model);
+      const index = slots.findIndex((s) => s.profileId === slot.profileId && s.slotId === slot.slotId);
+      if (index >= 0) slots[index] = next; else slots.push(next);
+    }
+  }
 
   const presets = [{
     id: "p-fast", name: "Fast lane",
@@ -193,6 +219,32 @@
 
   function catalogFor(profileId, provider, refresh) {
     const M = window.__mockApi;
+    // Realistic fixture mode: serve the injected catalog verbatim (still
+    // filtered by provider for /models), never the synthetic 5-provider one.
+    const realistic = realisticProviders(profileId);
+    if (realistic) {
+      const rows = provider ? realistic.filter((p) => p.id === provider) : realistic;
+      const providers = rows.map((p) => ({
+        id: p.id, label: p.label, authenticated: p.authenticated, configured: p.configured,
+        isCurrent: p.isCurrent, fetchedAt: p.fetchedAt,
+        stale: p.stale, warning: p.warning,
+        modelCount: (p.models || []).length,
+        models: (p.models || []).map((m) => ({
+          id: m.id, label: m.label, pricingStatus: m.pricingStatus, cost: m.cost || null,
+          ...(m.capabilities ? { capabilities: m.capabilities } : {}),
+        })),
+      }));
+      return {
+        ok: true,
+        profileId: profileId || null,
+        providers,
+        cost: {
+          pending: false,
+          unavailableProviders: providers.filter((p) => p.authenticated === false).map((p) => p.id),
+        },
+        error: null,
+      };
+    }
     let base = M.catalogEmpty
       ? []
       : catalogProviders.map((p) => {
@@ -240,6 +292,22 @@
   }
 
   function modelsFor(provider) {
+    if (realisticOn()) {
+      const all = Object.values(realisticFixture.providers || {}).flat();
+      const row = all.find((p) => p.id === provider);
+      if (!row || row.authenticated === false) {
+        return { ok: false, provider, providers: [], models: [], fetchedAt: null, source: "unknown", stale: true,
+          error: `provider '${provider}' is not available in this profile's catalog (not configured or not authenticated)` };
+      }
+      const models = (row.models || []).map((m) => ({ id: m.id, name: m.label }));
+      const seen = new Map();
+      for (const p of all) if (!seen.has(p.id)) seen.set(p.id, { id: p.id, name: p.label });
+      return {
+        ok: true, provider, models, providers: [...seen.values()],
+        fetchedAt: row.fetchedAt, source: "picker", stale: Boolean(row.stale),
+        error: row.warning || (models.length ? null : `provider '${provider}' reported no models`),
+      };
+    }
     const pool = window.__mockApi.namespacedRoutes
       ? [...catalogProviders, ...namespacedProviders] : catalogProviders;
     const row = pool.find((p) => p.id === provider);
@@ -266,7 +334,60 @@
     return { provider: (slot && slot.provider) || "", model: (slot && slot.model) || "" };
   }
 
+  // Host per-model capability flags, in the host's own shape
+  // (`hermes_cli/inventory.py::_apply_capabilities`): one map per provider row
+  // keyed by the exact model id, `fast`/`reasoning` always present,
+  // `can_disable_reasoning` only for catalogs that report it. A model without
+  // an entry is one the host knows nothing about — the UI must treat that as
+  // unknown, so the fixture leaves some models out on purpose.
+  const hostCapabilityFixture = {
+    "hermes-4-405b": { fast: true, reasoning: true },
+    "hermes-4-70b": { fast: false, reasoning: true, can_disable_reasoning: true },
+    "hermes-4-mini": { fast: true, reasoning: false },
+    "deepseek-v4.1-flash": { fast: true, reasoning: true, can_disable_reasoning: false },
+    "another-model": { fast: false, reasoning: true },
+    "llama3.3-local": { fast: false, reasoning: false },
+  };
+
   function hostOptionsFor(profileId) {
+    // Realistic fixture mode: /api/model/options must describe the same
+    // providers the catalog serves, including authenticated:false ones.
+    const realistic = realisticProviders(profileId);
+    if (realistic) {
+      const providers = realistic.map((p) => {
+        const models = (p.models || []).map((m) => m.id);
+        const pricing = {};
+        const capabilities = {};
+        for (const m of p.models || []) {
+          const display = (m.cost && m.cost.display) || {};
+          pricing[m.id] = {
+            input: display.input || "", output: display.output || "",
+            cache: display.cache === undefined ? null : display.cache,
+            free: Boolean(m.cost && m.cost.free),
+          };
+          capabilities[m.id] = m.capabilities
+            ? {
+              fast: m.capabilities.fast === true,
+              reasoning: m.capabilities.reasoning === true,
+              canDisableReasoning: m.capabilities.canDisableReasoning === true,
+            }
+            : { fast: false, reasoning: false };
+        }
+        return {
+          slug: p.id, name: p.label, models, total_models: models.length,
+          is_current: Boolean(p.isCurrent), is_user_defined: false,
+          source: "canonical", aliases: [], api_url: null, auth_type: "api_key",
+          authenticated: p.authenticated !== false,
+          key_env: null, warning: p.warning || null,
+          featured_models: models.slice(0, 2), capabilities, pricing,
+          pricing_pending: false,
+          free_tier: false, free_tier_pending: false,
+          unavailable_models: [],
+        };
+      });
+      const main = mainFor(profileId);
+      return { providers, provider: main.provider, model: main.model };
+    }
     const providers = catalogProviders.map((p) => {
       const models = (p.models || []).map((m) => m.id);
       const pricing = {};
@@ -278,7 +399,7 @@
           cache: display.cache === undefined ? null : display.cache,
           free: Boolean(m.cost && m.cost.free),
         };
-        capabilities[m.id] = { fast: true, reasoning: false };
+        if (hostCapabilityFixture[m.id]) capabilities[m.id] = { ...hostCapabilityFixture[m.id] };
       }
       return {
         slug: p.id, name: p.label, models, total_models: models.length,

@@ -252,7 +252,9 @@ def test_cost_and_model_and_provider_shapes_are_the_frozen_allowlist():
     res, dto = one_provider(r)
     assert set(dto) == set(mc.PROVIDER_KEYS)
     m = dto["models"][0]
-    assert set(m) == set(mc.MODEL_KEYS)
+    # ``capabilities`` is optional on a model entry: this host row carries none.
+    assert set(m) == {"id", "label", "pricingStatus", "cost"}
+    assert set(m) <= set(mc.MODEL_KEYS)
     assert set(m["cost"]) == set(mc.COST_KEYS)
     assert set(m["cost"]["display"]) == set(mc.COST_DISPLAY_KEYS)
     assert m["pricingStatus"] in mc.PRICING_STATUSES

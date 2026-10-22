@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Catalog: configured fallback-chain usage
+
+- `In use` and `Configured in` now include valid provider/model entries from
+  explicitly configured main and delegation fallback chains. Inherited chains
+  and observed-only routes are not counted as this slot's configuration.
+- Repeated entries count once per slot; provider/model identity stays exact.
+  Browser regressions cover both chain types, counts and titles, malformed
+  entries, provider isolation, and disabled/unset/inherited states.
+
+### Catalog: price-cell prose wraps, prices never do
+
+- The catalog's price columns keep `white-space: nowrap` for numbers (`$10.00`),
+  but their prose fallbacks — `price not published`, `included in subscription`,
+  a pending note — now wrap. Left unwrapped, that sentence's full width became
+  the table's min-content: at 768px it pushed the table 39px past its 708px
+  scroll region whenever the font stack ran slightly wider, so
+  `tests/catalog-layout.spec.mjs` passed on the local font and failed on the CI
+  runners. Wrapping the prose leaves the table headroom at 768px under both
+  stacks while every number stays on one line.
+- `tests/models-catalog.spec.mjs` now states what each width owes: at 375px the
+  columns genuinely exceed the pane, so the region must overflow and the
+  keyboard must scroll it; at 768px the table must fit its region, so nothing
+  hides behind a scrollbar. The old single assertion demanded horizontal
+  scrolling at both widths and would have passed a table that overflowed at
+  768px.
+
 ### Route display: `provider · model`, never a doubled provider prefix
 
 - Configured, observed, summary, preview and announcement routes render
@@ -17,12 +43,136 @@
   pins both halves — rendered and announced text, and the unprefixed request
   body — against a `namespacedRoutes` mock fixture.
 - Typed inputs keep the `provider/model` syntax they parse: fallback-chain lines
-  and "Exact route to remove" split on the first slash, so a provider slug that
-  contains a colon (`custom:my-endpoint`) still works there and is not
-  reinterpreted as a displayed route.
+  split on the first slash, while "Exact route to remove" compares the whole
+  string against `provider/model` (exact identity, never a prefix or a split), so
+  a provider slug that contains a colon (`custom:my-endpoint`) still works there
+  and is not reinterpreted as a displayed route.
+
+### Per-model capability flags in the catalog
+
+- The catalog and `/models` DTOs now expose the host's per-model capability
+  evidence as an optional, allowlisted `capabilities` object on each model
+  entry — `{fast, reasoning, canDisableReasoning}`, booleans only — so the UI
+  can filter on them. The object appears only when the host reported at least
+  one of those flags for that exact model id; a model the host knows nothing
+  about carries no `capabilities` key at all, because missing means unknown and
+  is never defaulted to false. Non-boolean values are dropped, and other host
+  keys (`ultrafast`, `supported_efforts`, tools/vision/context) are not
+  forwarded.
+- `tests/mock-api.js` host `/api/model/options` rows gained a per-row
+  `capabilities` map for `hermes-4-405b`, `hermes-4-70b`, `hermes-4-mini` and
+  `deepseek-v4.1-flash`, so the default mock fixture carries flags too.
+
+### Model picker: Lab select and filter for multi-lab providers
+
+- A provider whose model ids span two or more vendor namespaces (openrouter, 62
+  models across 19 labs; nous, 67 across 21) now shows a labelled native `Lab`
+  select above `Model`: `All labs (62)`, then each lab by label with its count.
+  Rows under "All labs" are one `<optgroup>` per lab (`Anthropic · 9`) showing
+  the leaf id (`claude-opus-5.5`); a chosen lab shows the same leaf rows flat.
+- A `Filter models` search box (multi-lab providers, and any list over 20
+  models such as opencode-go's 46 bare ids) matches ids and names
+  case-insensitively and combines with the lab filter. The placeholder states
+  the narrowed count (`Choose a model (3 of 62)…`), zero matches add a disabled
+  `No models match`, and `Other — type an exact model id…` is always available.
+- Option values, option titles and the Route line keep the full model id, so
+  preview/apply still send `{provider, model}` unchanged. A filtered-out
+  selection stays pinned in the select (lab named) so the editor cannot lose
+  the value, and lab and filter reset when the provider changes.
+- Unknown prices no longer append `— price not published` to every row; when
+  every model of the selected provider is unknown, one muted note under the
+  select says `No list prices published for this provider.` Real rates, `free`
+  and `included in subscription` still render per row, and unknown data is
+  still never shown as free or `$0.00`.
+- Single-lab and bare-id providers keep today's flat full-id option text. New
+  `tests/picker-labs.spec.mjs` and `tests/picker-labs-layout.spec.mjs` cover
+  them.
+
+### Model catalog: set-up providers first, real filters, honest prices
+
+- The catalog now leads with providers whose `authenticated` is not false
+  (current provider first, host order otherwise) and collapses every
+  `authenticated: false` provider into one native "Not set up (N)" disclosure
+  at the bottom, collapsed by default and still truthful when opened ("sign-in
+  needed"). The header states `N set up · N providers · N models`, so a 9/54
+  profile no longer looks like 54 empty headers with the few working providers
+  buried in host order (opencode-go was 34th of 54).
+- Filters are real: Lab (counts across providers via the shared labs helper),
+  Provider (set-up only), Status (All / Set up / Needs sign-in), In use (exact
+  provider+model slots), Fast and Can disable reasoning (only rendered when a
+  loaded model carries `capabilities`), and "OpenRouter :free ids" labelled as
+  an id-suffix match, explicitly not a price claim.
+- Price controls are conditional: with no `priced`/`free` row (every one of
+  the 1,584 audited models is `unknown`) the Free only / Priced only buttons
+  and both price sort options are hidden, sort falls back to Name, and one note
+  says why. Price data that exists behaves exactly as before.
+- "Group by provider" became a `Group by` select: Provider (with the ordering
+  above), Lab (cross-provider groups; leaf id shown, full id in the title), or
+  None (flat table with dedicated Provider and Lab columns, still 100 rows per
+  page with Show all N).
+- The catalog profile is explicit: a labelled "Catalog for profile" select
+  seeds from a single checked matrix profile (else `default`), loads through
+  the existing catalog cache/fetch path, and is named in the provenance line.
+  New `tests/catalog-filters.spec.mjs` and a realistic 54-provider/258-model
+  fixture pin all of it.
+
+### Catalog: counts, filters and layout now match what is on screen
+
+- Filtered group headers state rows shown of models published (`4 of 67
+  models`) instead of the provider's catalog-wide total, and the lab groups,
+  the collapsed section's summary (`Not set up (2 of 45)`) and the match line
+  follow the same rule: with a filter that drops the not-set-up section, its
+  rows stop being counted.
+- A Lab filter now reaches signed-out providers that publish that lab's ids:
+  the section is decided by the rows a provider would render, not by comparing
+  a lab key to a provider slug, so `Anthropic (26)` no longer promises two rows
+  that never appear. `tests/fixtures/catalog-realistic.js` gained a
+  `signedOutModels` shape for it.
+- Switching the catalog profile clears filters and sort orders whose controls
+  the new profile does not offer — no stale price filter, price sort, lab,
+  provider, capability or `:free`-id filter behind an "All labs" label.
+- The editor names the case where the browsed catalog profile differs from the
+  profiles about to be written, the match count is announced once per settled
+  query rather than on every keystroke, and the not-set-up note says "not set
+  up" instead of quoting `authenticated: false`.
+- The catalog table fits its pane (it no longer forces 780px through a 708px
+  scroll region at 768px), keeps the Action column pinned when the pane is
+  narrower still, never breaks "unknown" mid-word, gives the Sort select room
+  and a gutter, pins group headers under the sticky column header, and the
+  editor rail gained the width its native selects need. The closed "Advanced:
+  remove a specific route" disclosure contributes only its summary line.
+  `tests/catalog-layout.spec.mjs` measures all of it at 768px and 1440px.
+
+### Catalog review fixes: the Lab column's vendor, and notices under Lab grouping
+
+- The flat table's Lab column now names the vendor a model id carries, and an
+  unknown namespace falls back to its own slug — `mistralai/mistral-large`
+  served by openrouter reads `mistralai`, not `OpenRouter`, matching what the
+  Lab filter offers for that row. Only an id with no namespace takes the
+  serving provider's label, which is what a bare id (opencode-go, copilot)
+  actually means.
+- Provider notices (a `warning`, or prices unavailable) render for Lab and
+  None grouping, not just None. A provider that failed before publishing
+  anything owns no lab group, so under Lab grouping its message is the only
+  place it can appear — it no longer disappears with the group it never had.
+  Provider grouping still names each notice on its own header, so nothing is
+  duplicated.
+- Lab keys whose display label is identical are joined: `deepseek-ai` and
+  `deepseek` are one lab, derived from the label table rather than hard-coded,
+  so the Lab select can never offer two options reading `DeepSeek`. The Lab
+  select's title states that its counts cover the whole catalog (including
+  providers not set up) while group headers count the set-up rows shown, which
+  is why the two numbers can differ.
+- `tests/fixtures/catalog-realistic.js` gained a `vendorShapeFixture()` shape —
+  an aggregator serving an unnamed vendor plus a duplicate-label alias, and a
+  signed-in provider with a warning and zero models — so
+  `tests/catalog-filters.spec.mjs` pins all four cases.
 
 ### Documentation
 
+- README, DESIGN.md §5 and the technical reference now describe the picker's
+  Lab select and filter, the catalog's set-up-first structure with its
+  conditional price controls, and the allowlisted `capabilities` object.
 - README and image-README preview captions now state that the preview shows
   semantic provider/model intent and that the exact persisted config diff
   appears only after Apply readback.

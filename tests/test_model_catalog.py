@@ -219,11 +219,45 @@ def test_no_raw_row_chrome_reaches_the_models_dto():
         featured_models=["lab-7b"], native_catalog_empty=False,
         headers={"Authorization": "Bearer secret-test-token"},
     ))
-    dumped = json.dumps(mc.models_response(body, "custom:lab"))
+    res = mc.models_response(body, "custom:lab")
+    # Only the allowlisted capability object survives from the row's
+    # ``capabilities`` map; the host's raw per-model dict never does.
+    assert res["models"] == [{"id": "lab-7b", "name": "lab-7b",
+                              "capabilities": {"fast": True}}]
+    dumped = json.dumps(res)
     for forbidden in ("api_url", "http://", "tok3n", "key_env", "LAB_KEY",
-                      "capabilities", "usage", "limit", "featured", "Authorization",
+                      "usage", "limit", "featured", "Authorization",
                       "secret-test-token", str(REPO)):
         assert forbidden not in dumped
+
+
+# -- per-model capability flags ---------------------------------------------
+
+
+def test_models_dto_carries_allowlisted_capabilities_with_camelcase_names():
+    body = payload(row("nous", ["m1", "m2"], capabilities={
+        "m1": {"fast": True, "reasoning": False, "can_disable_reasoning": True},
+        "m2": {"fast": False, "reasoning": True, "ultrafast": True},
+    }))
+    models = {m["id"]: m for m in mc.models_response(body, "nous")["models"]}
+    assert models["m1"]["capabilities"] == {
+        "fast": True, "reasoning": False, "canDisableReasoning": True}
+    assert models["m2"]["capabilities"] == {"fast": False, "reasoning": True}
+    assert "ultrafast" not in json.dumps(models["m2"])
+    assert set(mc.CAPABILITY_KEYS) == {"fast", "reasoning", "canDisableReasoning"}
+
+
+def test_models_dto_omits_capabilities_the_host_never_reported():
+    for capabilities in (None, {}, {"m1": {}}, {"m1": {"tools": True}}):
+        extra = {} if capabilities is None else {"capabilities": capabilities}
+        body = payload(row("nous", ["m1"], **extra))
+        assert mc.models_response(body, "nous")["models"] == [{"id": "m1", "name": "m1"}]
+
+
+def test_models_dto_drops_non_boolean_capability_values():
+    body = payload(row("nous", ["m1"], capabilities={
+        "m1": {"fast": True, "reasoning": "yes", "can_disable_reasoning": 1}}))
+    assert mc.models_response(body, "nous")["models"][0]["capabilities"] == {"fast": True}
 
 
 # -- purity ------------------------------------------------------------------

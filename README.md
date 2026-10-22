@@ -19,12 +19,17 @@ what is configured and check a change before writing it.
   `primalabs · primalabs-ai/DeepSeek-V4.1-Flash-1017`), never prefixed a second
   time. Configured routes stay separate from recorded usage; an open session may
   still use its old model.
-- See what you could switch to in the model catalog: a bird's-eye, provider-grouped
-  view of the host-listed models, with list prices per 1M tokens, free and unknown-price
-  entries marked distinctly, and which slots already use each model. A listing is not a routability test.
+- See what you could switch to in the model catalog: a set-up-first view of the
+  host-listed models, with working providers leading and every provider that needs
+  sign-in collapsed into one "Not set up (N)" disclosure, list prices per 1M tokens,
+  free and unknown-price entries marked distinctly, filters for lab, provider, setup
+  status and in-use slots, and which slots already use each model. A listing is not
+  a routability test.
 - Select individual slots or a matching group, pick a provider and then one of
   its models from plain dropdowns (or choose "Other" for an exact pair), then preview the change.
-  Filters change the view; checkboxes choose edit targets.
+  A provider that aggregates several vendors gets a `Lab` select and a
+  `Filter models` search above the model list. Filters change the view;
+  checkboxes choose edit targets.
 - Save reviewed choices as named presets and reuse them after a fresh preview.
 - Check per-profile results in the operation drawer and use revision-guarded Undo.
   If a write fails, the engine attempts to restore completed steps and flags any
@@ -209,10 +214,14 @@ when you rebuild the UI yourself.
    and the **Family**, **Task**, **Provider**, **Model**, and **State** filters, then
    select the slots you want to change. Filtering changes the view only; checkboxes
    choose edit targets. The selection summary includes selected slots hidden by filters.
-2. **Choose your routing.** Pick a provider, then a model from its dropdown (each
-   entry shows its list price), open **Browse model catalog** to compare options, or
+2. **Choose your routing.** Pick a provider, then a model from its dropdown (a
+   published rate appears beside priced models; unknown prices say so and are
+   never shown as free), open **Browse model catalog** to compare options, or
    choose **Other** to enter an exact provider/model pair for custom routes. Model IDs belong to their provider,
-   so keep the pair together.
+   so keep the pair together. For a provider that aggregates several vendors (62
+   models across 19 labs, say), narrow with the `Lab` select and the `Filter models`
+   box above `Model`; the option keeps the full id, and a filtered-out selection
+   stays pinned instead of being dropped.
 3. **Preview changes.** Review the affected profiles and proposed routing. Main-slot
    preview shows provider/model intent, not an exact future config diff. Resolve blocked
    entries and acknowledge unknown-cost routes when required. Changing the selection
