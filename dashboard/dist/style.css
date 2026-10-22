@@ -285,6 +285,13 @@
   padding: 4px 0;
 }
 
+/* A closed disclosure contributes ONLY its summary line: hidden children must
+   never keep a laid-out box, whatever a host stylesheet says about siblings, so
+   nothing can overlap the tools row underneath it. */
+.hms-root details[data-testid="removal-advanced"]:not([open]) > *:not(summary) {
+  display: none;
+}
+
 .hms-root h2 {
   font-size: 22px;
   font-weight: 600;
@@ -478,7 +485,9 @@
 .hms-root .hms-picker-narrow {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  /* Two columns only while each one can hold "Match a model id or name": in the
+     360px editor rail they stack instead of clipping the placeholder. */
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
   gap: 8px;
   min-width: 0;
 }
@@ -492,6 +501,14 @@
 }
 
 .hms-root .hms-picker-price-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-weight: 400;
+}
+
+/* The catalog profile scopes the picker; the write targets may live in other
+   profiles. The note spans the grid so it never squeezes the selects. */
+.hms-root .hms-scope-note {
   grid-column: 1 / -1;
   margin: 0;
   font-weight: 400;
@@ -685,6 +702,9 @@
   flex-wrap: wrap;
   gap: 8px 12px;
   align-items: flex-end;
+  /* A trailing gutter so the last control (Sort) never sits flush against the
+     panel edge. */
+  padding-inline-end: 8px;
 }
 
 .hms-root .hms-catalog-controls > * {
@@ -775,6 +795,9 @@
 
 .hms-root .hms-catalog-sort select {
   min-height: 38px;
+  /* Wide enough for "Price ↑" / "Provider" without truncating; the flex row can
+     still shrink the label column, never this control's text. */
+  min-width: 128px;
 }
 
 .hms-root .hms-catalog-scroll {
@@ -794,7 +817,11 @@
 .hms-root .hms-catalog-table {
   border-collapse: collapse;
   width: 100%;
-  min-width: 780px;
+  /* The table fits the pane instead of forcing 780px through a 708px scroll
+     region (which pushed the Action column off-screen at 768px). Columns keep
+     their own minimums, and anything narrower than those still scrolls with the
+     Use column pinned. */
+  min-width: 0;
   font-size: 13px;
 }
 
@@ -804,6 +831,33 @@
   vertical-align: top;
   text-align: left;
   border-bottom: 1px solid var(--hms-border);
+}
+
+/* Short, enumerable tokens never break mid-word: "unknown" must not render as
+   "unkno/wn" when the pane squeezes the column. */
+.hms-root .hms-catalog-table [data-column="status"],
+.hms-root .hms-catalog-table [data-column="configured"] {
+  white-space: nowrap;
+}
+
+.hms-root .hms-catalog-table [data-column="model"] {
+  min-width: 180px;
+}
+
+/* The Use column stays reachable at any pane width: pinned to the right edge of
+   the scroll region, painted with the same opaque surface as the header so the
+   rows scrolling underneath never show through. */
+.hms-root .hms-catalog-table td[data-column="use"] {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  background: var(--hms-catalog-sticky-bg, var(--hms-surface));
+  border-left: 1px solid var(--hms-border);
+}
+
+.hms-root .hms-catalog-table tbody tr:hover td[data-column="use"] {
+  background: color-mix(in srgb,
+    var(--midground, #e6e8ee) 8%, var(--hms-catalog-sticky-bg, var(--hms-surface)));
 }
 
 .hms-root .hms-catalog-table thead th {

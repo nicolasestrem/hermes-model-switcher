@@ -44,6 +44,19 @@ function useOpaqueSurface() {
   return bg;
 }
 
+// Screen readers get ONE sentence per settled typing burst, never one per
+// keystroke: a live region bound to the raw count fires on every character
+// ("24 of 260" → "23 of 260" → …), burying the useful announcement. The text
+// itself stays visible and immediate; only the announcement waits.
+function useSettledText(text, delay = 500) {
+  const [settled, setSettled] = useState(text);
+  useEffect(() => {
+    const id = setTimeout(() => setSettled(text), delay);
+    return () => clearTimeout(id);
+  }, [text, delay]);
+  return settled;
+}
+
 // ---------- Native route dropdowns ----------
 // Provider and model are plain <select>s: one click shows every choice, the
 // browser handles keyboard and screen-reader behaviour, and nothing pops
@@ -403,13 +416,30 @@ function ModelCatalogView({
   }, [slots]);
 
   const q = query.trim().toLowerCase();
+  // Lab counts describe the whole loaded catalog (not the current narrowing),
+  // so the select can never offer a lab that would empty the table by itself.
+  const labs = useMemo(() => labCounts(
+    providers.flatMap((p) => catalogModelsOf(p).map((m) => ({ providerId: p.id, modelId: m.id }))),
+    providerLabels,
+  ), [providers, providerLabels]);
+
+  // A filter whose option no longer exists — switching the catalog profile can
+  // remove labs, providers and capability flags — is dropped in the SAME render
+  // that makes it impossible, so a select can never read "All labs" while a
+  // stale lab still empties the table. The effect below writes the normalised
+  // value back into state; these are the values the predicates use.
+  const labActive = labFilter !== "all" && labs.some((l) => l.lab === labFilter) ? labFilter : "all";
+  const providerActive =
+    providerFilter !== "all" && setUpProviders.some((p) => p.id === providerFilter)
+      ? providerFilter : "all";
+
   const matches = (provider, model) => {
     if (freeOnly && model.pricingStatus !== "free") return false;
     if (pricedOnly && model.pricingStatus !== "priced") return false;
-    if (providerFilter !== "all" && provider.id !== providerFilter) return false;
+    if (providerActive !== "all" && provider.id !== providerActive) return false;
     if (statusFilter === "setup" && provider.authenticated === false) return false;
     if (statusFilter === "signin" && provider.authenticated !== false) return false;
-    if (labFilter !== "all" && labOf(provider.id, model.id) !== labFilter) return false;
+    if (labActive !== "all" && labOf(provider.id, model.id) !== labActive) return false;
     if (inUseOnly && !routeIndex.has(provider.id + "\u0000" + model.id)) return false;
     if (fastOnly && !(showFast && model.capabilities && model.capabilities.fast === true)) return false;
     if (canDisableOnly &&
@@ -431,24 +461,53 @@ function ModelCatalogView({
       ));
     }
     return map;
-  }, [providers, q, freeOnly, pricedOnly, labFilter, providerFilter, statusFilter,
+  }, [providers, q, freeOnly, pricedOnly, labActive, providerActive, statusFilter,
     inUseOnly, fastOnly, canDisableOnly, freeIdsOnly, effectiveSort, routeIndex,
     showFast, showCanDisable]);
 
-  // Lab counts describe the whole loaded catalog (not the current narrowing),
-  // so the select can never offer a lab that would empty the table by itself.
-  const labs = useMemo(() => labCounts(
-    providers.flatMap((p) => catalogModelsOf(p).map((m) => ({ providerId: p.id, modelId: m.id }))),
-    providerLabels,
-  ), [providers, providerLabels]);
+  useEffect(() => {
+    // Nothing to clamp before this profile's catalog is in hand: an unloaded
+    // view has no labs, prices or capability flags yet, and would wipe the
+    // user's choices while the profile is still loading.
+    if (!data) return;
+    // Controls disappear with the data; their filters must not outlive them.
+    // Written to state (not just display) so coming back to a priced profile
+    // does not resurrect a hidden price filter or a price sort.
+    if (!hasPrices) {
+      if (freeOnly) setFreeOnly(false);
+      if (pricedOnly) setPricedOnly(false);
+      if (String(sort).startsWith("price-")) setSort("name");
+    }
+    if (labActive !== labFilter) setLabFilter("all");
+    if (providerActive !== providerFilter) setProviderFilter("all");
+    if (!showFast && fastOnly) setFastOnly(false);
+    if (!showCanDisable && canDisableOnly) setCanDisableOnly(false);
+    if (stats.freeIds === 0 && freeIdsOnly) setFreeIdsOnly(false);
+  }, [data, hasPrices, sort, freeOnly, pricedOnly, labActive, labFilter, providerActive,
+    providerFilter, showFast, fastOnly, showCanDisable, canDisableOnly,
+    stats.freeIds, freeIdsOnly]);
 
-  const narrowing = Boolean(q) || freeOnly || pricedOnly || labFilter !== "all" ||
-    providerFilter !== "all" || statusFilter !== "all" || inUseOnly ||
+  const narrowing = Boolean(q) || freeOnly || pricedOnly || labActive !== "all" ||
+    providerActive !== "all" || statusFilter !== "all" || inUseOnly ||
     fastOnly || canDisableOnly || freeIdsOnly;
 
   const setUpGroups = setUpProviders
     .map((provider) => ({ provider, rows: rowsFor.get(provider.id) || [] }))
     .filter((group) => group.rows.length > 0 || !narrowing);
+
+  // Per-lab totals for the set-up table: what a lab header compares against
+  // when a filter is active. (The Lab select's own counts cover the whole
+  // catalog, including rows that live in the not-set-up section.)
+  const labTotals = useMemo(() => {
+    const totals = new Map();
+    for (const provider of setUpProviders) {
+      for (const model of catalogModelsOf(provider)) {
+        const lab = labOf(provider.id, model.id);
+        totals.set(lab, (totals.get(lab) || 0) + 1);
+      }
+    }
+    return totals;
+  }, [setUpProviders]);
 
   const labGroups = useMemo(() => {
     const map = new Map();
@@ -474,20 +533,36 @@ function ModelCatalogView({
   // lab group for a provider that publishes no models.
   const unsetupGroups = useMemo(() => {
     if (statusFilter === "setup") return [];
+    // Price, capability and in-use narrowing are questions about models, and a
+    // provider that is not set up cannot be routed to: the whole section drops
+    // out, and `visibleModels` below stops counting its rows.
     if (inUseOnly || fastOnly || canDisableOnly || freeIdsOnly || freeOnly || pricedOnly) return [];
     return notSetUpProviders
       .filter((provider) => {
-        if (providerFilter !== "all" && provider.id !== providerFilter) return false;
-        if (labFilter !== "all" && provider.id !== labFilter) return false;
-        if (q && ![provider.id, provider.label].some((value) =>
+        if (providerActive !== "all" && provider.id !== providerActive) return false;
+        const providerRows = rowsFor.get(provider.id) || [];
+        // Lab narrowing is decided by the rows this provider would render: a
+        // lab is a property of a model id, never of a provider slug. A
+        // not-set-up provider that publishes anthropic/* rows belongs under
+        // Lab = Anthropic exactly like a set-up one does.
+        if (labActive !== "all" && providerRows.length === 0) return false;
+        if (q && providerRows.length === 0 && ![provider.id, provider.label].some((value) =>
           String(value || "").toLowerCase().includes(q))) return false;
         return true;
       })
       .map((provider) => ({ provider, rows: rowsFor.get(provider.id) || [] }));
-  }, [notSetUpProviders, rowsFor, providerFilter, labFilter, q, statusFilter,
+  }, [notSetUpProviders, rowsFor, providerActive, labActive, q, statusFilter,
     inUseOnly, fastOnly, canDisableOnly, freeIdsOnly, freeOnly, pricedOnly]);
 
-  const visibleModels = providers.reduce((n, p) => n + (rowsFor.get(p.id) || []).length, 0);
+  // Count only rows the view renders: set-up rows plus the rows carried by the
+  // (possibly collapsed) not-set-up section. A section that was dropped must
+  // never keep inflating the match line.
+  const visibleModels =
+    setUpProviders.reduce((n, p) => n + (rowsFor.get(p.id) || []).length, 0) +
+    unsetupGroups.reduce((n, group) => n + group.rows.length, 0);
+  const matchText =
+    `Showing ${visibleModels} of ${stats.models} models${narrowing ? " (filtered)" : ""}.`;
+  const settledMatchText = useSettledText(matchText);
   const columnCount = groupBy === "none" ? 8 : 6;
   const mainSectionCount = groupBy === "provider" ? setUpGroups.length
     : groupBy === "lab" ? labGroups.length : flatShown.length;
@@ -523,29 +598,42 @@ function ModelCatalogView({
 
   const noticeProviders = providers.filter((p) => p.warning || unavailable.has(p.id));
 
+  // The catalog's sticky stack: the column header pins at the top of the scroll
+  // region (top: 0) and every group header pins directly beneath it, so rows
+  // are never visible without the header that names them. The header height is
+  // declared here rather than measured, so the two offsets cannot drift.
+  const CATALOG_THEAD_HEIGHT = 30;
   const theadStyle = {
     textAlign: "left", borderBottom: `1px solid ${THEME.border}`, padding: 4,
+    height: CATALOG_THEAD_HEIGHT, boxSizing: "border-box",
     position: "sticky", top: 0, background: stickyBg, zIndex: 2,
   };
+  const groupHeadStyle = {
+    position: "sticky", top: CATALOG_THEAD_HEIGHT, zIndex: 1, background: stickyBg,
+    boxShadow: `0 -1px 0 ${THEME.border}`,
+  };
+  // Inline so the sticky Use column can paint an opaque cell over the rows
+  // scrolling underneath it, with the same theme-reactive surface as the head.
+  const scrollStyle = { "--hms-catalog-sticky-bg": stickyBg };
 
   const tableHead = (
     <thead>
       <tr>
-        <th scope="col" style={theadStyle}
+        <th scope="col" data-column="model" style={theadStyle}
           aria-sort={effectiveSort === "name" ? "ascending" : "none"}>Model</th>
-        {groupBy === "none" && <th scope="col" style={theadStyle}>Provider</th>}
-        {groupBy === "none" && <th scope="col" style={theadStyle}>Lab</th>}
-        <th scope="col" style={{ ...theadStyle, textAlign: "right" }}
+        {groupBy === "none" && <th scope="col" data-column="provider" style={theadStyle}>Provider</th>}
+        {groupBy === "none" && <th scope="col" data-column="lab" style={theadStyle}>Lab</th>}
+        <th scope="col" data-column="input" style={{ ...theadStyle, textAlign: "right" }}
           aria-label="Input price, US dollars per million tokens"
           aria-sort={effectiveSort === "price-asc" ? "ascending" : effectiveSort === "price-desc" ? "descending" : "none"}>
           Input $/1M
         </th>
-        <th scope="col" style={{ ...theadStyle, textAlign: "right" }}
+        <th scope="col" data-column="output" style={{ ...theadStyle, textAlign: "right" }}
           aria-label="Output price, US dollars per million tokens"
           aria-sort="none">Output $/1M</th>
-        <th scope="col" style={theadStyle}>Status</th>
-        <th scope="col" style={theadStyle}>Configured in</th>
-        <th scope="col" style={theadStyle}>Action</th>
+        <th scope="col" data-column="status" style={theadStyle}>Status</th>
+        <th scope="col" data-column="configured" style={theadStyle}>Configured in</th>
+        <th scope="col" data-column="use" style={theadStyle}>Action</th>
       </tr>
     </thead>
   );
@@ -562,14 +650,21 @@ function ModelCatalogView({
     const key = keyPrefix + provider.id;
     const expanded = expandedGroups.has(key);
     const shownRows = expanded ? rows : rows.slice(0, CATALOG_PAGE_SIZE);
+    // A filtered group must not claim the provider's whole catalog: with a lab
+    // or search narrowing active the header reads "N of M" (rows rendered of
+    // models published), and stays "M models" when nothing was removed.
+    const totalModels = provider.modelCount ?? models.length;
+    const countLabel = narrowing && rows.length !== totalModels
+      ? `${rows.length} of ${totalModels} models`
+      : `${totalModels} models`;
     return (
       <tbody key={key} data-provider-group={provider.id}>
         <tr className="hms-catalog-group">
-          <th scope="colgroup" colSpan={columnCount}>
+          <th scope="colgroup" colSpan={columnCount} style={groupHeadStyle}>
             <span className="hms-catalog-group-head">
               <strong>{provider.label || provider.id}</strong>
               <code>{provider.id}</code>
-              <span>{provider.modelCount ?? models.length} models</span>
+              <span>{countLabel}</span>
               {range && <span className="hms-catalog-range">range {range}</span>}
               <span className="hms-catalog-group-status"
                 data-auth={provider.authenticated === false ? "no" : "yes"}>
@@ -624,13 +719,17 @@ function ModelCatalogView({
     const key = "lab:" + lab;
     const expanded = expandedGroups.has(key);
     const shownRows = expanded ? rows : rows.slice(0, CATALOG_PAGE_SIZE);
+    const totalModels = labTotals.get(lab) ?? rows.length;
+    const countLabel = narrowing && rows.length !== totalModels
+      ? `${rows.length} of ${totalModels} models`
+      : `${totalModels} models`;
     return (
       <tbody key={key} data-lab-group={lab}>
         <tr className="hms-catalog-group">
-          <th scope="colgroup" colSpan={columnCount}>
+          <th scope="colgroup" colSpan={columnCount} style={groupHeadStyle}>
             <span className="hms-catalog-group-head">
               <strong>{label}</strong>
-              <span>{rows.length} models</span>
+              <span>{countLabel}</span>
             </span>
           </th>
         </tr>
@@ -651,7 +750,9 @@ function ModelCatalogView({
 
   const unsetupSummary = (
     <summary data-testid="catalog-unsetup-summary">
-      Not set up ({unsetupGroups.length}) — sign-in needed, not evidence of free access
+      Not set up ({unsetupGroups.length}
+      {narrowing && unsetupGroups.length !== notSetUpProviders.length
+        ? ` of ${notSetUpProviders.length}` : ""}) — sign-in needed, not evidence of free access
     </summary>
   );
   // `open` is passed only for the Needs-sign-in filter so that choosing it
@@ -793,7 +894,7 @@ function ModelCatalogView({
             </label>
             <label className="hms-catalog-filter">Lab
               <select data-testid="catalog-lab" aria-label="Filter by lab"
-                value={labFilter} onChange={(e) => setLabFilter(e.target.value)}>
+                value={labActive} onChange={(e) => setLabFilter(e.target.value)}>
                 <option value="all">All labs</option>
                 {labs.map(({ lab, label, count }) => (
                   <option key={lab} value={lab}>{label} ({count})</option>
@@ -802,7 +903,7 @@ function ModelCatalogView({
             </label>
             <label className="hms-catalog-filter">Provider
               <select data-testid="catalog-provider" aria-label="Filter by provider"
-                value={providerFilter} onChange={(e) => setProviderFilter(e.target.value)}>
+                value={providerActive} onChange={(e) => setProviderFilter(e.target.value)}>
                 <option value="all">All providers</option>
                 {setUpProviders.map((p) => (
                   <option key={p.id} value={p.id}>{p.label || p.id}</option>
@@ -871,11 +972,13 @@ function ModelCatalogView({
                 onClick={clearNarrowing}>Clear search and filters</button>
             )}
           </div>
-          <p className="hms-note hms-catalog-match-count" data-testid="catalog-match-count"
-            role="status" aria-live="polite">
-            Showing {visibleModels} of {stats.models} models
-            {narrowing ? " (filtered)" : ""}.
+          <p className="hms-note hms-catalog-match-count" data-testid="catalog-match-count">
+            {matchText}
           </p>
+          {/* Announcements wait for typing to settle: one sentence per query,
+              not one per keystroke (DESIGN §8). */}
+          <p style={CATALOG_SR_ONLY} role="status" aria-live="polite"
+            data-testid="catalog-match-announce">{settledMatchText}</p>
 
           {!hasRows ? (
             <div className="hms-catalog-panel" data-testid="catalog-view-empty-matches" role="status">
@@ -893,7 +996,7 @@ function ModelCatalogView({
             <>
               {mainSectionCount > 0 && (
                 <div className="hms-catalog-scroll" data-testid="catalog-scroll" role="region"
-                  aria-label="Scrollable model catalog" tabIndex={0}>
+                  aria-label="Scrollable model catalog" tabIndex={0} style={scrollStyle}>
                   <table className="hms-catalog-table" data-testid="catalog-table">
                     <caption style={CATALOG_SR_ONLY}>
                       Model catalog: providers, per-million-token prices, and configuration status
@@ -922,11 +1025,13 @@ function ModelCatalogView({
                 <details className="hms-catalog-unsetup" data-testid="catalog-unsetup" open={unsetupOpen}>
                   {unsetupSummary}
                   <p className="hms-note">
-                    These providers are authenticated: false in profile <code>{profileId}</code>.
-                    Their rows stay listed truthfully when expanded; nothing here is treated as free.
+                    These providers are not set up in profile <code>{profileId}</code> — no
+                    credential is configured, so nothing here can be routed to. Their rows stay
+                    listed truthfully when expanded; nothing here is treated as free.
                   </p>
                   <div className="hms-catalog-scroll" data-testid="catalog-unsetup-scroll"
-                    role="region" aria-label="Scrollable catalog for providers not set up" tabIndex={0}>
+                    role="region" aria-label="Scrollable catalog for providers not set up" tabIndex={0}
+                    style={scrollStyle}>
                     <table className="hms-catalog-table" data-testid="catalog-unsetup-table">
                       <caption style={CATALOG_SR_ONLY}>
                         Providers not set up in this profile
@@ -1597,6 +1702,11 @@ function ChangeEditor({
       return m.id.toLowerCase().includes(needle) || String(m.name || "").toLowerCase().includes(needle);
     });
   }, [modelRows, multiLab, needle, labPick, modelProvider]);
+  // The count is visible immediately; only the announcement waits for typing
+  // to settle, so a screen reader hears one sentence per query instead of one
+  // per keystroke.
+  const pickerMatchText = narrowed ? `${visibleRows.length} of ${modelRows.length} models` : "";
+  const settledPickerMatch = useSettledText(pickerMatchText);
   // Grouped only while several labs are on screen: one optgroup per lab for
   // "All labs". Once a lab is chosen its name is already in the Lab select, so
   // the rows are a flat leaf-named list. Counts are the rows on screen.
@@ -1718,6 +1828,14 @@ function ChangeEditor({
         : "");
   })();
 
+  // The picker, GET /models and the catalog's Use gate all read the CATALOG
+  // profile, while preview/apply write to the selected slots' profiles. When
+  // those differ, say so: a route that exists in the browsed profile may not
+  // exist in the one about to be written.
+  const targetProfiles = [...new Set(writableSelected.map((s) => s.profileId).filter(Boolean))].sort();
+  const catalogScopeDiffers = Boolean(catalog.data) && targetProfiles.length > 0 &&
+    !targetProfiles.includes(catalogProfileId);
+
   return (
     <section aria-label="Custom change editor" data-testid="change-editor" data-empty={!writableSelected.length}
       style={{ marginTop: 0 }}>
@@ -1741,6 +1859,13 @@ function ChangeEditor({
 
         {editor.changeType === "set" && (
           <div className="hms-route-picks" data-testid="route-picks">
+            {catalogScopeDiffers && (
+              <p className="hms-note hms-scope-note" role="note" data-testid="picker-scope-note">
+                Browsing the catalog for profile <code>{catalogProfileId}</code>; your targets are
+                in <code>{targetProfiles.join(", ")}</code>. A provider or model that profile does
+                not list will fail there, so check the route before previewing.
+              </p>
+            )}
             <label className="hms-route-field">Provider
               <select aria-label="New provider" data-testid="provider-select"
                 value={scalarOnly ? "openrouter" : (showProviderOther ? OTHER_VALUE : modelProvider)}
@@ -1807,10 +1932,12 @@ function ChangeEditor({
                   </label>
                 )}
                 {narrowed && (
-                  <span className="hms-note hms-picker-match" data-testid="picker-match-count" aria-live="polite">
-                    {visibleRows.length} of {modelRows.length} models
+                  <span className="hms-note hms-picker-match" data-testid="picker-match-count">
+                    {pickerMatchText}
                   </span>
                 )}
+                <span style={CATALOG_SR_ONLY} role="status" aria-live="polite"
+                  data-testid="picker-match-announce">{settledPickerMatch}</span>
               </div>
             )}
 

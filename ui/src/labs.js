@@ -30,28 +30,47 @@ const LAB_NAMES = {
   "deepseek-ai": "DeepSeek",
 };
 
+/** Model id with surrounding whitespace removed (never null/undefined). */
+export function normalizeModelId(modelId) {
+  return typeof modelId === "string" ? modelId.trim() : "";
+}
+
 /** Vendor namespace of a model id, or "" when the id carries none. */
 export function modelNamespace(modelId) {
-  const id = typeof modelId === "string" ? modelId.trim() : "";
+  const id = normalizeModelId(modelId);
   const cut = id.indexOf("/");
   return cut > 0 && cut < id.length - 1 ? id.slice(0, cut) : "";
 }
 
-/** Lab key for one model: its namespace, else the serving provider's slug. */
+/**
+ * Lab key for one model: its namespace, else the serving provider's slug.
+ *
+ * Keys are lower-cased so one lab is one key: a catalog that sends
+ * `Anthropic/x` and `anthropic/y` must not offer two options that both read
+ * "Anthropic". Model ids are case-insensitive in practice, so folding here
+ * loses nothing.
+ */
 export function labOf(providerId, modelId) {
-  return modelNamespace(modelId) || String(providerId || "").trim();
+  const lab = modelNamespace(modelId) || normalizeModelId(providerId);
+  return lab.toLowerCase();
 }
 
-/** Human label for a lab key; `providerLabel` names a provider-slug fallback. */
+/**
+ * Human label for a lab key; `providerLabel` names a provider-slug fallback.
+ * A known namespace always wins over a provider label: the brand belongs to
+ * the lab, not to whichever provider happens to serve it.
+ */
 export function labLabel(lab, providerLabel) {
-  const key = String(lab || "");
+  const key = String(lab || "").toLowerCase();
   if (LAB_NAMES[key]) return LAB_NAMES[key];
   return providerLabel ? String(providerLabel) : key;
 }
 
 /** Model id without its vendor namespace, for rows already grouped by lab. */
 export function modelLeaf(modelId) {
-  const id = String(modelId || "");
+  // Slice the trimmed id: a padded id must not render its own prefix because
+  // the namespace was measured on the trimmed string.
+  const id = normalizeModelId(modelId);
   const ns = modelNamespace(id);
   return ns ? id.slice(ns.length + 1) : id;
 }
@@ -65,7 +84,7 @@ export function isMultiLab(modelIds) {
   const ids = Array.isArray(modelIds) ? modelIds : [];
   const labs = new Set();
   for (const id of ids) {
-    const ns = modelNamespace(id);
+    const ns = modelNamespace(id).toLowerCase();
     if (!ns) return false;
     labs.add(ns);
   }
