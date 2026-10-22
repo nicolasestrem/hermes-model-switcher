@@ -214,8 +214,9 @@ when you rebuild the UI yourself.
    and the **Family**, **Task**, **Provider**, **Model**, and **State** filters, then
    select the slots you want to change. Filtering changes the view only; checkboxes
    choose edit targets. The selection summary includes selected slots hidden by filters.
-2. **Choose your routing.** Pick a provider, then a model from its dropdown (each
-   entry shows its list price), open **Browse model catalog** to compare options, or
+2. **Choose your routing.** Pick a provider, then a model from its dropdown (a
+   published rate appears beside priced models; unknown prices say so and are
+   never shown as free), open **Browse model catalog** to compare options, or
    choose **Other** to enter an exact provider/model pair for custom routes. Model IDs belong to their provider,
    so keep the pair together. For a provider that aggregates several vendors (62
    models across 19 labs, say), narrow with the `Lab` select and the `Filter models`

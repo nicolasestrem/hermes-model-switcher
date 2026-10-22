@@ -17,9 +17,10 @@
   pins both halves — rendered and announced text, and the unprefixed request
   body — against a `namespacedRoutes` mock fixture.
 - Typed inputs keep the `provider/model` syntax they parse: fallback-chain lines
-  and "Exact route to remove" split on the first slash, so a provider slug that
-  contains a colon (`custom:my-endpoint`) still works there and is not
-  reinterpreted as a displayed route.
+  split on the first slash, while "Exact route to remove" compares the whole
+  string against `provider/model` (exact identity, never a prefix or a split), so
+  a provider slug that contains a colon (`custom:my-endpoint`) still works there
+  and is not reinterpreted as a displayed route.
 
 ### Per-model capability flags in the catalog
 
@@ -88,6 +89,33 @@
   the existing catalog cache/fetch path, and is named in the provenance line.
   New `tests/catalog-filters.spec.mjs` and a realistic 54-provider/258-model
   fixture pin all of it.
+
+### Catalog: counts, filters and layout now match what is on screen
+
+- Filtered group headers state rows shown of models published (`4 of 67
+  models`) instead of the provider's catalog-wide total, and the lab groups,
+  the collapsed section's summary (`Not set up (2 of 45)`) and the match line
+  follow the same rule: with a filter that drops the not-set-up section, its
+  rows stop being counted.
+- A Lab filter now reaches signed-out providers that publish that lab's ids:
+  the section is decided by the rows a provider would render, not by comparing
+  a lab key to a provider slug, so `Anthropic (26)` no longer promises two rows
+  that never appear. `tests/fixtures/catalog-realistic.js` gained a
+  `signedOutModels` shape for it.
+- Switching the catalog profile clears filters and sort orders whose controls
+  the new profile does not offer — no stale price filter, price sort, lab,
+  provider, capability or `:free`-id filter behind an "All labs" label.
+- The editor names the case where the browsed catalog profile differs from the
+  profiles about to be written, the match count is announced once per settled
+  query rather than on every keystroke, and the not-set-up note says "not set
+  up" instead of quoting `authenticated: false`.
+- The catalog table fits its pane (it no longer forces 780px through a 708px
+  scroll region at 768px), keeps the Action column pinned when the pane is
+  narrower still, never breaks "unknown" mid-word, gives the Sort select room
+  and a gutter, pins group headers under the sticky column header, and the
+  editor rail gained the width its native selects need. The closed "Advanced:
+  remove a specific route" disclosure contributes only its summary line.
+  `tests/catalog-layout.spec.mjs` measures all of it at 768px and 1440px.
 
 ### Documentation
 
