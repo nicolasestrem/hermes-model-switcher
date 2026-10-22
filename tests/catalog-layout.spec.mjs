@@ -43,6 +43,11 @@ async function tableFaults(page) {
       escaped: escaped.length,
       useCount: uses.length,
       wrappedStatus,
+      wrapUseHeights: uses.map((cell) => {
+        const btn = cell.querySelector("button");
+        if (!btn) return null;
+        return Math.round(btn.getBoundingClientRect().height);
+      }).filter((v) => v !== null),
       horizontalOverflow: box.scrollWidth - box.clientWidth,
       documentOverflow: document.documentElement.scrollWidth - window.innerWidth,
     };
@@ -60,6 +65,8 @@ for (const width of [768, 1440]) {
     expect(faults.horizontalOverflow, "catalog table overflows its scroll box").toBeLessThanOrEqual(1);
     // Short status tokens never break mid-word.
     expect(faults.wrappedStatus).toEqual([]);
+    // The Use label must stay on one line, even at 768px.
+    for (const h of faults.wrapUseHeights) expect(h, "Use label height").toBeLessThanOrEqual(24);
     expect(faults.documentOverflow).toBeLessThanOrEqual(0);
   });
 }

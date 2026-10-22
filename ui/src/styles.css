@@ -855,6 +855,15 @@
   border-left: 1px solid var(--hms-border);
 }
 
+.hms-root .hms-catalog-table td[data-column="use"] button {
+  white-space: nowrap;
+  /* The generic button padding (14px horizontal) is sized for wide rails; in
+     the 40px pinned Action column it forces the single-word label to wrap
+     vertically at 768px. 4px keeps "Use" on one line inside the column. */
+  padding-inline: 4px;
+  min-width: 0;
+}
+
 .hms-root .hms-catalog-table tbody tr:hover td[data-column="use"] {
   background: color-mix(in srgb,
     var(--midground, #e6e8ee) 8%, var(--hms-catalog-sticky-bg, var(--hms-surface)));
