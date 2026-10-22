@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Catalog: price-cell prose wraps, prices never do
+
+- The catalog's price columns keep `white-space: nowrap` for numbers (`$10.00`),
+  but their prose fallbacks — `price not published`, `included in subscription`,
+  a pending note — now wrap. Left unwrapped, that sentence's full width became
+  the table's min-content: at 768px it pushed the table 39px past its 708px
+  scroll region whenever the font stack ran slightly wider, so
+  `tests/catalog-layout.spec.mjs` passed on the local font and failed on the CI
+  runners. Wrapping the prose leaves the table headroom at 768px under both
+  stacks while every number stays on one line.
+- `tests/models-catalog.spec.mjs` now states what each width owes: at 375px the
+  columns genuinely exceed the pane, so the region must overflow and the
+  keyboard must scroll it; at 768px the table must fit its region, so nothing
+  hides behind a scrollbar. The old single assertion demanded horizontal
+  scrolling at both widths and would have passed a table that overflowed at
+  768px.
+
 ### Route display: `provider · model`, never a doubled provider prefix
 
 - Configured, observed, summary, preview and announcement routes render

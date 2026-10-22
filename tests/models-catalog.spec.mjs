@@ -568,11 +568,22 @@ for (const width of [375, 768]) {
     expect(sectionBox.x).toBeGreaterThanOrEqual(0);
     expect(sectionBox.x + sectionBox.width).toBeLessThanOrEqual(width + 0.5);
 
+    // The scroll region is the table's own boundary: wherever the columns do
+    // not fit, it scrolls sideways (keyboard included) instead of the page;
+    // where they do fit, nothing is hidden behind a scrollbar. 375px is
+    // narrower than the columns' minimums, 768px fits them.
     const region = page.getByTestId("catalog-scroll");
-    await region.focus();
-    await page.keyboard.press("ArrowRight");
-    await expect.poll(() => region.evaluate((node) => node.scrollLeft)).toBeGreaterThan(0);
-    await region.evaluate((node) => { node.scrollLeft = 0; });
+    const overflow = await region.evaluate((node) => node.scrollWidth - node.clientWidth);
+    if (width === 375) {
+      expect(overflow, "the table must overflow the 375px region").toBeGreaterThan(1);
+      await region.focus();
+      await page.keyboard.press("ArrowRight");
+      await expect.poll(() => region.evaluate((node) => node.scrollLeft)).toBeGreaterThan(0);
+      await region.evaluate((node) => { node.scrollLeft = 0; });
+    } else {
+      // The whole table is visible at 768px, so there is nothing to scroll to.
+      expect(overflow, "the table must fit its region at 768px").toBeLessThanOrEqual(1);
+    }
 
     if (width === 375) {
       const toggleCols = await page.getByTestId("catalog-free-only").evaluate((node) => {

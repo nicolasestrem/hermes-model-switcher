@@ -884,6 +884,19 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* A price cell holds one of two very different things: a number ("$10.00",
+   which must stay on one line) or a prose fallback ("price not published",
+   "included in subscription"). Left nowrap, the sentence's full unwrapped
+   width becomes the table's min-content — at 768px that pushed the table 39px
+   past its 708px scroll region under the runner's slightly wider font stack,
+   while the same fixture passed on the narrower local font. Numbers keep
+   nowrap; prose wraps, so the column stays narrow under either font. */
+.hms-root .hms-catalog-price .hms-catalog-unknown,
+.hms-root .hms-catalog-price .hms-catalog-included,
+.hms-root .hms-catalog-price .hms-catalog-pending {
+  white-space: normal;
+}
+
 .hms-root .hms-catalog-model-label {
   display: block;
   overflow-wrap: anywhere;
