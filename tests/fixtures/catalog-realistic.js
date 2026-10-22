@@ -128,9 +128,12 @@ function notSetUpEntry(slug) {
 /**
  * Build the fixture. `prices: true` flips a few rows to priced/free so the
  * price controls have something honest to act on; the default (like the live
- * profile) has no priced or free model at all.
+ * profile) has no priced or free model at all. `signedOutModels: true` gives
+ * one `authenticated: false` provider two `anthropic/*` ids — the shape a
+ * pasted/aggregated catalog can have, and the only way the Lab filter and the
+ * not-set-up section can be asked the same question.
  */
-export function realisticFixture({ prices = false } = {}) {
+export function realisticFixture({ prices = false, signedOutModels = false } = {}) {
   const setUp = SET_UP_SPECS.map((spec, i) => providerEntry(spec, buildModels(spec, i * 3)));
   const notSetUp = NOT_SET_UP_SLUGS.map(notSetUpEntry);
 
@@ -141,6 +144,17 @@ export function realisticFixture({ prices = false } = {}) {
   for (let position = 0; position < setUp.length + notSetUp.length; position += 1) {
     if (SET_UP_HOST_POSITIONS.includes(position)) hostOrder.push(setUp[setUpIndex++]);
     else hostOrder.push(notSetUp[notSetUpIndex++]);
+  }
+
+  if (signedOutModels) {
+    // A signed-out provider that still lists a vendor's ids: a pasted or
+    // aggregated catalog can publish rows before any credential exists. Its
+    // rows are unroutable, not invisible — Lab = anthropic must find them.
+    const azure = hostOrder.find((p) => p.id === "azure-openai");
+    azure.models = [
+      { id: "anthropic/claude-sonnet-5", label: "Claude Sonnet 5 (Azure)", pricingStatus: "unknown", cost: null },
+      { id: "anthropic/claude-haiku-5", label: "Claude Haiku 5 (Azure)", pricingStatus: "unknown", cost: null },
+    ];
   }
 
   if (prices) {
@@ -213,5 +227,12 @@ export const REALISTIC = {
   notSetUpProviderCount: NOT_SET_UP_SLUGS.length,
   modelCount: SET_UP_SPECS.reduce((n, spec) => n + spec.count, 0),
   opencodeGoModels: 46,
-  opencodeGoHostIndex: SET_UP_HOST_POSITIONS[6],
+};
+
+// The one signed-out provider `realisticFixture({ signedOutModels: true })`
+// gives published rows, and how many it gets.
+export const SIGNED_OUT_PUBLISHER = {
+  providerId: "azure-openai",
+  lab: "anthropic",
+  modelCount: 2,
 };

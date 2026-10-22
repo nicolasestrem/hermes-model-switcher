@@ -46,3 +46,40 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 768, height: 900 
     await page.screenshot({ path: `test-results/picker-${viewport.width}.png`, fullPage: false });
   });
 }
+
+test("the editor rail has room for the filter placeholder and long ids at 1440px", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/fixture.html");
+  await expect(providerSelect(page)).toBeVisible();
+  await installPickerMultilab(page);
+  await ensureCatalog(page);
+  await providerSelect(page).selectOption("openrouter");
+
+  const geometry = await page.evaluate(() => {
+    const editor = document.querySelector('[data-testid="change-editor"]');
+    const filter = document.querySelector('[data-testid="model-filter"]');
+    return {
+      editor: editor.getBoundingClientRect().width,
+      filter: filter.getBoundingClientRect().width,
+      wide: document.querySelector(".hms-workspace").classList.contains("hms-wide"),
+      documentOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  });
+  expect(geometry.wide).toBe(true);
+  // The rail keeps its DESIGN.md bound (~360px; usability-polish asserts
+  // <= 380). Lab and Filter stack inside it instead of sharing a row, so the
+  // filter gets the full rail width and "Match a model id or name" is not clipped.
+  expect(geometry.editor).toBeLessThanOrEqual(380);
+  expect(geometry.filter).toBeGreaterThanOrEqual(240);
+  expect(geometry.documentOverflow).toBeLessThanOrEqual(0);
+
+  // A namespaced id is never lost to the narrow control: the Route line shows
+  // it whole and wraps instead of clipping.
+  await modelSelect(page).selectOption("anthropic/claude-opus-5.5");
+  const route = page.getByTestId("route-summary");
+  await expect(route).toContainText("anthropic/claude-opus-5.5");
+  const line = await route.evaluate((node) => ({
+    scrollWidth: node.scrollWidth, clientWidth: node.clientWidth,
+  }));
+  expect(line.scrollWidth).toBeLessThanOrEqual(line.clientWidth + 1);
+});
